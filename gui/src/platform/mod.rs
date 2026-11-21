@@ -228,10 +228,10 @@ impl Finder for Shown {
 /// (the service lists the action, and the file is on disk); a failure shows in the status bar.
 pub fn show_file(s: &mut Phantom, how: Show) {
     let item = match how {
-        Show::Open => crate::model::FileItem::Open,
-        Show::Reveal => crate::model::FileItem::Reveal,
+        Show::Open => crate::commands::OnFiles::Open,
+        Show::Reveal => crate::commands::OnFiles::Reveal,
     };
-    if !crate::model::file_items(&s.table, &s.torrents, &s.pane, s.target_there).contains(&item) {
+    if !crate::commands::on_files(s).contains(&item) {
         return;
     }
     let Some(path) = crate::model::file_target(&s.table, &s.torrents, &s.pane) else { return };

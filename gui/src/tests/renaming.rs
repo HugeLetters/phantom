@@ -109,7 +109,7 @@ fn return_renames_it_and_undo_renames_it_back() {
     let names: Vec<&str> = rt.state.torrents.iter().map(|t| t.display_name()).collect();
     assert_eq!(names, ["a", "Album", "Film.mkv"], "sorted by its new name");
 
-    shortcut(&mut rt, Command::Undo);
+    shortcut(&mut rt, InApp::Undo);
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 2).display_name(), "Movie.mkv");
     assert!(texts(&rt, "details-original").is_empty(), "no original name once it's its own again");
@@ -194,7 +194,7 @@ fn an_undo_with_something_at_the_old_name_is_refused() {
     rt.paste("Live");
     enter(&mut rt);
     assert_eq!(find_torrent(&rt, 1).display_name(), "Live");
-    shortcut(&mut rt, Command::Undo);
+    shortcut(&mut rt, InApp::Undo);
     settle(&mut rt);
     assert_eq!(find_torrent(&rt, 1).display_name(), "Live", "not renamed back");
     let renamed = rt.state.bar.entries().iter().find(|e| e.notice.short == "Renamed").expect("its notice stays").id;

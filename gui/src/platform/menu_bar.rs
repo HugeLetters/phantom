@@ -3,7 +3,9 @@
 //! Edit ▸ Undo is Rune's standard item (`App::standard_menus`), which hands ⌘Z to the window in
 //! front as a key, clicked or pressed: a focused field's own undo, else the shortcut table's Undo
 //! (#150), or in Settings the main window's, which it's handed to (#221, #257). Its title names what
-//! it takes back there ([`name_undo`]), whichever window is in front.
+//! it takes back there ([`name_undo`]), whichever window is in front. Torrent commands aren't in the
+//! menu bar yet; an item for one would take its name and key from the command list
+//! (`commands::Spec`), as the menus do.
 
 use rune::MenuItem;
 

@@ -10,6 +10,7 @@
 
 mod bar;
 mod changes;
+mod commands;
 mod menu;
 mod model;
 mod notice;
@@ -323,7 +324,7 @@ fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Command('w') if s.sheet.as_ref().is_some_and(|sheet| sheet.edit.is_some()) => model::settings::presets::close(s),
         Key::Command('w') => model::settings::close(s),
         Key::Command('q') => tx.quit(),
-        _ if shortcuts::command_of(ev) == Some(shortcuts::Command::Undo) => s.main.post(|s, _| changes::press(s)),
+        _ if shortcuts::command_of(ev) == Some(commands::InApp::Undo.into()) => s.main.post(|s, _| changes::press(s)),
         _ => return false,
     }
     true

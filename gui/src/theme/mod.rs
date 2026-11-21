@@ -61,27 +61,33 @@ pub struct Built {
 /// and handlers through it.
 pub type DetailsScreen = Rc<dyn Fn(&Phantom, &Ui, &TorrentInfo) -> El>;
 
+/// The command palette (#33), while it's open: what it draws goes into the overlays' layer. Its
+/// third argument is the window's size, when known.
+pub type PaletteScreen = Rc<dyn Fn(&Phantom, &Ui, Option<(f32, f32)>, &mut Vec<El>)>;
+
 /// The screens one theme lays out itself, built like its blocks; `None` is its parent's. A
 /// screen override shows the same data, or less, never something else.
 #[derive(Clone, Default)]
 pub struct ScreenOverrides {
     pub details: Option<DetailsScreen>,
+    pub palette: Option<PaletteScreen>,
 }
 
 /// Every overridable screen, as a look lays it out.
 #[derive(Clone)]
 pub struct Screens {
     pub details: DetailsScreen,
+    pub palette: PaletteScreen,
 }
 
 impl Screens {
     /// The screens as `views` lays them out.
     fn phantom() -> Screens {
-        Screens { details: Rc::new(crate::views::details_pane) }
+        Screens { details: Rc::new(crate::views::details_pane), palette: Rc::new(crate::views::palette::overlay) }
     }
 
     fn over(self, theme: &ScreenOverrides) -> Screens {
-        Screens { details: theme.details.clone().unwrap_or(self.details) }
+        Screens { details: theme.details.clone().unwrap_or(self.details), palette: theme.palette.clone().unwrap_or(self.palette) }
     }
 }
 

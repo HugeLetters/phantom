@@ -27,6 +27,7 @@ use proto::Leave;
 use undone::Undos;
 
 pub mod moving;
+pub mod palette;
 pub mod picker;
 pub mod renaming;
 pub mod settings;
@@ -56,6 +57,9 @@ pub struct Phantom {
     /// their shortcut was last pressed ([`look_at_disk`]): the menus offer them only if so, and
     /// never look again while they're drawn (#307).
     pub target_there: bool,
+    /// The same for the one selected file, in the details pane's Files list ([`look_at_file`]): the
+    /// file menu offers Open and Reveal in Finder only if so, and the palette too (#33).
+    pub file_there: bool,
     /// Which menu is open.
     pub menu: Menu,
     pub connection: Connection,
@@ -102,6 +106,10 @@ pub struct Phantom {
     pub clash: Option<moving::Clash>,
     /// A torrent's name being edited in its row (#331).
     pub rename: renaming::Rename,
+    /// The command palette (⌘P, #33).
+    pub palette: palette::Palette,
+    /// The commands the screen shown offers, as its views registered them (#33).
+    pub mounted: crate::commands::Mounted,
     /// A Move of a selection, while its clash dialogs ask: nothing is sent till they're answered.
     pub asking: Option<moving::Asking>,
 }
@@ -319,6 +327,7 @@ impl Phantom {
             // brings the system's.
             finder: Box::new(Shown::default()),
             target_there: false,
+            file_there: false,
             menu: Menu::Closed,
             connection: Connection::Connecting,
             bar: Bar::default(),
@@ -342,6 +351,8 @@ impl Phantom {
             changes: crate::changes::Changes::default(),
             clash: None,
             rename: Default::default(),
+            palette: Default::default(),
+            mounted: Default::default(),
             asking: None,
         }
     }
@@ -476,72 +487,21 @@ pub fn selected_for(table: &TableState, torrents: &[TorrentInfo], action: Action
     torrents.iter().filter(|t| t.actions.does(action) && selected.contains(&t.id)).map(|t| t.id).collect()
 }
 
-/// What a row's context menu can offer, in the order it lists them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RowItem {
-    /// What the service lists for the torrent: Open, Reveal, Move to…, Rename…, Pause, Resume, Check, Cancel check, Remove or
-    /// Delete.
-    Do(Action),
-    /// Not the service's to decide: the link is made from what the listing has.
-    CopyMagnet,
-}
-
-/// What the menu offers for the selection: the actions the service lists, and no others (Pause,
-/// Resume and Check for those they apply to; Remove and Delete only when they apply to every
-/// selected torrent, as they act on all; Open, Reveal and Rename… for exactly one torrent, Move to… for any
-/// number), and Copy magnet link for exactly one.
-pub fn row_items(table: &TableState, torrents: &[TorrentInfo], there: bool) -> Vec<RowItem> {
-    let ids = selected_torrents(table);
-    let selected: Vec<&TorrentInfo> = torrents.iter().filter(|t| ids.contains(&t.id)).collect();
-    let any = |action| selected.iter().any(|t| t.actions.does(action));
-    let all = |action| !selected.is_empty() && selected.iter().all(|t| t.actions.does(action));
-    let single = selected.len() == 1;
-    let mut items = Vec::new();
-    items.extend(
-        [Action::Resume, Action::Pause, Action::Check, Action::CancelCheck, Action::CancelMove]
-            .into_iter()
-            .filter(|a| any(*a))
-            .map(RowItem::Do),
-    );
-    // Move to… is offered when any selected torrent can move (#270): those that can't are skipped.
-    items.extend(
-        [Action::Open, Action::Reveal, Action::Move, Action::Rename]
-            .into_iter()
-            .filter(|a| any(*a) && (single || *a == Action::Move) && (there || !matches!(a, Action::Open | Action::Reveal)))
-            .map(RowItem::Do),
-    );
-    items.extend(single.then_some(RowItem::CopyMagnet));
-    items.extend([Action::Remove, Action::Delete].into_iter().filter(|a| all(*a)).map(RowItem::Do));
-    items
-}
-
 /// Closes the open menu once there's nothing for it to act on: the selection is gone.
 pub fn close_empty_menu(s: &mut Phantom) {
     let empty = match s.menu {
         Menu::Closed => return,
-        Menu::Open(MenuOpen::Row { .. }) => row_items(&s.table, &s.torrents, s.target_there).is_empty(),
-        Menu::Open(MenuOpen::File { .. }) => file_items(&s.table, &s.torrents, &s.pane, s.target_there).is_empty(),
+        Menu::Open(MenuOpen::Row { .. }) => crate::commands::on_torrents(s).is_empty(),
+        Menu::Open(MenuOpen::File { .. }) => crate::commands::on_files(s).is_empty(),
     };
     if empty {
         s.menu = s.menu.then(Event::Close);
     }
 }
 
-/// What the file menu, and the shortcuts while the file list has focus, can do to the selected
-/// files of the torrent the pane shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FileItem {
-    Open,
-    Reveal,
-    /// Sets every selected file to this priority; checked while they all have it.
-    Priority(Priority),
-    /// Sets them Off, then moves them to the Trash.
-    MoveToTrash,
-}
-
 /// The torrent the pane shows and its selected files, as the pane has them: nothing selected, or
 /// no pane, is none.
-fn selected_in_pane<'a>(
+pub(crate) fn selected_in_pane<'a>(
     table: &TableState,
     torrents: &'a [TorrentInfo],
     pane: &'a DetailsPane,
@@ -551,27 +511,6 @@ fn selected_in_pane<'a>(
     let selected = selected_files(pane);
     let files: Vec<&File> = details.files.iter().filter(|f| selected.contains(&f.index)).collect();
     (!files.is_empty()).then_some((torrent, files))
-}
-
-/// What the file menu offers for the selected files: only what the service lists for the torrent
-/// (Set priority, and Move to Trash, which does what Set priority does, while a selected file is on
-/// disk: it moves only those), and Open and Reveal for exactly one file, that's on disk, as the
-/// service says and as `there` says: the disk looked at when the menu opened (#307). On disk is
-/// the service's word for it (#276): what's at the file's path, not what it downloaded. A file it
-/// gets is there as soon as the torrent is added (librqbit makes it, empty), so Open works on one
-/// with no progress yet; one in the Trash, deleted, or set Off and never made isn't.
-pub fn file_items(table: &TableState, torrents: &[TorrentInfo], pane: &DetailsPane, there: bool) -> Vec<FileItem> {
-    let Some((torrent, files)) = selected_in_pane(table, torrents, pane) else { return Vec::new() };
-    let single = there && matches!(&files[..], [f] if on_disk(f));
-    let mut items = Vec::new();
-    items.extend((single && torrent.actions.does(Action::Open)).then_some(FileItem::Open));
-    items.extend((single && torrent.actions.does(Action::Reveal)).then_some(FileItem::Reveal));
-    if torrent.actions.does(Action::SetPriority) {
-        items.extend([Priority::Normal, Priority::Off].map(FileItem::Priority));
-    }
-    let any_on_disk = files.iter().any(|f| on_disk(f));
-    items.extend((any_on_disk && torrent.actions.does(Action::TrashFiles)).then_some(FileItem::MoveToTrash));
-    items
 }
 
 /// Whether file `f` is at its path, as the service last looked, and not missing.
@@ -591,6 +530,12 @@ pub fn common_priority(table: &TableState, torrents: &[TorrentInfo], pane: &Deta
 /// another until the next (#307).
 pub fn look_at_disk(s: &mut Phantom, target: Option<PathBuf>) {
     s.target_there = target.is_some_and(|p| s.finder.exists(&p));
+}
+
+/// [`look_at_disk`] for the file Open and Reveal would show in the Files list: the only one selected.
+pub fn look_at_file(s: &mut Phantom) {
+    let target = file_target(&s.table, &s.torrents, &s.pane);
+    s.file_there = target.is_some_and(|p| s.finder.exists(&p));
 }
 
 /// Where the only selected file is on disk: the torrent's location for a single-file torrent,
@@ -1078,7 +1023,7 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
     let seq = happened.seq;
     undo.hint = Some(Rc::new(move |s: &Phantom| {
         let next = s.changes.state.top().and_then(crate::changes::machine::Change::entry);
-        (next == Some(seq)).then(|| crate::shortcuts::hint(crate::shortcuts::Command::Undo))
+        (next == Some(seq)).then(|| crate::shortcuts::hint(crate::commands::InApp::Undo))
     }));
     undo.off = Some(Rc::new(move |s: &Phantom| off.off(&s.undo, &s.undos).map(|why| display::undo_off(&why))));
     let count = match action {

@@ -197,6 +197,12 @@ enum Action {
     },
     /// Double-click a row: it's selected, and opened if it can be.
     DoubleClick(TorrentId),
+    /// ⌘P: the command palette lists what the selection's row menu offers, then the app's commands
+    /// (Undo named after what it takes back, while there is something); filtered by `query`'s
+    /// letters, if any; then Escape closes it, nothing run, the selection kept.
+    Palette {
+        query: Option<&'static str>,
+    },
     Pause,
     Resume,
     Check,
@@ -717,6 +723,8 @@ impl ReferenceStateMachine for Screen {
             4 => id.clone().prop_map(Action::Select),
             3 => (id.clone(), leave, any::<bool>()).prop_map(|(id, leave, small)| Action::RowMenu { id, leave, small }),
             2 => id.clone().prop_map(Action::DoubleClick),
+            2 => proptest::option::weighted(0.4, proptest::sample::select(vec!["re", "ren", "p", "del", "undo", "zz"]))
+                .prop_map(|query| Action::Palette { query }),
             2 => Just(Action::Pause),
             2 => Just(Action::Resume),
             2 => Just(Action::Check),
@@ -970,7 +978,7 @@ impl StateMachineTest for Screen {
             Action::Undo(Which::Settings) => {
                 d.front(Which::Settings);
                 d.settings.update(|_, tx| tx.blur());
-                d.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
+                d.key(shortcuts::keys(crate::commands::InApp::Undo)[0].event());
                 // Settings takes the key, and hands it to the main window.
                 d.frame(0.0);
             }
@@ -1016,6 +1024,21 @@ impl StateMachineTest for Screen {
                 let expected: Vec<NoticeId> = before.iter().copied().filter(|i| *i != id).collect();
                 assert_eq!(error_ids(&rt.state), expected, "× dismisses exactly the notice shown, and no other");
                 close_popover(rt);
+            }
+            Action::Palette { query } => {
+                let selected = selected_torrents(&rt.state.table);
+                rt.key(KeyEvent { key: Key::Command('p'), mods: Mods { cmd: true, ..Default::default() } });
+                step(rt);
+                assert!(rt.state.palette.is_open(), "⌘P opens the palette");
+                for c in query.unwrap_or("").chars() {
+                    rt.key(KeyEvent { key: Key::Text(c.to_string()), mods: Mods::default() });
+                }
+                step(rt);
+                check_palette(&rt.state, &palette_labels(rt), query.unwrap_or(""));
+                rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+                step(rt);
+                assert!(!rt.state.palette.is_open(), "Escape closes it");
+                assert_eq!(selected_torrents(&rt.state.table), selected, "and only it");
             }
             // With no field focused: a focused field takes Escape itself.
             Action::Escape => {
@@ -1109,7 +1132,7 @@ impl StateMachineTest for Screen {
                         rt.key(shortcuts::keys(command)[0].event());
                         step(rt);
                         // ⌫ removes at once, so the item was Remove.
-                        if command == shortcuts::Command::Remove {
+                        if command == crate::commands::OnTorrents::Remove.into() {
                             assert!(label.starts_with("Remove"), "⌫ shows by Remove, not {label:?}");
                         }
                     }
@@ -1202,7 +1225,7 @@ impl StateMachineTest for Screen {
             Action::Undo(which) => {
                 if *which == Which::Main {
                     rt.update(|_, tx| tx.blur());
-                    rt.key(shortcuts::keys(shortcuts::Command::Undo)[0].event());
+                    rt.key(shortcuts::keys(crate::commands::InApp::Undo)[0].event());
                 }
                 step(rt);
                 let short = newest_told(&rt.state).map(|n| n.short.clone()).unwrap_or_default();
@@ -1235,14 +1258,14 @@ impl StateMachineTest for Screen {
                     step(rt);
                 }
                 rt.update(|_, tx| tx.blur());
-                rt.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
+                rt.key(shortcuts::keys(crate::commands::OnTorrents::Remove)[0].event());
                 step(rt);
                 assert_eq!(rt.state.table.selected_len(), 0, "⌫ removes what is selected, and the selection goes with it");
             }
             // ⌫, with focus off the link field: the selection is removed at once, with no menu.
             Action::Remove => {
                 rt.update(|_, tx| tx.blur());
-                rt.key(shortcuts::keys(shortcuts::Command::Remove)[0].event());
+                rt.key(shortcuts::keys(crate::commands::OnTorrents::Remove)[0].event());
                 step(rt);
                 assert_eq!(rt.state.table.selected_len(), 0, "⌫ removes what is selected, and the selection goes with it");
             }
@@ -1861,9 +1884,65 @@ fn check_row_menu(s: &Phantom, drawn: &[Option<String>]) -> Vec<String> {
     drawn.iter().flatten().cloned().collect()
 }
 
+/// What the open palette lists, in order.
+fn palette_labels(rt: &Runtime<Phantom>) -> Vec<String> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.role == "option" && e.path.contains("palette-panel"))
+        .filter_map(|e| e.label)
+        .collect()
+}
+
+/// Checks the palette lists exactly what it must for `query`: of the selected torrent's row menu
+/// items (as `check_row_menu` has them), the selected files' commands and the app's, those whose label has the query's
+/// letters in order, each once.
+fn check_palette(s: &Phantom, listed: &[String], query: &str) {
+    let mut offered: Vec<String> = Vec::new();
+    if let Some(t) = details_torrent(&s.table, &s.torrents) {
+        let delete = t.actions.does(Do::Delete);
+        for (label, action, _) in MENU_ITEMS {
+            if action.is_none_or(|a| t.actions.does(a)) && (action.is_some_and(|a| matches!(a, Do::Open | Do::Reveal)) <= s.target_there) {
+                offered.push(match label {
+                    "Remove" => client::display::remove_choice(1, delete),
+                    "Delete" => client::display::delete_choice(1),
+                    other => other.into(),
+                });
+            }
+        }
+    }
+    // With files selected in the Files list: the file menu's items, worded as it words them.
+    // Worked out here from the pane's files and the torrent's actions, not from `commands`.
+    let torrent = details_torrent(&s.table, &s.torrents);
+    if let (Some(t), Some(details)) = (torrent, s.pane.details.as_ref()) {
+        let selected = crate::model::selected_files(&s.pane);
+        let files: Vec<&proto::File> = details.files.iter().filter(|f| t.id == details.id && selected.contains(&f.index)).collect();
+        let on_disk = |f: &&proto::File| f.on_disk && !f.missing;
+        let only_on_disk = s.file_there && matches!(files.as_slice(), [f] if on_disk(f));
+        if !files.is_empty() {
+            let names = [
+                (only_on_disk && t.actions.does(Do::Open), "Open"),
+                (only_on_disk && t.actions.does(Do::Reveal), "Reveal in Finder"),
+                (t.actions.does(Do::SetPriority), "Normal"),
+                (t.actions.does(Do::SetPriority), "Off"),
+                (files.iter().any(on_disk) && t.actions.does(Do::TrashFiles), "Move to Trash"),
+            ];
+            offered.extend(names.into_iter().filter(|(shown, _)| *shown).map(|(_, name)| name.to_owned()));
+        }
+    }
+    offered.push("Add file…".into());
+    if s.changes.state.top().is_some() {
+        offered.push(crate::changes::menu_title(s));
+    }
+    let mut want: Vec<&String> = offered.iter().filter(|l| crate::model::palette::score(query, l).is_some()).collect();
+    let mut got: Vec<&String> = listed.iter().collect();
+    want.sort();
+    got.sort();
+    assert_eq!(got, want, "the palette for {query:?}");
+}
+
 /// Each item of the open menu `menu`, by label, with the shortcut it shows, if any: the texts the
 /// item draws besides its label.
-fn menu_hints(rt: &Runtime<Phantom>, menu: &str) -> Vec<(String, Option<String>)> {
+pub(super) fn menu_hints(rt: &Runtime<Phantom>, menu: &str) -> Vec<(String, Option<String>)> {
     let elements = rt.elements();
     elements
         .iter()
@@ -1894,13 +1973,13 @@ pub(super) fn assert_labels_aligned(rt: &Runtime<Phantom>, menu: &str) {
 }
 
 /// The shortcut that does what the row menu's item labelled `label` does.
-fn item_shortcut(label: &str) -> Option<shortcuts::Command> {
-    use shortcuts::Command;
+fn item_shortcut(label: &str) -> Option<crate::commands::OnTorrents> {
+    use crate::commands::OnTorrents;
     match label {
-        "Open" => Some(Command::Open),
-        "Reveal in Finder" => Some(Command::Reveal),
-        l if l.starts_with("Remove") => Some(Command::Remove),
-        l if l.starts_with("Delete") => Some(Command::Delete),
+        "Open" => Some(OnTorrents::Open),
+        "Reveal in Finder" => Some(OnTorrents::Reveal),
+        l if l.starts_with("Remove") => Some(OnTorrents::Remove),
+        l if l.starts_with("Delete") => Some(OnTorrents::Delete),
         _ => None,
     }
 }

@@ -15,6 +15,8 @@ use crate::platform::open_torrent;
 use crate::ui::{Table, TableColumn, Tone, Ui};
 
 pub fn torrent_table(s: &Phantom, ui: &Ui, overlays: &mut Vec<El>) -> El {
+    // The list offers the torrent commands, for its selection.
+    s.mounted.offer(crate::commands::OnTorrents::ALL);
     // Under the rename field, while what was typed in it isn't a name: the field's own place.
     let refused = s.rename.note().map(display::name_problem);
     let close = |s: &mut Phantom| s.rename.refused = None;

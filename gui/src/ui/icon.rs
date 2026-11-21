@@ -20,6 +20,35 @@ pub enum Icon {
     Dark,
     /// A circle with its left half filled: both Appearances.
     Both,
+    // The commands' (`commands`), one each; a file command shares its torrent twin's.
+    /// A play triangle: Resume.
+    Resume,
+    /// Two bars: Pause.
+    Pause,
+    /// A page with a check: Check (verify the files).
+    Verify,
+    /// A circle with a cross: Cancel check.
+    CancelCheck,
+    /// A folder with a cross: Cancel move.
+    CancelMove,
+    /// A box with an arrow out of it: Open.
+    Open,
+    /// A folder with a magnifier: Reveal in Finder.
+    Reveal,
+    /// A folder with an arrow into it: Move to….
+    MoveTo,
+    /// A pencil: Rename….
+    Rename,
+    /// A list with a line taken off it: Remove (keep files).
+    Remove,
+    /// A bin: Delete, and Move to Trash of files.
+    Trash,
+    /// A page with a plus: Add file….
+    AddFile,
+    /// An arrow turning back: Undo.
+    Undo,
+    /// A magnifier: the command palette's field.
+    Search,
 }
 
 every!(Icon {
@@ -29,6 +58,20 @@ every!(Icon {
     Icon::Light => [Icon::Light],
     Icon::Dark => [Icon::Dark],
     Icon::Both => [Icon::Both],
+    Icon::Resume => [Icon::Resume],
+    Icon::Pause => [Icon::Pause],
+    Icon::Verify => [Icon::Verify],
+    Icon::CancelCheck => [Icon::CancelCheck],
+    Icon::CancelMove => [Icon::CancelMove],
+    Icon::Open => [Icon::Open],
+    Icon::Reveal => [Icon::Reveal],
+    Icon::MoveTo => [Icon::MoveTo],
+    Icon::Rename => [Icon::Rename],
+    Icon::Remove => [Icon::Remove],
+    Icon::Trash => [Icon::Trash],
+    Icon::AddFile => [Icon::AddFile],
+    Icon::Undo => [Icon::Undo],
+    Icon::Search => [Icon::Search],
 });
 
 impl Ui {
