@@ -1210,8 +1210,9 @@ fn looks_changed(s: &mut SettingsWindow) {
 }
 
 /// Shows the theme setting `key` of the sheet's editor with a control for each Appearance, or one
-/// for both again.
+/// for both again. A colour being typed is applied first: its field goes with the split (#332).
 pub fn split_theme(s: &mut SettingsWindow, key: &'static str, split: bool) {
+    follow_focus(s);
     let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) else { return };
     match split {
         true => editor.split.insert(key),

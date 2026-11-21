@@ -780,7 +780,12 @@ impl ReferenceStateMachine for Sheet {
                 look.settings.iter().any(|(setting, _)| matches!(setting.kind, Kind::Colour { .. }))
             })
         };
-        let coloured = (coloured(), coloured()).prop_map(|(light, dark)| LookPreset { light, dark });
+        // Both halves alike sometimes, so a colour's field is one for both, and Split meets it
+        // (#332).
+        let coloured = prop_oneof![
+            (coloured(), coloured()).prop_map(|(light, dark)| LookPreset { light, dark }),
+            coloured().prop_map(|look| LookPreset { light: look.clone(), dark: look }),
+        ];
         let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset(), 3 => coloured];
         // Some saved, one of them the active one sometimes.
         // Some start with Settings open on Appearance, as after ⌘, and a click on its tab, and some
@@ -2649,4 +2654,58 @@ fn shown_label(m: &Model, key: &str) -> &'static str {
         }
         _ => unreachable!(),
     }
+}
+
+/// Settings on the Active look's sheet, its theme the sample one with Accent black in both halves,
+/// so its field is one for both.
+fn accent_sheet() -> Desk {
+    let mut look = crate::theme::ThemeLook::defaults(crate::theme::find("sample").unwrap());
+    let _ = look.settings.set("accent", Value::Colour(Rgb([0, 0, 0])));
+    let mut d = desk(MemoryService::new());
+    *d.main.state.looks.borrow_mut() = Looks::new(LookPreset { light: look.clone(), dark: look }, |_: &LookPreset| {});
+    d.main.set_viewport((960.0, 900.0), 2.0);
+    d.settings.set_viewport((600.0, 900.0), 2.0);
+    d.settle();
+    open_with_shortcut(&mut d);
+    press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == Tab::Appearance).unwrap()));
+    press(&mut d, "active-edit");
+    d
+}
+
+/// Types `text` into the field keyed `field`, leaving it focused.
+fn type_into(d: &mut Desk, field: &str, text: &str) {
+    press(d, field);
+    d.settings.key(select_all());
+    d.settings.paste(text);
+}
+
+/// The Accent of each half of the Active look.
+fn accents(d: &Desk) -> [Option<Value>; 2] {
+    let looks = d.main.state.looks.borrow();
+    Appearance::BOTH.map(|a| looks.preset().get(a).settings.get("accent"))
+}
+
+/// Split, pressed while a colour is typed into the field for both, applies the colour first, as
+/// leaving the field does, and ⌘Z then takes it back (#332). The field went with the split, and
+/// the colour with it: Edit ▸ Undo named the change before.
+#[test]
+fn split_applies_the_colour_being_typed_first() {
+    let mut d = accent_sheet();
+    type_into(&mut d, "edit-accent-both", "#3366ff");
+    press(&mut d, "edit-accent-split");
+    let blue = Some(Value::Colour(Rgb([0x33, 0x66, 0xff])));
+    assert_eq!(accents(&d), [blue, blue], "both halves");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Accent Change");
+}
+
+/// So does Join, the colour typed into one half's field applied to that half.
+#[test]
+fn join_applies_the_colour_being_typed_first() {
+    let mut d = accent_sheet();
+    press(&mut d, "edit-accent-split");
+    type_into(&mut d, "edit-accent-light", "#3366ff");
+    press(&mut d, "edit-accent-join");
+    let (blue, black) = (Value::Colour(Rgb([0x33, 0x66, 0xff])), Value::Colour(Rgb([0, 0, 0])));
+    assert_eq!(accents(&d), [Some(blue), Some(black)], "the Light half");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Accent Change");
 }
