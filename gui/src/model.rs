@@ -57,6 +57,9 @@ pub struct Phantom {
     /// their shortcut was last pressed ([`look_at_disk`]): the menus offer them only if so, and
     /// never look again while they're drawn (#307).
     pub target_there: bool,
+    /// The same for the one selected file, in the details pane's Files list ([`look_at_file`]): the
+    /// file menu offers Open and Reveal in Finder only if so, and the palette too (#33).
+    pub file_there: bool,
     /// Which menu is open.
     pub menu: Menu,
     pub connection: Connection,
@@ -324,6 +327,7 @@ impl Phantom {
             // brings the system's.
             finder: Box::new(Shown::default()),
             target_there: false,
+            file_there: false,
             menu: Menu::Closed,
             connection: Connection::Connecting,
             bar: Bar::default(),
@@ -526,6 +530,12 @@ pub fn common_priority(table: &TableState, torrents: &[TorrentInfo], pane: &Deta
 /// another until the next (#307).
 pub fn look_at_disk(s: &mut Phantom, target: Option<PathBuf>) {
     s.target_there = target.is_some_and(|p| s.finder.exists(&p));
+}
+
+/// [`look_at_disk`] for the file Open and Reveal would show in the Files list: the only one selected.
+pub fn look_at_file(s: &mut Phantom) {
+    let target = file_target(&s.table, &s.torrents, &s.pane);
+    s.file_there = target.is_some_and(|p| s.finder.exists(&p));
 }
 
 /// Where the only selected file is on disk: the torrent's location for a single-file torrent,

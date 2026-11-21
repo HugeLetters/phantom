@@ -79,18 +79,20 @@ fn drawn(rt: &Runtime<Phantom>) -> Vec<Option<Item>> {
                 let label = e.label.clone()?;
                 let below = format!("{}/", e.path);
                 let hint = elements.iter().filter(|c| c.path.starts_with(&below)).filter_map(|c| c.text.clone()).find(|t| *t != label);
-                // Every item has its own icon in the gutter; the check is the kit's mark at the right
-                // edge, shown on the current priority (screen readers hear it as a menuitemcheckbox's
-                // checked state).
-                assert!(
-                    elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon") && !c.exiting),
-                    "{label:?} has its icon"
-                );
-                let mark = elements.iter().find(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("indicator"));
-                let checked = (e.role == "menuitemcheckbox").then(|| {
-                    let mark = format!("{}/", mark.expect("a checkbox item has its mark").path);
-                    elements.iter().any(|c| c.path.starts_with(&mark) && c.opacity > 0.5)
-                });
+                // The priorities have no icon of their own: the current one has the check in the icon
+                // gutter, left of its label, where the other items have their icons; the kit's own mark
+                // at the right edge is blanked (the item is still a menuitemcheckbox, whose checked
+                // state screen readers hear). Every other item has its icon.
+                let icon = elements.iter().find(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon") && !c.exiting);
+                let text = elements.iter().find(|c| c.path.starts_with(&below) && c.text.as_deref() == Some(label.as_str()));
+                match (e.role, icon, text) {
+                    ("menuitem", None, _) => panic!("{label:?} has its icon"),
+                    (_, Some(icon), Some(text)) => {
+                        assert!(icon.rect[0] + icon.rect[2] <= text.rect[0] + 0.5, "{label:?}: the icon is left of it")
+                    }
+                    _ => {}
+                }
+                let checked = (e.role == "menuitemcheckbox").then(|| icon.is_some());
                 Some(Some((label, hint, checked)))
             }
             (_, Some(key)) if key.starts_with("sep") => Some(None),

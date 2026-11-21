@@ -23,7 +23,7 @@
 use rune::{Key, KeyEvent, Mods, Tx};
 
 use crate::commands::{Command, OnFiles, OnTorrents, on_files};
-use crate::model::{Phantom, details_torrent, file_target, look_at_disk, remove_selected, selected_torrents};
+use crate::model::{Phantom, details_torrent, look_at_file, remove_selected, selected_torrents};
 use crate::platform::{Show, open_torrent, press_torrent};
 
 /// A key with the modifiers that must be held, and no others.
@@ -136,7 +136,7 @@ pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
     }
     let pressed = OnFiles::ALL.into_iter().find(|c| c.spec().keys.iter().any(|k| k.matches(ev)));
     let Some(command) = pressed.filter(|c| s.mounted.offers(*c)) else { return false };
-    look_at_disk(s, file_target(&s.table, &s.torrents, &s.pane));
+    look_at_file(s);
     if on_files(s).contains(&command) {
         crate::views::file_menu::run(s, command);
     }

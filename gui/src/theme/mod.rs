@@ -61,8 +61,9 @@ pub struct Built {
 /// and handlers through it.
 pub type DetailsScreen = Rc<dyn Fn(&Phantom, &Ui, &TorrentInfo) -> El>;
 
-/// The command palette (#33), while it's open: what it draws goes into the overlays' layer.
-pub type PaletteScreen = Rc<dyn Fn(&Phantom, &Ui, &mut Vec<El>)>;
+/// The command palette (#33), while it's open: what it draws goes into the overlays' layer. Its
+/// third argument is the window's size, when known.
+pub type PaletteScreen = Rc<dyn Fn(&Phantom, &Ui, Option<(f32, f32)>, &mut Vec<El>)>;
 
 /// The screens one theme lays out itself, built like its blocks; `None` is its parent's. A
 /// screen override shows the same data, or less, never something else.

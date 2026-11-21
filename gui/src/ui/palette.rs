@@ -11,11 +11,17 @@ use super::{Icon, Ui};
 pub struct PaletteRow {
     pub label: String,
     pub hint: Option<String>,
-    pub icon: Icon,
+    /// None: an empty slot, so every label starts at the same x.
+    pub icon: Option<Icon>,
 }
 
-/// How wide the panel is at most; narrower in a narrow window.
-const WIDTH: f32 = 520.0;
+/// The narrowest the panel is, however short its commands: it's placed so that, at this width, it's
+/// centred in the window, and it keeps its left edge as it widens, so only its right edge moves.
+const MIN_WIDTH: f32 = 440.0;
+/// The widest it grows to, for a long name; a longer label is cut.
+const MAX_WIDTH: f32 = 720.0;
+/// How far from the window's sides it stays.
+const SIDE: f32 = 16.0;
 /// How far below the window's top the panel is: under the toolbar, as Spotlight sits high.
 const TOP: f32 = 48.0;
 
@@ -24,7 +30,9 @@ impl Ui {
     /// at its top, `rows` under it with the `at`-th highlighted, `empty` in their place when
     /// there are none. It's modal: the window under it takes nothing; Escape and a press outside
     /// call `on_close`, a press on a row `on_pick` with its index. The rows scroll when the window
-    /// is too short for them; row `i` is keyed by `row_key(i)`.
+    /// is too short for them; row `i` is keyed by `row_key(i)`. It is as wide as its widest row, between
+    /// [`MIN_WIDTH`] and [`MAX_WIDTH`], inside the `window` (its width, when known), left edge fixed.
+
     #[allow(clippy::too_many_arguments)]
     pub fn palette<S: 'static>(
         &self,
@@ -33,6 +41,7 @@ impl Ui {
         rows: Vec<PaletteRow>,
         at: usize,
         empty: &str,
+        window: Option<f32>,
         row_key: impl Fn(usize) -> String,
         on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static,
         on_close: impl Fn(&mut S) + Clone + 'static,
@@ -40,6 +49,7 @@ impl Ui {
     ) {
         let k = &self.k;
         let c = &k.c;
+        let (left, width) = self.palette_frame(&rows, window);
         let search = row()
             .key("search")
             .w_full()
@@ -66,7 +76,11 @@ impl Ui {
                 .gap(10.0)
                 .radius(4.0)
                 .center_y()
-                .child(icon(self.icon(r.icon), 14.0).key("icon").color(c.icon_base).a11y_hidden())
+                .child(match r.icon {
+                    Some(i) => icon(self.icon(i), 14.0).key("icon").color(c.icon_base).a11y_hidden(),
+                    // An empty slot the icon's size.
+                    None => el().w(14.0).h(14.0),
+                })
                 .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().grow(1.0).shrink())
                 .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx));
             if let Some(hint) = r.hint {
@@ -84,8 +98,7 @@ impl Ui {
             .key(format!("{key}-panel"))
             .role("dialog")
             .label("Commands")
-            .w_full()
-            .max_w(WIDTH)
+            .w(width)
             .shrink()
             .min_h(0.0)
             .radius(8.0)
@@ -108,9 +121,35 @@ impl Ui {
                 .h_full()
                 .pt(TOP)
                 .pb(16.0)
-                .px(16.0)
-                .items_center()
+                .pl(left)
+                .pr(SIDE)
+                .items_start()
                 .child(panel.modal(true, move |s: &mut S| on_close(s))),
         );
+    }
+
+    /// Where the panel's left edge is in the window, and how wide it is: as wide as its widest row
+    /// needs (its padding, icon, label and key, with the gaps), no less than [`MIN_WIDTH`], no more
+    /// than [`MAX_WIDTH`] or the window leaves; its left edge is where it's centred at the minimum.
+    fn palette_frame(&self, rows: &[PaletteRow], window: Option<f32>) -> (f32, f32) {
+        let k = &self.k;
+        let hint_style = rune::TextStyle { line_height: 11.0, ..k.ty.small_medium };
+        let widest = rows
+            .iter()
+            .map(|r| {
+                // The row's padding (10 a side), icon slot and gap (14 and 10), the key and its gap,
+                // the list's padding (4 a side).
+                let hint = r.hint.as_deref().map_or(0.0, |h| 10.0 + rune::text::measure(h, &[], hint_style, None).0);
+                8.0 + 20.0 + 14.0 + 10.0 + self.label_width(&r.label) + hint
+            })
+            .fold(0.0, f32::max)
+            .ceil()
+            + 2.0;
+        // Centred at the minimum (or the window's width less its sides, when narrower), and growing
+        // right to the window's side at most.
+        let at_minimum = window.map_or(MIN_WIDTH, |w| MIN_WIDTH.min(w - 2.0 * SIDE));
+        let left = window.map_or(SIDE, |w| (w - at_minimum) / 2.0);
+        let room = window.map_or(f32::MAX, |w| w - left - SIDE);
+        (left, widest.clamp(MIN_WIDTH, MAX_WIDTH).min(room))
     }
 }

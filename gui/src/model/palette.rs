@@ -1,7 +1,8 @@
 //! The command palette (#33): ⌘P opens a panel over the window listing the commands available now,
-//! from the command list (`commands`): those for the selected torrents, then the app's (Add file…,
+//! from the command list (`commands`): those for the selected torrents, those for the selected files
+//! (while the details pane's Files list shows some selected), then the app's (Add file…,
 //! and Undo, named after what it takes back, while there's something to). Its field has the focus;
-//! typing filters by name, fuzzily (the letters in order, best matches first), ↑ and ↓ move, Return
+//! typing filters by name, fuzzily (the letters in order, best matches first), ↑ and ↓ move (round the ends), Return
 //! runs the one highlighted and closes it, Escape or a click outside closes it. A command that asks
 //! for more starts its usual flow: Rename… opens the Name cell's field, Move to… the folder picker.
 //! With nothing matching, Return runs nothing. It's one of the overlays (`overlay`): opening it
@@ -14,15 +15,15 @@
 //! | state ↓ / event → | `Open`      | `Up`             | `Down { n }`           | `Close`  |
 //! |-------------------|-------------|------------------|------------------------|----------|
 //! | `Closed`          | `Open { 0 }`| `Closed`         | `Closed`               | `Closed` |
-//! | `Open { at }`     | `Open { 0 }`| `Open { at − 1 }`, the first stays | `Open { at + 1 }`, the last (n − 1) stays | `Closed` |
+//! | `Open { at }`     | `Open { 0 }`| `Open { at − 1 }`, the first goes to the last (n − 1) | `Open { at + 1 }`, the last goes to the first | `Closed` |
 //!
 //! Typing leaves the state as it is: the highlight is on the first match again whenever the text
 //! changed since an arrow last moved it ([`Palette::at`]).
 
 use rune::{TextEdit, Tx};
 
-use super::{Phantom, details_torrent, look_at_disk, reveal_target};
-use crate::commands::{Command, InApp, OnTorrents, Selected};
+use super::{Phantom, details_torrent, look_at_disk, look_at_file, reveal_target};
+use crate::commands::{Command, InApp, OnTorrents, Selected, on_files};
 use crate::ui::Icon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -36,7 +37,10 @@ pub enum State {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     Open,
-    Up,
+    /// Up a list of `n` commands.
+    Up {
+        n: usize,
+    },
     /// Down a list of `n` commands.
     Down {
         n: usize,
@@ -48,9 +52,9 @@ pub enum Event {
 pub fn decide(state: State, event: Event) -> State {
     match (state, event) {
         (_, Event::Open) => State::Open { at: 0 },
-        (State::Closed, Event::Up | Event::Down { .. } | Event::Close) | (State::Open { .. }, Event::Close) => State::Closed,
-        (State::Open { at }, Event::Up) => State::Open { at: at.saturating_sub(1) },
-        (State::Open { at }, Event::Down { n }) => State::Open { at: (at + 1).min(n.saturating_sub(1)) },
+        (State::Closed, Event::Up { .. } | Event::Down { .. } | Event::Close) | (State::Open { .. }, Event::Close) => State::Closed,
+        (State::Open { at }, Event::Up { n }) => State::Open { at: if n == 0 { 0 } else { (at + n - 1) % n } },
+        (State::Open { at }, Event::Down { n }) => State::Open { at: if n == 0 { 0 } else { (at + 1) % n } },
     }
 }
 
@@ -94,10 +98,11 @@ pub struct Entry {
     /// As the selection words it: "Delete 3 torrents (files to the Trash)", "Undo Remove of Album".
     pub label: String,
     pub hint: Option<String>,
-    pub icon: Icon,
+    pub icon: Option<Icon>,
 }
 
-/// Every command available now, in the list's order: the selected torrents', then the app's.
+/// Every command available now, in the list's order: the selected torrents', the selected files'
+/// (while the Files list shows some selected), then the app's.
 pub fn offered(s: &Phantom) -> Vec<Entry> {
     let selected = Selected::of(&s.table, &s.torrents, s.target_there);
     let can_delete = OnTorrents::Delete.available(&selected);
@@ -106,8 +111,14 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
         .into_iter()
         .filter(|c| s.mounted.offers(*c) && c.available(&selected))
         .map(|c| (Command::Torrents(c), c.wording(n, can_delete)));
+    // Worded as the file menu words them.
+    let files = on_files(s).into_iter().map(|c| (Command::Files(c), c.spec().name.to_owned()));
     let app = InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| (Command::App(c), c.wording(s)));
-    torrents.chain(app).map(|(command, label)| Entry { command, label, hint: command.spec().hint(), icon: command.spec().icon }).collect()
+    torrents
+        .chain(files)
+        .chain(app)
+        .map(|(command, label)| Entry { command, label, hint: command.spec().hint(), icon: command.spec().icon })
+        .collect()
 }
 
 /// What the palette lists for its text: the commands offered whose label matches it, best first,
@@ -154,11 +165,12 @@ pub fn score(query: &str, label: &str) -> Option<i32> {
 }
 
 /// ⌘P: opens over whatever else was open, the field empty and focused, the first command
-/// highlighted; looks at the disk for Open and Reveal.
+/// highlighted; looks at the disk for Open and Reveal, of the torrent and of the file.
 pub fn open(s: &mut Phantom) {
     crate::overlay::opening(s, crate::overlay::Overlay::Palette);
     let target = details_torrent(&s.table, &s.torrents).and_then(|t| reveal_target(t).map(|p| p.to_owned()));
     look_at_disk(s, target);
+    look_at_file(s);
     s.palette.query = TextEdit::new("");
     s.palette.query.focused = true;
     s.palette.then(Event::Open);
@@ -170,13 +182,14 @@ pub fn close(s: &mut Phantom) {
     s.palette.query = TextEdit::default();
 }
 
-/// ↑: the highlight up one, the first staying.
+/// ↑: the highlight up one, the first going to the last.
 pub fn up(s: &mut Phantom, tx: &mut Tx) {
-    s.palette.then(Event::Up);
+    let n = listed(s).len();
+    s.palette.then(Event::Up { n });
     tx.scroll_into_view(row_key(s.palette.at()));
 }
 
-/// ↓: the highlight down one, the last staying.
+/// ↓: the highlight down one, the last going to the first.
 pub fn down(s: &mut Phantom, tx: &mut Tx) {
     let n = listed(s).len();
     s.palette.then(Event::Down { n });
@@ -191,7 +204,7 @@ pub fn run(s: &mut Phantom, tx: &mut Tx) {
     match entry.command {
         Command::Torrents(c) => crate::commands::run_on_torrents(s, c, tx),
         Command::App(c) => crate::commands::run_in_app(s, c, tx),
-        Command::Files(_) => unreachable!("the palette lists no file command"),
+        Command::Files(c) => crate::views::file_menu::run(s, c),
     }
 }
 
@@ -221,7 +234,7 @@ mod tests {
 
     every!(Event {
         Event::Open => [Event::Open],
-        Event::Up => [Event::Up],
+        Event::Up { .. } => [Event::Up { n: 0 }, Event::Up { n: 1 }, Event::Up { n: 3 }, Event::Up { n: 5 }],
         Event::Down { .. } => [Event::Down { n: 0 }, Event::Down { n: 1 }, Event::Down { n: 3 }, Event::Down { n: 5 }],
         Event::Close => [Event::Close],
     });
@@ -234,19 +247,22 @@ mod tests {
             Row { says: "closing closes", when: |_, e| *e == Event::Close, then: |_, _, out| *out == State::Closed },
             Row {
                 says: "an arrow while closed does nothing",
-                when: |s, e| *s == State::Closed && matches!(e, Event::Up | Event::Down { .. }),
+                when: |s, e| *s == State::Closed && matches!(e, Event::Up { .. } | Event::Down { .. }),
                 then: |_, _, out| *out == State::Closed,
             },
             Row {
-                says: "↑ moves up one, the first staying",
-                when: |s, e| matches!(s, State::Open { .. }) && *e == Event::Up,
-                then: |s, _, out| matches!((s, out), (State::Open { at }, State::Open { at: to }) if *to == at.saturating_sub(1)),
+                says: "↑ moves up one, the first going to the last",
+                when: |s, e| matches!(s, State::Open { .. }) && matches!(e, Event::Up { .. }),
+                then: |s, e, out| match (s, e, out) {
+                    (State::Open { at }, Event::Up { n }, State::Open { at: to }) => *to == if *n == 0 { 0 } else { (at + n - 1) % n },
+                    _ => false,
+                },
             },
             Row {
-                says: "↓ moves down one, the last staying",
+                says: "↓ moves down one, the last going to the first",
                 when: |s, e| matches!(s, State::Open { .. }) && matches!(e, Event::Down { .. }),
                 then: |s, e, out| match (s, e, out) {
-                    (State::Open { at }, Event::Down { n }, State::Open { at: to }) => *to == (at + 1).min(n.saturating_sub(1)),
+                    (State::Open { at }, Event::Down { n }, State::Open { at: to }) => *to == if *n == 0 { 0 } else { (at + 1) % n },
                     _ => false,
                 },
             },

@@ -8,14 +8,14 @@ use rune::{El, PointerPress, Tx};
 
 use crate::commands::{OnFiles, on_files};
 use crate::menu::{Event, Menu, Open};
-use crate::model::{Phantom, common_priority, file_target, look_at_disk, select_file_for_menu, set_selected_files, trash_selected_files};
+use crate::model::{Phantom, common_priority, look_at_file, select_file_for_menu, set_selected_files, trash_selected_files};
 use crate::platform::{Show, show_file};
-use crate::ui::{Entry, Ui};
+use crate::ui::{Entry, Icon, Ui};
 
 /// Opens the menu at `press` for a right-click on file `index`'s row.
 pub fn open(s: &mut Phantom, index: usize, press: PointerPress, _: &mut Tx) {
     select_file_for_menu(&mut s.pane, index);
-    look_at_disk(s, file_target(&s.table, &s.torrents, &s.pane));
+    look_at_file(s);
     crate::overlay::open_menu(s, Open::File { at: (press.x, press.y) });
 }
 
@@ -41,8 +41,8 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
 }
 
 /// The menu's entries: Open and Reveal, then the priorities under their title, then Move to Trash,
-/// a separator between the groups that are there. The current priority is checked: a check at the
-/// item's right edge, as each item has its own icon.
+/// a separator between the groups that are there. The current priority is checked: a check in the
+/// icon gutter, left of its label.
 pub fn entries(items: &[OnFiles], checked: Option<Priority>) -> Vec<Entry> {
     let mut entries = Vec::new();
     for group in 0..3u8 {
@@ -62,7 +62,12 @@ pub fn entries(items: &[OnFiles], checked: Option<Priority>) -> Vec<Entry> {
                 id: spec.id,
                 label: spec.name.into(),
                 hint: spec.hint(),
-                icon: Some(spec.icon),
+                // The current priority has the check in the icon gutter, as the other items their
+                // icons; the priorities have none of their own, and a mixed selection no check.
+                icon: match item {
+                    OnFiles::Priority(p) => (checked == Some(p)).then_some(Icon::Check),
+                    OnFiles::Open | OnFiles::Reveal | OnFiles::MoveToTrash => spec.icon,
+                },
                 checked: match item {
                     OnFiles::Priority(p) => Some(checked == Some(p)),
                     OnFiles::Open | OnFiles::Reveal | OnFiles::MoveToTrash => None,

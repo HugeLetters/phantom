@@ -35,8 +35,9 @@ pub struct Spec {
     /// Its name: what the palette filters by, and the menus show unless they word it for the
     /// selection ([`OnTorrents::wording`]).
     pub name: &'static str,
-    /// What a theme draws beside it.
-    pub icon: Icon,
+    /// What a theme draws beside it, by `ui::Icon`, never a drawing: each theme resolves it
+    /// (`Ui::icon`). None where it has none: the priorities, which the file menu marks with a check.
+    pub icon: Option<Icon>,
     /// Its keys, the one shown first; none for most.
     pub keys: &'static [Chord],
 }
@@ -93,19 +94,19 @@ impl OnTorrents {
 
     pub fn spec(self) -> Spec {
         use client::display;
-        let (id, name, icon, keys): (_, _, _, &'static [Chord]) = match self {
-            OnTorrents::Resume => ("resume", "Resume", Icon::Resume, &[]),
-            OnTorrents::Pause => ("pause", "Pause", Icon::Pause, &[]),
-            OnTorrents::Check => ("check", "Check", Icon::Verify, &[]),
-            OnTorrents::CancelCheck => ("cancel-check", display::cancel_check(), Icon::CancelCheck, &[]),
-            OnTorrents::CancelMove => ("cancel-move", display::cancel_move(), Icon::CancelMove, &[]),
-            OnTorrents::Open => ("open", "Open", Icon::Open, OPEN_KEYS),
-            OnTorrents::Reveal => ("reveal", display::reveal_in_finder(), Icon::Reveal, REVEAL_KEYS),
-            OnTorrents::MoveTo => ("move", display::move_to(), Icon::MoveTo, &[]),
-            OnTorrents::Rename => ("rename", display::rename(), Icon::Rename, &[]),
-            OnTorrents::CopyMagnet => ("copy-magnet", "Copy magnet link", Icon::Copy, &[]),
-            OnTorrents::Remove => ("remove", "Remove", Icon::Remove, REMOVE_KEYS),
-            OnTorrents::Delete => ("delete", "Delete", Icon::Trash, DELETE_KEYS),
+        let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
+            OnTorrents::Resume => ("resume", "Resume", Some(Icon::Resume), &[]),
+            OnTorrents::Pause => ("pause", "Pause", Some(Icon::Pause), &[]),
+            OnTorrents::Check => ("check", "Check", Some(Icon::Verify), &[]),
+            OnTorrents::CancelCheck => ("cancel-check", display::cancel_check(), Some(Icon::CancelCheck), &[]),
+            OnTorrents::CancelMove => ("cancel-move", display::cancel_move(), Some(Icon::CancelMove), &[]),
+            OnTorrents::Open => ("open", "Open", Some(Icon::Open), OPEN_KEYS),
+            OnTorrents::Reveal => ("reveal", display::reveal_in_finder(), Some(Icon::Reveal), REVEAL_KEYS),
+            OnTorrents::MoveTo => ("move", display::move_to(), Some(Icon::MoveTo), &[]),
+            OnTorrents::Rename => ("rename", display::rename(), Some(Icon::Rename), &[]),
+            OnTorrents::CopyMagnet => ("copy-magnet", "Copy magnet link", Some(Icon::Copy), &[]),
+            OnTorrents::Remove => ("remove", "Remove", Some(Icon::Remove), REMOVE_KEYS),
+            OnTorrents::Delete => ("delete", "Delete", Some(Icon::Trash), DELETE_KEYS),
         };
         Spec { id, name, icon, keys }
     }
@@ -237,12 +238,12 @@ impl OnFiles {
     /// for files while it has the focus.
     pub fn spec(self) -> Spec {
         use client::display;
-        let (id, name, icon, keys): (_, _, _, &'static [Chord]) = match self {
-            OnFiles::Open => ("open", "Open", Icon::Open, OPEN_KEYS),
-            OnFiles::Reveal => ("reveal", display::reveal_in_finder(), Icon::Reveal, REVEAL_KEYS),
-            OnFiles::Priority(Priority::Normal) => ("priority-normal", display::priority(Priority::Normal), Icon::Download, &[]),
-            OnFiles::Priority(Priority::Off) => ("priority-off", display::priority(Priority::Off), Icon::Skip, &[]),
-            OnFiles::MoveToTrash => ("trash", display::move_to_trash(), Icon::Trash, DELETE_KEYS),
+        let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
+            OnFiles::Open => ("open", "Open", Some(Icon::Open), OPEN_KEYS),
+            OnFiles::Reveal => ("reveal", display::reveal_in_finder(), Some(Icon::Reveal), REVEAL_KEYS),
+            OnFiles::Priority(Priority::Normal) => ("priority-normal", display::priority(Priority::Normal), None, &[]),
+            OnFiles::Priority(Priority::Off) => ("priority-off", display::priority(Priority::Off), None, &[]),
+            OnFiles::MoveToTrash => ("trash", display::move_to_trash(), Some(Icon::Trash), DELETE_KEYS),
         };
         Spec { id, name, icon, keys }
     }
@@ -277,7 +278,7 @@ impl OnFiles {
 /// order; none with no file selected.
 pub fn on_files(s: &Phantom) -> Vec<OnFiles> {
     let Some((torrent, files)) = selected_in_pane(&s.table, &s.torrents, &s.pane) else { return Vec::new() };
-    OnFiles::ALL.into_iter().filter(|c| s.mounted.offers(*c) && c.available(torrent, &files, s.target_there)).collect()
+    OnFiles::ALL.into_iter().filter(|c| s.mounted.offers(*c) && c.available(torrent, &files, s.file_there)).collect()
 }
 
 /// What isn't about a selection.
@@ -294,10 +295,10 @@ impl InApp {
     pub const ALL: [InApp; 3] = [InApp::AddFile, InApp::Undo, InApp::Palette];
 
     pub fn spec(self) -> Spec {
-        let (id, name, icon, keys): (_, _, _, &'static [Chord]) = match self {
-            InApp::AddFile => ("add-file", "Add file…", Icon::AddFile, ADD_FILE_KEYS),
-            InApp::Undo => ("undo", client::display::undo(), Icon::Undo, UNDO_KEYS),
-            InApp::Palette => ("palette", "Commands…", Icon::Search, PALETTE_KEYS),
+        let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
+            InApp::AddFile => ("add-file", "Add file…", Some(Icon::AddFile), ADD_FILE_KEYS),
+            InApp::Undo => ("undo", client::display::undo(), Some(Icon::Undo), UNDO_KEYS),
+            InApp::Palette => ("palette", "Commands…", Some(Icon::Search), PALETTE_KEYS),
         };
         Spec { id, name, icon, keys }
     }

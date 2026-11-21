@@ -7,7 +7,7 @@ use proto::{TorrentCommand, TorrentId};
 use rune::{Key, KeyEvent, Mods};
 
 use super::*;
-use crate::commands::InApp;
+use crate::commands::{InApp, OnTorrents};
 use crate::model::palette::row_key;
 
 fn press(rt: &mut Runtime<Phantom>, key: Key) {
@@ -39,11 +39,11 @@ fn drawn_palette(rt: &Runtime<Phantom>) -> Vec<(String, Option<String>)> {
             let below = format!("{}/", row.path);
             let hint =
                 elements.iter().find(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("hint")).and_then(|c| c.text.clone());
-            assert!(
-                elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon")),
-                "{:?} has its icon",
-                row.label
-            );
+            // Every command has its icon but the priorities, which have none (the file menu marks the
+            // current one with a check).
+            let icon = elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon"));
+            let priority = matches!(row.label.as_deref(), Some("Normal" | "Off"));
+            assert_eq!(icon, !priority, "{:?} has its icon, a priority has none", row.label);
             (row.label.clone().expect("a row has its label"), hint)
         })
         .collect()
@@ -111,9 +111,10 @@ fn typing_filters_by_name_best_first() {
     assert!(rt.find("empty").is_some(), "it says nothing matches");
 }
 
-/// ↓ and ↑ move the highlight, stopping at the ends; typing puts it back on the first.
+/// ↓ and ↑ move the highlight and wrap around at the ends: ↑ on the first goes to the last, ↓ on the
+/// last to the first; typing puts it back on the first.
 #[test]
-fn the_arrows_move_the_highlight_and_stop_at_the_ends() {
+fn the_arrows_move_the_highlight_and_wrap_around_at_the_ends() {
     let mut rt = app(with_an_album());
     select(&mut rt, 1);
     cmd_p(&mut rt);
@@ -129,17 +130,134 @@ fn the_arrows_move_the_highlight_and_stop_at_the_ends() {
     };
     assert_eq!(highlighted(&rt), (0, 1), "the first, alone");
     press(&mut rt, Key::Up);
-    assert_eq!(highlighted(&rt).0, 0, "the first stays");
+    assert_eq!(highlighted(&rt), (n - 1, 1), "↑ on the first goes to the last");
+    press(&mut rt, Key::Down);
+    assert_eq!(highlighted(&rt), (0, 1), "↓ on the last goes to the first");
     for i in 1..n {
         press(&mut rt, Key::Down);
         assert_eq!(highlighted(&rt), (i, 1));
     }
     press(&mut rt, Key::Down);
-    assert_eq!(highlighted(&rt).0, n - 1, "the last stays");
+    assert_eq!(highlighted(&rt).0, 0, "round again");
+    press(&mut rt, Key::Down);
+    press(&mut rt, Key::Up);
+    assert_eq!(highlighted(&rt).0, 0);
+    press(&mut rt, Key::Up);
     press(&mut rt, Key::Up);
     assert_eq!(highlighted(&rt).0, n - 2);
     type_text(&mut rt, "c");
     assert_eq!(highlighted(&rt).0, 0, "typing goes back to the first");
+}
+
+/// With files selected in the details pane's Files list, the palette also lists the file commands,
+/// worded as the file menu words them, between the torrent's and the app's; with none selected, it
+/// doesn't.
+#[test]
+fn the_palette_lists_the_selected_files_commands_as_the_file_menu_words_them() {
+    let file = |index, path: &str| proto::File {
+        index,
+        path: path.into(),
+        size_bytes: 100 * MIB,
+        progress_bytes: 0,
+        priority: proto::Priority::Normal,
+        missing: false,
+        on_disk: true,
+    };
+    let service = MemoryService::new()
+        .with_torrents(vec![torrent(1, "Album")])
+        .with_files(1, vec![file(0, "01 Intro.flac"), file(1, "02 Song.flac")]);
+    let mut rt = app(service);
+    select(&mut rt, 1);
+    cmd_p(&mut rt);
+    let without = labels(&rt);
+    assert!(!without.iter().any(|l| l == "Normal" || l == "Off" || l == "Move to Trash"), "no file selected: {without:?}");
+    press(&mut rt, Key::Escape);
+
+    tap(&mut rt, "files/viewport/rows/0");
+    settle(&mut rt);
+    let (x, y) = rt.find("files/viewport/rows/0/path").expect("a file row");
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(&mut rt);
+    // Every item of the file menu, the priorities (menuitemcheckbox) too, with its key.
+    let elements = rt.elements();
+    let file_menu: Vec<(String, Option<String>)> = elements
+        .iter()
+        .filter(|e| !e.exiting && e.role.starts_with("menuitem") && e.path.contains("file-menu"))
+        .filter_map(|item| {
+            let label = item.label.clone()?;
+            let inside = format!("{}/", item.path);
+            let hint = elements.iter().filter(|e| e.path.starts_with(&inside)).filter_map(|e| e.text.clone()).find(|t| *t != label);
+            Some((label, hint))
+        })
+        .collect();
+    drop(elements);
+    let wording: Vec<&str> = file_menu.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(wording, ["Open", "Reveal in Finder", "Normal", "Off", "Move to Trash"]);
+    press(&mut rt, Key::Escape);
+
+    cmd_p(&mut rt);
+    let drawn = drawn_palette(&rt);
+    let torrent_commands = without.len() - 1;
+    let files: Vec<(String, Option<String>)> = drawn[torrent_commands..drawn.len() - 1].to_vec();
+    assert_eq!(files, file_menu, "the file commands, worded and keyed as the file menu has them, before the app's");
+    assert_eq!(drawn.last().map(|(l, _)| l.as_str()), Some("Add file…"));
+    type_text(&mut rt, "trash");
+    assert!(labels(&rt).iter().any(|l| l == "Move to Trash"), "filtering finds a file command: {:?}", labels(&rt));
+    press(&mut rt, Key::Enter);
+    assert!(!rt.state.palette.is_open());
+    let priorities: Vec<proto::Priority> = rt.state.pane.details.as_ref().expect("details").files.iter().map(|f| f.priority).collect();
+    assert_eq!(priorities, [proto::Priority::Off, proto::Priority::Normal], "Move to Trash ran on the selected file only");
+}
+
+/// The palette is never narrower than its minimum, and anchored on its left: when a long command
+/// widens it (Undo names what it takes back), or a filter narrows it again, only its right edge moves.
+#[test]
+fn the_palette_has_a_minimum_width_and_widens_to_the_right() {
+    const LONG: &str = "The Complete Studio Recordings, Remastered Deluxe Edition (2024) [FLAC 24-96 Hi-Res]";
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, LONG)]));
+    let panel = |rt: &Runtime<Phantom>| {
+        rt.elements().iter().find(|e| !e.exiting && e.key.as_deref() == Some("palette-panel")).expect("the palette").rect
+    };
+    select(&mut rt, 0);
+    cmd_p(&mut rt);
+    let narrow = panel(&rt);
+    assert!(narrow[2] >= 400.0, "a minimum width: {}", narrow[2]);
+    press(&mut rt, Key::Escape);
+    rt.update(|s, _| s.table.clear_selection());
+    cmd_p(&mut rt);
+    assert!((panel(&rt)[2] - narrow[2]).abs() < 0.5, "short lists are all the minimum wide");
+    press(&mut rt, Key::Escape);
+
+    tap(&mut rt, "rows/1");
+    rt.key(shortcuts::keys(OnTorrents::Remove)[0].event());
+    settle(&mut rt);
+    select(&mut rt, 0);
+    cmd_p(&mut rt);
+    let wide = panel(&rt);
+    assert!(wide[2] > narrow[2] + 20.0, "the long Undo widens it: {} against {}", wide[2], narrow[2]);
+    assert!((wide[0] - narrow[0]).abs() < 0.5, "its left edge stays: {} against {}", wide[0], narrow[0]);
+    assert!(wide[0] + wide[2] <= 960.0 - 16.0 + 0.5, "it stays inside the window, 16 from its side: {wide:?}");
+    type_text(&mut rt, "copy");
+    let again = panel(&rt);
+    assert!((again[2] - narrow[2]).abs() < 0.5, "filtered to short commands, back at the minimum: {}", again[2]);
+    assert!((again[0] - narrow[0]).abs() < 0.5, "its left edge stays");
+}
+
+/// A menu is never narrower than 280 points, however short its items, so it doesn't change width
+/// from one menu to the next.
+#[test]
+fn a_short_menu_keeps_its_minimum_width() {
+    let mut rt = app(with_an_album());
+    select(&mut rt, 1);
+    rt.update(|s, _| s.pane.files.select("0"));
+    settle(&mut rt);
+    let (x, y) = rt.find("files/viewport/rows/0/path").expect("a file row");
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(&mut rt);
+    let rect = rt.elements().iter().find(|e| !e.exiting && e.key.as_deref() == Some("file-menu-menu")).expect("the menu").rect;
+    assert!((rect[2] - 280.0).abs() < 0.5, "280 wide: {}", rect[2]);
 }
 
 /// Return runs the highlighted command on the selection and closes the palette: Pause pauses the

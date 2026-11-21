@@ -8,7 +8,8 @@ use crate::model::Phantom;
 use crate::model::palette::{self, listed, row_key};
 use crate::ui::{PaletteRow, Ui};
 
-pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
+/// `window` is the window's size, when known.
+pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec<El>) {
     if !s.palette.is_open() {
         return;
     }
@@ -20,7 +21,18 @@ pub fn overlay(s: &Phantom, ui: &Ui, layer: &mut Vec<El>) {
         .on_key(on_key)
         .build();
     let rows = listed(s).into_iter().map(|e| PaletteRow { label: e.label, hint: e.hint, icon: e.icon }).collect();
-    ui.palette("palette", field, rows, s.palette.at(), "No command matches", row_key, palette::pick, palette::close, layer);
+    ui.palette(
+        "palette",
+        field,
+        rows,
+        s.palette.at(),
+        "No command matches",
+        window.map(|(w, _)| w),
+        row_key,
+        palette::pick,
+        palette::close,
+        layer,
+    );
 }
 
 /// The palette's own keys, before the field's.

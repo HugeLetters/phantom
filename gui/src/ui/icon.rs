@@ -43,10 +43,6 @@ pub enum Icon {
     Remove,
     /// A bin: Delete, and Move to Trash of files.
     Trash,
-    /// An arrow down to a line: the Normal priority, downloaded.
-    Download,
-    /// A circle struck through: the Off priority, not downloaded.
-    Skip,
     /// A page with a plus: Add file….
     AddFile,
     /// An arrow turning back: Undo.
@@ -73,8 +69,6 @@ every!(Icon {
     Icon::Rename => [Icon::Rename],
     Icon::Remove => [Icon::Remove],
     Icon::Trash => [Icon::Trash],
-    Icon::Download => [Icon::Download],
-    Icon::Skip => [Icon::Skip],
     Icon::AddFile => [Icon::AddFile],
     Icon::Undo => [Icon::Undo],
     Icon::Search => [Icon::Search],

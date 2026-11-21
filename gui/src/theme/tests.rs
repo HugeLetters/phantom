@@ -171,6 +171,43 @@ proptest! {
     }
 }
 
+static PAUSE_OF_THE_THEME: rune::Icon = rune::Icon { name: "theme-pause", view: 24.0, body: "" };
+static RENAME_OF_THE_PARENT: rune::Icon = rune::Icon { name: "parent-rename", view: 24.0, body: "" };
+
+/// A theme provides the icon of any command by drawing that `ui::Icon` in its `BlockOverrides.icons`;
+/// a command it doesn't draw has its parent's, then Phantom's. The menus and the palette draw
+/// `ui.icon(spec.icon)`, so a command is drawn as its look says.
+#[test]
+fn a_theme_draws_any_commands_icon_and_the_rest_fall_back_to_its_parent_then_phantom() {
+    let overriding = |icon: Icon, with: &'static rune::Icon| BlockOverrides {
+        icons: Some(Rc::new(move |i| (i == icon).then_some(with))),
+        ..Default::default()
+    };
+    let parent: &'static dyn Theme = Box::leak(Box::new(Link {
+        blocks: overriding(Icon::Rename, &RENAME_OF_THE_PARENT),
+        screens: Default::default(),
+        parent: Some(&phantom::PHANTOM),
+    }));
+    let theme: &'static dyn Theme = Box::leak(Box::new(Link {
+        blocks: overriding(Icon::Pause, &PAUSE_OF_THE_THEME),
+        screens: Default::default(),
+        parent: Some(parent),
+    }));
+    let look = Look::build(&ThemeLook::defaults(theme));
+    let mut drawn = 0;
+    for command in crate::commands::Command::all() {
+        let Some(icon) = command.spec().icon else { continue };
+        let expected = match icon {
+            Icon::Pause => &PAUSE_OF_THE_THEME,
+            Icon::Rename => &RENAME_OF_THE_PARENT,
+            other => phantom::icon(other),
+        };
+        assert!(std::ptr::eq(look.ui.icon(icon), expected), "{:?}", command.spec().id);
+        drawn += 1;
+    }
+    assert!(drawn > 10, "the commands have icons to draw: {drawn}");
+}
+
 /// Every theme there is: a unique id, its parent chain ending at Phantom, its settings' keys
 /// unique and each choice's default one of its choices.
 #[test]

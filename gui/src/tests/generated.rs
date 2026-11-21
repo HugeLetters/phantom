@@ -1894,7 +1894,7 @@ fn palette_labels(rt: &Runtime<Phantom>) -> Vec<String> {
 }
 
 /// Checks the palette lists exactly what it must for `query`: of the selected torrent's row menu
-/// items (as `check_row_menu` has them) and the app's commands, those whose label has the query's
+/// items (as `check_row_menu` has them), the selected files' commands and the app's, those whose label has the query's
 /// letters in order, each once.
 fn check_palette(s: &Phantom, listed: &[String], query: &str) {
     let mut offered: Vec<String> = Vec::new();
@@ -1910,6 +1910,8 @@ fn check_palette(s: &Phantom, listed: &[String], query: &str) {
             }
         }
     }
+    // With files selected in the Files list: the file menu's items, worded as it words them.
+    offered.extend(crate::commands::on_files(s).into_iter().map(|c| c.spec().name.to_owned()));
     offered.push("Add file…".into());
     if s.changes.state.top().is_some() {
         offered.push(crate::changes::menu_title(s));

@@ -52,7 +52,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let window = cx.layout("app").map(|at| (at[2], at[3]));
     row_menu::overlay(s, ui, window, &mut overlays);
     file_menu::overlay(s, ui, window, &mut overlays);
-    (look.screens.palette)(s, ui, &mut overlays);
+    (look.screens.palette)(s, ui, window, &mut overlays);
     clash::overlay(s, ui, &mut overlays);
     // On the root, where Rune routes window-level pastes and drops: drop .torrent files
     // anywhere, or paste a magnet link with no field focused.

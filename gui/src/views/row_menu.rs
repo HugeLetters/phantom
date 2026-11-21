@@ -50,13 +50,7 @@ pub fn entries(items: &[OnTorrents], n: usize) -> Vec<Entry> {
             entries.push(Entry::Separator);
         }
         let spec = item.spec();
-        entries.push(Entry::Choice {
-            id: spec.id,
-            label: item.wording(n, can_delete),
-            hint: spec.hint(),
-            icon: Some(spec.icon),
-            checked: None,
-        });
+        entries.push(Entry::Choice { id: spec.id, label: item.wording(n, can_delete), hint: spec.hint(), icon: spec.icon, checked: None });
     }
     entries
 }

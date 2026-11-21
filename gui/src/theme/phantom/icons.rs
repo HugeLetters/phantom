@@ -118,10 +118,6 @@ lucide!(
     "phantom-trash",
     ["M3 6h18", "M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6", "M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2", "M10 11v6", "M14 11v6",]
 );
-// arrow-down-to-line
-lucide!(DOWNLOAD, "phantom-download", ["M12 17V3", "m6 11 6 6 6-6", "M19 21H5"]);
-// ban
-lucide!(SKIP, "phantom-skip", ["M2 12a10 10 0 1 0 20 0a10 10 0 1 0-20 0", "m4.9 4.9 14.2 14.2"]);
 // file-plus
 lucide!(
     ADD_FILE,
@@ -154,8 +150,6 @@ pub fn icon(icon: Icon) -> &'static Drawing {
         Icon::Rename => &RENAME,
         Icon::Remove => &REMOVE,
         Icon::Trash => &TRASH,
-        Icon::Download => &DOWNLOAD,
-        Icon::Skip => &SKIP,
         Icon::AddFile => &ADD_FILE,
         Icon::Undo => &UNDO,
         Icon::Search => &SEARCH,

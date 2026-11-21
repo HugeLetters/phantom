@@ -16,15 +16,18 @@ pub enum Entry {
         /// Its shortcut, shown right-aligned and dimmed, as in macOS menus.
         hint: Option<String>,
         icon: Option<Icon>,
-        /// A choice among values, as the priorities: `Some(true)` for the current one, checked at
-        /// the item's right edge (its icon is its own, as every item's). Screen readers hear it
-        /// (`menuitemcheckbox`, checked).
+        /// A choice among values, as the priorities: `Some(true)` for the current one. Screen readers
+        /// hear it (`menuitemcheckbox`, checked); what's drawn is the entry's `icon` (a check in the
+        /// gutter), never the kit's own mark at the right edge, which is blanked.
         checked: Option<bool>,
     },
     /// A section title: not clickable, not focusable.
     Title(String),
     Separator,
 }
+
+/// Draws nothing.
+static BLANK: rune::Icon = rune::Icon { name: "phantom-blank", view: 16.0, body: "" };
 
 /// The narrowest a menu is, however short its items.
 const MIN_WIDTH: f32 = 280.0;
@@ -83,31 +86,29 @@ impl Ui {
                 Entry::Separator => menu.separator(),
             };
         }
-        // The kit's check, at a checked item's right edge, in the theme's own drawing.
+        // The kit draws a checked item's mark at the right edge; Phantom's is the icon in the gutter
+        // (the theme's `Icon::Check`), so the kit's is blanked (its state stays, for screen readers).
         let mut kit = self.k.clone();
-        kit.glyph.check_small = self.icon(Icon::Check);
+        kit.glyph.check_small = &BLANK;
         menu.on_close(on_close).build(&kit, layer)
     }
 
     /// How wide a menu of `entries` must be for its widest item to show whole, as the kit lays an
-    /// item out: its padding, its icon, its label, its key and its check, with the gaps between.
+    /// item out: its padding, its icon, its label and its key, with the gaps between.
     pub fn menu_width(&self, entries: &[Entry]) -> f32 {
         let k = &self.k;
         let measure = |text: &str, style| rune::text::measure(text, &[], style, None).0;
         let hint_style = rune::TextStyle { line_height: 11.0, ..k.ty.small_medium };
-        let item = |label: &str, hint: &Option<String>, checked: &Option<bool>| {
+        let item = |label: &str, hint: &Option<String>| {
             // The item's padding (12 and 6), the icon's slot and its gap, the frame's padding (2 a side).
             let mut w = 12.0 + 6.0 + ICON + GAP + 4.0 + self.label_width(label);
             if let Some(hint) = hint {
                 w += GAP + measure(hint, hint_style);
             }
-            if checked.is_some() {
-                w += GAP + 16.0;
-            }
             w
         };
         let widest = entries.iter().map(|e| match e {
-            Entry::Choice { label, hint, checked, .. } => item(label, hint, checked),
+            Entry::Choice { label, hint, .. } => item(label, hint),
             Entry::Title(title) => 24.0 + measure(title, k.ty.small_medium),
             Entry::Separator => 0.0,
         });
