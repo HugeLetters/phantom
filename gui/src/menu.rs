@@ -28,6 +28,9 @@ pub enum Open {
     /// The context menu of the selected files of the torrent the details pane shows (#151), opened
     /// by a right-click on a file's row at the point `at`.
     File { at: (f32, f32) },
+    /// The list's columns, each ticked while it's wanted (#33), opened by a right-click on the
+    /// list's header at the point `at`.
+    Columns { at: (f32, f32) },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -66,6 +69,7 @@ mod tests {
     every!(Open {
         Open::Row { .. } => [Open::Row { id: 1, at: (3.0, 4.0) }, Open::Row { id: 2, at: (5.0, 6.0) }],
         Open::File { .. } => [Open::File { at: (7.0, 8.0) }],
+        Open::Columns { .. } => [Open::Columns { at: (9.0, 1.0) }],
     });
 
     every!(Menu {

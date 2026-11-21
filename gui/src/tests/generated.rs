@@ -30,7 +30,7 @@ use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state
 use proto::{Action as Do, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
-use super::{Desk, FRAME, Showing, desk, drawn_menu, enabled, pick_choice_then, settle, with_an_album};
+use super::{Desk, FRAME, Showing, desk, drawn_menu, enabled, on_screen, pick_choice_then, settle, with_an_album};
 use crate::bar::machine::NoticeId;
 use crate::model::{
     Phantom, add, details_torrent, link_problem, selected_files, selected_for, selected_torrents, shown_torrent, size_label,
@@ -39,7 +39,6 @@ use crate::notice::{Notice, Severity};
 use crate::platform::{Show, Shown};
 use crate::service::{AddRequest, Disk, DiskChange, Probe};
 use crate::shortcuts;
-use crate::views::toolbar::why_off;
 use crate::windows::Which;
 
 /// Magnets by number: each its own info hash.
@@ -203,8 +202,8 @@ enum Action {
     Palette {
         query: Option<&'static str>,
     },
-    Pause,
-    Resume,
+    /// A click on a row's toggle: that torrent alone is paused, or resumed; the selection stays.
+    Toggle(TorrentId),
     Check,
     /// ⌫: removes the selection at once, keeping its files.
     Remove,
@@ -725,8 +724,7 @@ impl ReferenceStateMachine for Screen {
             2 => id.clone().prop_map(Action::DoubleClick),
             2 => proptest::option::weighted(0.4, proptest::sample::select(vec!["re", "ren", "p", "del", "undo", "zz"]))
                 .prop_map(|query| Action::Palette { query }),
-            2 => Just(Action::Pause),
-            2 => Just(Action::Resume),
+            4 => id.clone().prop_map(Action::Toggle),
             2 => Just(Action::Check),
             1 => Just(Action::Remove),
             1 => Just(Action::RemoveAll),
@@ -780,6 +778,7 @@ impl ReferenceStateMachine for Screen {
             Action::Select(id)
             | Action::RowMenu { id, .. }
             | Action::DoubleClick(id)
+            | Action::Toggle(id)
             | Action::FilesDeleted { id, .. }
             | Action::FilesPutBack { id, .. }
             | Action::DestinationGone(id)
@@ -934,7 +933,6 @@ impl StateMachineTest for Screen {
     type Reference = Screen;
 
     fn init_test(rows: &Rows) -> Sut {
-        NOTE_WHILE_ON.with(|n| n.take());
         let Setup { add_frames, torrent_url_frames, default_destination, details_frames, stale_frames, paused, tight } = rows.setup;
         let album = if paused { with_an_album().paused() } else { with_an_album() };
         let album = if tight { album.with_free_space(1) } else { album };
@@ -953,7 +951,7 @@ impl StateMachineTest for Screen {
         let (disk, probe) = (service.disk(), service.probe());
         let mut d = desk(service);
         let rt = &mut d.main;
-        rt.poll = Some(poll_watching_notes);
+        rt.poll = Some(crate::poll);
         let shown = Shown::default();
         rt.state.finder = Box::new(shown.clone());
         rt.set_viewport((960.0, 900.0), 2.0);
@@ -963,10 +961,7 @@ impl StateMachineTest for Screen {
 
     fn apply(mut sut: Sut, rows: &Rows, action: Action) -> Sut {
         let rows_before = sut.before.clone();
-        let mut resumed = match action {
-            Action::Resume => selected_for(&sut.d.main.state.table, &sut.d.main.state.torrents, Do::Resume),
-            _ => Vec::new(),
-        };
+        let mut resumed = Vec::new();
         // The windows, and ⌘Z in Settings: frames of both, the app clock held still.
         let d = &mut sut.d;
         let cmd = |c| KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Default::default() } };
@@ -1197,16 +1192,18 @@ impl StateMachineTest for Screen {
                 double_click(rt, &format!("rows/{id}/name"));
                 assert_eq!(sut.shown.all()[before..], shown_by(rt, *id, Some(Show::Open)), "what a double-click on row {id} shows");
             }
-            // Pressed whether on or off: off, it says why (#89).
-            Action::Pause | Action::Resume => {
-                let (key, action) = if matches!(action, Action::Pause) { ("pause", Do::Pause) } else { ("resume", Do::Resume) };
+            // The row's own toggle: it acts on that torrent alone and leaves the selection. A click
+            // under a dialog does nothing; one on a disabled toggle (a torrent moving) does nothing too.
+            Action::Toggle(id) => {
+                let key = format!("rows/{id}/toggle");
+                // A note open by Add covers the window: the person closes it first.
                 close_notes(rt);
-                let off = !enabled(rt, key);
-                press(rt, key);
-                if off {
-                    let why = why_off(&rt.state, action).expect("off for a reason");
-                    assert_eq!(text(rt, &format!("{key}-note-content")), why, "a click on {key} while it's off says why");
+                let torrent = rt.state.torrents.iter().find(|t| t.id == *id).cloned();
+                let toggle = torrent.as_ref().and_then(crate::model::row_toggle);
+                if rows.clash.is_none() && toggle == Some(Do::Resume) && on_screen(rt, &key) {
+                    resumed = vec![*id];
                 }
+                press(rt, &key);
             }
             // From the row menu, the only place Check is now.
             Action::Check => {
@@ -1539,26 +1536,24 @@ impl StateMachineTest for Screen {
         assert!(!s.menu.is_open(), "every step leaves its menu closed");
         assert!(drawn_menu(rt, "row-menu").is_none(), "no menu is drawn");
 
-        // A button is on when the service lists its action for a torrent it applies to, and nothing
-        // modal is over it (a clash dialog).
-        let selected = selected_torrents(&s.table);
-        let any = |action| !modal && s.torrents.iter().any(|t| selected.contains(&t.id) && t.actions.does(action));
-        assert_eq!(enabled(rt, "pause"), any(Do::Pause), "Pause");
-        assert_eq!(enabled(rt, "resume"), any(Do::Resume), "Resume");
-        // A note shows only after a press while its button was off, with no frame since in which
-        // it was on: Pause and Resume ask for it only so, and no frame ended with one asked for while on.
-        if let Some(frame) = NOTE_WHILE_ON.with(|n| n.borrow().clone()) {
-            panic!("a note stayed asked for while its button was on: {frame}");
-        }
-        // Off exactly while there's a reason to say, and a note open says it, worded from the
-        // torrents as they are now.
-        for (key, action) in [("pause", Do::Pause), ("resume", Do::Resume)] {
-            let why = why_off(s, action);
-            assert_eq!(enabled(rt, key), !modal && why.is_none(), "{key} is off exactly with a reason, or under a dialog: {why:?}");
-            let note = rt.find(&format!("{key}-note-content")).is_some();
-            assert_eq!(note, s.why_off == Some(action) && why.is_some(), "{key}'s note shows while it's asked for and off");
-            if note {
-                assert_eq!(Some(text(rt, &format!("{key}-note-content"))), why, "{key}'s note");
+        // A row's toggle says what a click does: Pause while the service lists it, else Resume; where
+        // it lists neither it's the same button disabled, its tip the status word.
+        for t in &s.torrents {
+            let button = rt
+                .elements()
+                .into_iter()
+                .find(|e| !e.exiting && e.key.as_deref() == Some("toggle-button") && e.path.contains(&format!("/rows/{}/", t.id)));
+            if rt.find(&format!("rows/{}", t.id)).is_some() {
+                let button = button.unwrap_or_else(|| panic!("torrent {} has a toggle", t.id));
+                let icon = crate::model::toggle_icon(t);
+                assert_eq!(button.label.as_deref(), Some(if icon == Do::Pause { "Pause" } else { "Resume" }), "torrent {}'s toggle", t.id);
+                let off = crate::model::row_toggle(t).is_none();
+                assert_eq!(
+                    button.help.as_deref() == Some(client::display::status(&t.status)),
+                    off,
+                    "torrent {}: disabled only when it can't act",
+                    t.id
+                );
             }
         }
 
@@ -1578,7 +1573,12 @@ impl StateMachineTest for Screen {
         let missing = details.files.iter().any(|f| f.missing);
         assert_eq!(t.status == Status::MissingFiles, missing && t.status != Status::Checking, "{t:?}: {details:?}");
         if !matches!(t.status, Status::Checking) {
-            assert_eq!(size_label(t), text(rt, "details-size"), "the pane's size is the list's");
+            // The name line's right side: the Size first, then what room leaves of the rest, all
+            // of it on hover when some gave way.
+            let side = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("details-side")).expect("a side");
+            let shown = text(rt, "details-side");
+            let all = side.help.clone().unwrap_or_else(|| shown.clone());
+            assert!(all.starts_with(&size_label(t)) && all.starts_with(&shown), "the pane's size is the list's: {shown:?} of {all:?}");
         }
         let file_cells = file_cells(rt);
         assert_eq!(file_cells.len(), details.files.len(), "a row for every file");
@@ -1688,7 +1688,7 @@ pub(super) fn close_popover(rt: &mut Runtime<Phantom>) {
 /// the one shown.
 pub(super) fn show_notice(rt: &mut Runtime<Phantom>, id: NoticeId) {
     if !rt.state.bar.is_open() {
-        // A note open by Add, Pause or Resume takes the first click: the person closes it first.
+        // A note open by Add takes the first click: the person closes it first.
         close_notes(rt);
         let (x, y) = rt.find("notice-text").expect("the bar shows a notice");
         rt.pointer_down(x, y);
@@ -1744,22 +1744,6 @@ pub(super) fn texts_under(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
     elements.into_iter().filter(|e| e.path.starts_with(&at) && !e.exiting).filter_map(|e| e.text).collect()
 }
 
-thread_local! {
-    /// The first frame whose poll left a note asked for while its button was on, if any.
-    static NOTE_WHILE_ON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-}
-
-/// The app's poll, then a look at every frame: a note asked for is for a button that's off.
-fn poll_watching_notes(s: &mut Phantom, now: f64, tx: &mut rune::Tx) -> bool {
-    let changed = crate::poll(s, now, tx);
-    if let Some(action) = s.why_off
-        && why_off(s, action).is_none()
-    {
-        NOTE_WHILE_ON.with(|n| n.borrow_mut().get_or_insert_with(|| format!("{action:?} at {now}")).clone());
-    }
-    changed
-}
-
 /// Clicks the choice `label` in `menu`, taking no time on the app clock.
 fn pick_in(rt: &mut Runtime<Phantom>, menu: &str, label: &str) {
     pick_choice_then(rt, menu, label, step);
@@ -1784,7 +1768,7 @@ fn press(rt: &mut Runtime<Phantom>, key: &str) {
     }
 }
 
-/// Closes the notes open by Add, Pause or Resume, as clicks elsewhere do: in the window's corner,
+/// Closes the note open by Add, as clicks elsewhere do: in the window's corner,
 /// which nothing covers. A click closes the topmost note's scrim only,
 /// so with several open it takes one click for each.
 fn close_notes(rt: &mut Runtime<Phantom>) {
@@ -1792,7 +1776,7 @@ fn close_notes(rt: &mut Runtime<Phantom>) {
     if rt.state.clash.is_some() {
         return;
     }
-    const SCRIMS: [&str; 3] = ["add-note-scrim", "pause-note-scrim", "resume-note-scrim"];
+    const SCRIMS: [&str; 1] = ["add-note-scrim"];
     for _ in 0..SCRIMS.len() {
         if SCRIMS.iter().all(|scrim| rt.find(scrim).is_none()) {
             return;

@@ -40,6 +40,16 @@ impl Ui {
         text(s.into()).font(self.k.ty.text_small).color(self.k.c.text_muted)
     }
 
+    /// Whether `s` set as a [`caption`](Self::caption) fits in `width` points.
+    pub fn caption_fits(&self, s: &str, width: f32) -> bool {
+        self.caption_width(s) <= width
+    }
+
+    /// How wide `s` is set as a [`caption`](Self::caption).
+    pub fn caption_width(&self, s: &str) -> f32 {
+        rune::text::measure(s, &[], self.k.ty.text_small, None).0
+    }
+
     /// [`caption`](Self::caption) in the error colour: something the user must see to.
     pub fn error_caption(&self, s: impl Into<String>) -> El {
         text(s.into()).font(self.k.ty.text_small).color(self.tone_color(Tone::Error))

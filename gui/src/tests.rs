@@ -9,6 +9,7 @@ mod renaming;
 mod settings;
 mod space;
 mod undo;
+mod window;
 
 use std::path::Path;
 
@@ -31,7 +32,12 @@ const MAGNET: &str = "magnet:?xt=urn:btih:00000000000000000000000000000000000000
 const FRAME: f64 = 1.0 / 60.0;
 
 pub(crate) fn app(service: MemoryService) -> Runtime<Phantom> {
-    let env = Env { system_dark: true, scale: 2.0 };
+    app_in(service, true)
+}
+
+/// [`app`] in the Dark or the Light Appearance.
+pub(crate) fn app_in(service: MemoryService, dark: bool) -> Runtime<Phantom> {
+    let env = Env { system_dark: dark, scale: 2.0 };
     let mut rt = Runtime::new(Phantom::new(Box::new(service)), views::view, (960.0, 540.0), env);
     rt.poll = Some(poll);
     rt.on_key = Some(on_key);
@@ -320,6 +326,15 @@ fn enabled(rt: &Runtime<Phantom>, key: &str) -> bool {
     elements.iter().any(|e| e.parent == Some(button) && e.focusable)
 }
 
+/// What row `id`'s toggle says it does: "Pause" or "Resume"; `None` where it has none.
+fn toggle(rt: &Runtime<Phantom>, id: TorrentId) -> Option<String> {
+    let inside = format!("/rows/{id}/");
+    rt.elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.key.as_deref() == Some("toggle-button") && e.path.contains(&inside))
+        .and_then(|e| e.label)
+}
+
 /// The element keyed `key` is drawn where a click would reach it, not scrolled out of the list.
 fn on_screen<S: 'static>(rt: &Runtime<S>, key: &str) -> bool {
     let Some((x, y)) = rt.find(key) else { return false };
@@ -442,15 +457,14 @@ fn adding_a_magnet_already_in_the_list_selects_that_torrent() {
 }
 
 #[test]
-fn pause_and_resume_act_on_the_selected_rows_only() {
+fn pause_and_resume_act_on_the_toggled_row_only() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "b")]));
-    tap(&mut rt, "rows/1");
-    tap(&mut rt, "pause");
+    tap(&mut rt, "rows/1/toggle");
     let status = |rt: &Runtime<Phantom>, id| rt.state.torrents.iter().find(|t| t.id == id).unwrap().status.clone();
     assert_eq!(status(&rt, 1), Status::Paused);
     assert_eq!(status(&rt, 0), Status::Downloading, "the other row is untouched");
 
-    tap(&mut rt, "resume");
+    tap(&mut rt, "rows/1/toggle");
     assert_eq!(status(&rt, 1), Status::Downloading);
 }
 
@@ -460,15 +474,14 @@ fn a_torrent_paused_while_fetching_info_lands_paused_and_resumes() {
     rt.paste(MAGNET);
     settle(&mut rt);
     let id = rt.state.torrents[0].id;
-    tap(&mut rt, &format!("rows/{id}"));
-    tap(&mut rt, "pause");
+    tap(&mut rt, &format!("rows/{id}/toggle"));
     assert_eq!(rt.state.torrents[0].status, Status::FetchingInfo, "still fetching");
     assert!(rt.state.torrents[0].actions.does(Action::Resume));
 
     wait(&mut rt, 3.0);
     assert_eq!(rt.state.torrents[0].status, Status::Paused, "its info arrived, and it didn't download");
     assert_eq!(rt.state.torrents[0].content.unwrap().progress_bytes, 0);
-    tap(&mut rt, "resume");
+    tap(&mut rt, &format!("rows/{id}/toggle"));
     assert_eq!(rt.state.torrents[0].status, Status::Downloading);
 }
 
@@ -478,8 +491,7 @@ fn a_complete_torrent_paused_is_done() {
     seeding.status = Status::Seeding;
     seeding.content = seeding.content.map(|c| Content { progress_bytes: c.size_bytes, ..c });
     let mut rt = app(MemoryService::new().with_torrents(vec![seeding]));
-    tap(&mut rt, "rows/0");
-    tap(&mut rt, "pause");
+    tap(&mut rt, "rows/0/toggle");
     assert_eq!(rt.state.torrents[0].status, Status::Done { reached: None });
 }
 
@@ -927,8 +939,7 @@ fn the_status_bar_speeds_stay_put_when_an_action_runs() {
     let mut rt = app(with_an_album());
     let before = rt.find("totals").expect("the totals");
     let id = rt.state.torrents[0].id;
-    tap(&mut rt, &format!("rows/{id}"));
-    tap(&mut rt, "pause");
+    tap(&mut rt, &format!("rows/{id}/toggle"));
     assert_eq!(rt.find("totals").expect("the totals"), before);
 }
 
@@ -970,7 +981,7 @@ fn setting_the_missing_file_off_clears_it() {
 #[test]
 fn resuming_a_torrent_missing_files_checks_it_then_downloads_them_again() {
     let mut rt = album_missing_a_song();
-    tap(&mut rt, "resume");
+    tap(&mut rt, "rows/1/toggle");
     assert_eq!(find_torrent(&rt, 1).status, Status::Checking);
     assert!(!texts(&rt, "files/viewport/rows/1").contains(&"Missing".to_owned()), "to download, once checked");
     wait(&mut rt, 1.5);
@@ -992,7 +1003,7 @@ fn check_checks_a_torrent_and_leaves_it_running_or_stopped() {
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 0).status, Status::Seeding);
 
-    tap(&mut rt, "pause");
+    tap(&mut rt, "rows/0/toggle");
     row_pick(&mut rt, 0, "Check");
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 0).status, Status::Done { reached: None }, "stopped stays stopped");
@@ -1022,7 +1033,7 @@ fn cancel_check_is_offered_only_while_checking_and_leaves_the_torrent_not_checke
     assert_eq!(client::display::status(&t.status), "Unchecked");
     assert!(!row_menu(&mut rt, 0).contains(&"Cancel check".to_owned()), "once it's not checked there's nothing to cancel");
     // Resume is a check, as from Missing files.
-    tap(&mut rt, "resume");
+    tap(&mut rt, "rows/0/toggle");
     assert_eq!(find_torrent(&rt, 0).status, Status::Checking);
     wait(&mut rt, 1.5);
     assert_eq!(find_torrent(&rt, 0).status, Status::Seeding);
@@ -1288,12 +1299,15 @@ fn a_destination_unavailable_says_why_on_hover_in_the_list_and_in_the_pane() {
 }
 
 #[test]
-fn resume_is_off_while_the_destination_is_away_and_pause_keeps_it_stopped_once_back() {
+fn a_torrent_whose_destination_is_away_can_be_paused_but_its_toggle_is_then_disabled() {
     let mut rt = album_away(with_an_album());
-    assert!(!enabled(&rt, "resume"), "it's wanted running already");
-    tap(&mut rt, "pause");
-    assert!(!enabled(&rt, "resume"), "it can't start while away");
-    assert!(!enabled(&rt, "pause"));
+    assert_eq!(toggle(&rt, 1).as_deref(), Some("Pause"), "it's wanted running already");
+    tap(&mut rt, "rows/1/toggle");
+    assert_eq!(toggle(&rt, 1).as_deref(), Some("Resume"), "it can't start while away: the toggle shows ▶, disabled");
+    let off =
+        rt.elements().into_iter().find(|e| !e.exiting && e.key.as_deref() == Some("toggle-button") && e.path.contains("/rows/1/")).unwrap();
+    assert_eq!(off.help.as_deref(), Some("Destination unavailable"), "and says why");
+    tap(&mut rt, "rows/1/toggle");
     assert_eq!(find_torrent(&rt, 1).status, Status::DestinationUnavailable { reason: drive_gone() });
 }
 
@@ -1324,7 +1338,7 @@ fn a_torrent_paused_before_or_while_its_destination_is_away_stays_paused_once_it
     let service = with_an_album().with_torrents(vec![paused]).at(0.0, DiskChange::DestinationGone { id: 2, reason: drive_gone() });
     let back = |id| DiskChange::DestinationBack { id };
     let mut rt = album_away(service.at(2.0, back(1)).at(2.0, back(2)));
-    tap(&mut rt, "pause");
+    tap(&mut rt, "rows/1/toggle");
     wait(&mut rt, 4.0);
     assert_eq!(find_torrent(&rt, 1).status, Status::Paused, "paused while away");
     assert_eq!(find_torrent(&rt, 2).status, Status::Paused, "paused before");
@@ -1882,40 +1896,6 @@ fn add_file_picks_a_torrent_file_and_adds_it_from_its_button_or_shift_cmd_a() {
     shortcut(&mut rt, InApp::AddFile);
     assert!(rt.file_dialog().is_some(), "⇧⌘A opens it too");
     rt.resolve_file_dialog(None).unwrap();
-}
-
-/// A disabled button clicked says why it's off, in a note under it (#89).
-#[test]
-fn a_click_on_resume_while_it_is_off_says_why() {
-    let mut rt = app(with_an_album());
-    tap(&mut rt, "rows/1");
-    tap(&mut rt, "resume");
-    assert_eq!(texts(&rt, "resume-note-content"), ["Already running"]);
-    tap(&mut rt, "list");
-    assert!(rt.find("resume-note-content").is_none(), "a click elsewhere closes it");
-}
-
-/// An example, not a property: the generated test reaches it only rarely (the note open, then
-/// the button turning on without a press). The note says why the button is off, so it goes once
-/// it's on.
-#[test]
-fn the_note_goes_once_its_button_is_on() {
-    let service = with_an_album();
-    let disk = service.disk();
-    let mut rt = app(service);
-    tap(&mut rt, "rows/1");
-    tap(&mut rt, "resume");
-    assert!(rt.find("resume-note-content").is_some());
-    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
-    settle(&mut rt);
-    assert!(enabled(&rt, "resume"), "Missing files: Resume checks it");
-    assert!(rt.find("resume-note-content").is_none(), "no reason left to say");
-    // Back to running, Resume is off again: the note stays closed until it's clicked again.
-    disk.change(DiskChange::FilesPutBack { id: 1, files: vec![0] });
-    tap(&mut rt, "resume");
-    settle(&mut rt);
-    assert!(!enabled(&rt, "resume"), "running again");
-    assert!(rt.find("resume-note-content").is_none(), "a closed note doesn't come back by itself");
 }
 
 /// The service's settings reset at its start come with its snapshots, and show as a warning once.

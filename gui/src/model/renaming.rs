@@ -91,12 +91,14 @@ pub fn close(s: &mut Phantom) {
 }
 
 /// Called before every frame: the field that had the focus and hasn't now (a click elsewhere, Tab)
-/// cancels, and so does its torrent leaving the list.
+/// cancels, and so does its torrent leaving the list, or the Name column leaving the screen (hidden,
+/// or dropped by a narrow window): the field would be nowhere, yet still pending.
 pub fn follow_focus(s: &mut Phantom) {
     let Some(id) = s.rename.id else { return };
     let gone = !s.torrents.iter().any(|t| t.id == id);
     let left = s.rename.had_focus && !s.rename.field.focused;
-    if gone || left {
+    let unseen = !s.mounted.offers(crate::commands::OnTorrents::Rename);
+    if gone || left || unseen {
         return close(s);
     }
     s.rename.had_focus = s.rename.field.focused;

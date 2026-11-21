@@ -24,12 +24,19 @@ use std::rc::Rc;
 use machine::Every;
 use rune::El;
 
-use super::{Icon, Tone, Ui};
+use super::{BandSide, Icon, Tone, Ui};
 
 /// Draws a progress bar: `fraction` from 0.0 to 1.0.
 pub type ProgressBar = Rc<dyn Fn(&Ui, f32) -> El>;
 /// Draws a dot in the colour of `tone`.
 pub type StatusDot = Rc<dyn Fn(&Ui, Tone) -> El>;
+/// Draws one tab, selected or not: the screen keys it and gives it its press.
+pub type Tab = Rc<dyn Fn(&Ui, &str, bool) -> El>;
+/// Draws the row holding the tabs.
+pub type TabBar = Rc<dyn Fn(&Ui, Vec<El>) -> El>;
+/// Draws what goes in the titlebar band's free room on one side (a logo), which stays a place to
+/// drag the window by.
+pub type Band = Rc<dyn Fn(&Ui, BandSide) -> El>;
 /// The icons a theme draws: `None` for one it leaves to its parent.
 pub type Icons = Rc<dyn Fn(Icon) -> Option<&'static rune::Icon>>;
 
@@ -39,6 +46,9 @@ pub struct BlockOverrides {
     pub icons: Option<Icons>,
     pub progress_bar: Option<ProgressBar>,
     pub status_dot: Option<StatusDot>,
+    pub tab: Option<Tab>,
+    pub tab_bar: Option<TabBar>,
+    pub band: Option<Band>,
 }
 
 /// Every block, as a look draws it.
@@ -47,6 +57,9 @@ pub struct Blocks {
     pub icons: Vec<(Icon, &'static rune::Icon)>,
     pub progress_bar: ProgressBar,
     pub status_dot: StatusDot,
+    pub tab: Tab,
+    pub tab_bar: TabBar,
+    pub band: Band,
 }
 
 impl Blocks {
@@ -57,6 +70,9 @@ impl Blocks {
             icons: Icon::every().into_iter().map(|i| (i, icon(i))).collect(),
             progress_bar: Rc::new(super::progress::phantom),
             status_dot: Rc::new(super::status::phantom_dot),
+            tab: Rc::new(super::tabs::phantom_tab),
+            tab_bar: Rc::new(super::tabs::phantom_tab_bar),
+            band: Rc::new(super::tabs::phantom_band),
         }
     }
 
@@ -71,6 +87,9 @@ impl Blocks {
             icons: self.icons,
             progress_bar: theme.progress_bar.clone().unwrap_or(self.progress_bar),
             status_dot: theme.status_dot.clone().unwrap_or(self.status_dot),
+            tab: theme.tab.clone().unwrap_or(self.tab),
+            tab_bar: theme.tab_bar.clone().unwrap_or(self.tab_bar),
+            band: theme.band.clone().unwrap_or(self.band),
         }
     }
 
