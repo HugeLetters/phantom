@@ -231,14 +231,18 @@ move** takes it out of the queue (a Remove or a Delete does too); meanwhile it r
 what's asked of it (Pause, a priority) is done at once. Quitting puts back only the move under way:
 those not started don't happen; a restart for new settings waits only for the move under way, and
 the others still wait. A clash is asked about for each torrent that has one, before anything moves,
-one dialog after another in the list's order: Use existing, Replace or Cancel, which skips only that
-torrent, with **Apply to the remaining N** giving the answer to the rest. An answer holds for the
+one dialog after another in the list's order: Use existing, Replace, Rename… or Cancel, which skips
+only that torrent, with **Apply to the remaining N** giving the answer to the rest. Rename… moves the
+torrent in under a name typed in the dialog (a Rename's rules: anything at that name when its turn
+comes refuses it); a name is one torrent's, so the box is hidden meanwhile. A clash with another
+listed torrent's files offers only Rename… and Cancel, and names that torrent; Replace or Use
+existing given to the rest passes over those, which are still asked about. An answer holds for the
 files the dialog showed, as they were: a torrent whose new folder changed by its turn (a file put
 there, an earlier move's files at its paths) isn't moved, and the notice lists it: "Its new folder
 changed while it waited", with the path. A file another torrent in the list has (where it is, or
 where its Move takes it) is never replaced nor used by another's Move, whatever the answer, even
 one taken over unchanged: that torrent isn't moved, and the notice says "Another torrent has its
-files there", with the path. What Use existing keeps must still be as the dialog showed once the
+files there", with the path; only a new name moves it there. What Use existing keeps must still be as the dialog showed once the
 rest is copied, or the Move goes back.
 _Avoid_: relocate, change folder, set location
 
