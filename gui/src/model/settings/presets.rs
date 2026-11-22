@@ -8,7 +8,7 @@
 
 use rune::{TextEdit, Tx};
 
-use super::{Chip, EditSheet, Row, SaveAs, SettingsWindow, Tab, app_changed, follow_focus, leave, looks_changed};
+use super::{Chip, EditSheet, Row, SaveAs, SettingsWindow, Side, Tab, app_changed, follow_focus, leave, looks_changed};
 use crate::changes::machine::AppSetting;
 use crate::changes::{PresetChange, PresetVerb, Presets, Target, Was};
 use crate::theme::preset::Appearance;
@@ -139,18 +139,37 @@ pub fn edit_active(s: &mut SettingsWindow) {
     open_sheet(s, Target::Active);
 }
 
-/// The sheet of `target`, unless it's open on it already.
+/// The sheet of `target`, unless it's open on it already (one open on another is done first):
+/// its changes are its own from now on, for ⌘Z, until it closes.
 fn open_sheet(s: &mut SettingsWindow, target: Target) {
     let Some(sheet) = &mut s.sheet else { return };
     if sheet.target() == Some(&target) {
         return;
     }
-    sheet.edit = Some(EditSheet { target, editor: Default::default(), focus: None });
+    close(s);
+    let opened = Presets::of(&s.looks.borrow(), &s.saved);
+    let Some(sheet) = &mut s.sheet else { return };
+    sheet.edit = Some(EditSheet { target, editor: Default::default(), opened, focus: None });
+    s.main.post(|s, _| crate::changes::editor_opened(s));
     looks_changed(s);
 }
 
-/// The sheet closes (Done, Escape, ⌘W): the field being edited in it applied first, then the
-/// preview goes.
+/// Cancel, or Escape: the sheet closes, the Look Presets back as they were when it opened, what's
+/// typed in it dropped, and none of its changes left for ⌘Z.
+pub fn cancel(s: &mut SettingsWindow) {
+    let Some(sheet) = &mut s.sheet else { return };
+    let Some(edit) = sheet.edit.take() else { return };
+    sheet.had_focus.retain(|row| !matches!(row, Row::Colour(..)));
+    sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
+    if Presets::of(&s.looks.borrow(), &s.saved) != edit.opened {
+        super::restore(s, edit.opened);
+    }
+    s.main.post(|s, _| crate::changes::editor_closed(s, None));
+    preview(s);
+}
+
+/// The sheet closes (Done, ⌘W, the window closing): the field being edited in it applied first,
+/// then the preview goes. What changed in it since it opened is one step of Undo.
 pub fn close(s: &mut SettingsWindow) {
     let Some(sheet) = &mut s.sheet else { return };
     if sheet.edit.is_none() {
@@ -169,10 +188,12 @@ pub fn close(s: &mut SettingsWindow) {
         }
         leave(s, row);
     }
+    let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.take()) else { return };
     if let Some(sheet) = &mut s.sheet {
-        sheet.edit = None;
         sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
     }
+    let was = (Presets::of(&s.looks.borrow(), &s.saved) != edit.opened).then(|| Was::Edit(edit.opened, edit.target));
+    s.main.post(move |s, _| crate::changes::editor_closed(s, was));
     preview(s);
 }
 
@@ -192,26 +213,37 @@ pub fn preview(s: &mut SettingsWindow) {
     s.main.post(|_, _| {});
 }
 
-/// After an undo, the theme setting `key` of `target`, in its sheet (opened, and Settings with it,
-/// if closed), its control focused: a colour's field through its text, any other as the sheet's
-/// first in the Tab order.
-pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, tx: &mut Tx) {
+/// After an undo, the theme setting `key` of `target` set on `side`, in its sheet (opened, and
+/// Settings with it, if closed), its row joined or split as it was set, its control focused: a colour's
+/// field through its text, any other as the sheet's first in the Tab order.
+pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, side: Side, tx: &mut Tx) {
     if s.sheet.is_none() {
         super::open(s);
     }
     s.window.raise();
     let Some(sheet) = &mut s.sheet else { return };
     sheet.tab = Tab::Appearance;
+    super::close_icons(s);
     open_sheet(s, target);
     let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) else { return };
     edit.focus = None;
+    edit.editor.menu = None;
+    // Its row as it was set: joined, or split.
+    match side {
+        Side::Both => edit.editor.split.remove(key),
+        Side::Only(_) => edit.editor.split.insert(key),
+    };
+    looks_changed(s);
+    let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) else { return };
     for field in &mut edit.editor.colours {
         field.text.focused = false;
     }
-    match edit.editor.colours.iter_mut().find(|f| f.key == key) {
+    let at = edit.editor.colours.iter().position(|f| f.key == key && f.side == side);
+    let at = at.or_else(|| edit.editor.colours.iter().position(|f| f.key == key));
+    match at.map(|i| &mut edit.editor.colours[i]) {
         Some(field) => field.text.focused = true,
         None => {
-            edit.focus = Some(key);
+            edit.focus = Some((key, side));
             tx.blur();
         }
     }

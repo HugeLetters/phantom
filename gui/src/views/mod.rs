@@ -4,7 +4,7 @@
 
 mod clash;
 mod columns_menu;
-mod details;
+pub(crate) mod details;
 mod empty;
 pub(crate) mod file_menu;
 pub(crate) mod palette;

@@ -17,6 +17,8 @@ pub mod phantom;
 pub mod preset;
 pub mod saved;
 pub mod setting;
+#[cfg(all(debug_assertions, not(test)))]
+pub mod standin;
 
 use std::fmt;
 use std::rc::Rc;
@@ -148,8 +150,11 @@ impl Look {
 
 /// Every theme there is.
 pub fn themes() -> &'static [&'static dyn Theme] {
-    #[cfg(not(test))]
+    #[cfg(all(not(test), not(debug_assertions)))]
     static THEMES: [&dyn Theme; 1] = [&phantom::PHANTOM];
+    // A second theme to see the editor's two lists with (#87), in debug builds only.
+    #[cfg(all(not(test), debug_assertions))]
+    static THEMES: [&dyn Theme; 2] = [&phantom::PHANTOM, &standin::STAND_IN];
     // A second theme, so tests meet a look that isn't Phantom's.
     #[cfg(test)]
     static THEMES: [&dyn Theme; 2] = [&phantom::PHANTOM, &tests::SAMPLE];

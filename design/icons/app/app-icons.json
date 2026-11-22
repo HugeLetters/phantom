@@ -88,32 +88,32 @@
   ],
   "pairs": [
     {
-      "name": "Dark Hour / Full Moon",
+      "name": "Dark Hour",
       "dark": "dark-hour",
       "light": "full-moon"
     },
     {
-      "name": "Memento Mori (Dark Hour) / Memento Mori",
+      "name": "Memento Mori",
       "dark": "memento-mori-dark-hour",
       "light": "memento-mori"
     },
     {
-      "name": "Sea of Souls (Dark Hour) / Sea of Souls",
+      "name": "Sea of Souls",
       "dark": "sea-of-souls-dark-hour",
       "light": "sea-of-souls"
     },
     {
-      "name": "Phantom Thief (Alt) / Phantom Thief",
+      "name": "Phantom Thief (Alt)",
       "dark": "phantom-thief-alt",
       "light": "phantom-thief"
     },
     {
-      "name": "Phantom Thief (Alt 2) / Phantom Thief",
+      "name": "Phantom Thief (Alt 2)",
       "dark": "phantom-thief-alt-2",
       "light": "phantom-thief"
     },
     {
-      "name": "Calling Card / Black Mask",
+      "name": "Calling Card",
       "dark": "calling-card",
       "light": "black-mask"
     }

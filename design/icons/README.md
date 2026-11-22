@@ -84,7 +84,7 @@ names, themes, pairs, theme icons):
     …
   ],
   "pairs": [
-    { "name": "Dark Hour / Full Moon", "dark": "dark-hour", "light": "full-moon" },
+    { "name": "Dark Hour", "dark": "dark-hour", "light": "full-moon" },
     …
   ],
   "themes": {

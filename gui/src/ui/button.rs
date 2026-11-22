@@ -52,6 +52,12 @@ impl Button<'_> {
         self
     }
 
+    /// Text only, a fill only under the pointer: lighter than a plain button.
+    pub fn ghost(mut self) -> Self {
+        self.inner = self.inner.variant(ButtonVariant::Ghost);
+        self
+    }
+
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self.inner = self.inner.disabled(disabled);

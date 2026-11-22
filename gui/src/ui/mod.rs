@@ -34,7 +34,9 @@ pub use blocks::{ProgressBar, StatusDot};
 pub use icon::Icon;
 pub use menu::Entry;
 pub use palette::PaletteRow;
-pub use sheet::LookChip;
+#[cfg(test)]
+pub(crate) use sheet::NAME_LINE;
+pub use sheet::{Halves, IMAGES, LookChip};
 pub use status::Tone;
 pub use table::{Table, TableColumn};
 pub use tabs::BandSide;
@@ -58,7 +60,8 @@ impl Ui {
         &self.blocks
     }
 
-    #[cfg(test)]
+    /// The look's tokens, as a block of another look's reads them (a Look Preset's editor draws
+    /// each half's column on its own card colour).
     pub fn tokens(&self) -> &Kit {
         &self.k
     }

@@ -24,8 +24,9 @@ use crate::theme::setting::Values;
 pub const SETTING: &str = "look_preset";
 
 /// Light or Dark, as the system sets it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Appearance {
+    #[default]
     Light,
     Dark,
 }

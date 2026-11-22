@@ -9,8 +9,11 @@
 //! The choice is stored in the GUI's `gui.json` in the data dir under `app_icon`, as
 //! `{"icon": id}` or `{"dark": id, "light": id}` (a designed pair is stored just like a custom
 //! one); without it the icon follows the theme: the App icon of the look each Appearance shows
-//! (`crate::theme::preset::Looks::app_icons`). Anything unreadable or naming an unknown icon means
-//! Follow theme. The manifest's `themes` table is the design's record of which icon suits which
+//! (`crate::theme::preset::Looks::app_icons`). A half may follow it alone ([`FOLLOW`]). Anything
+//! unreadable means Follow theme; a half naming an unknown icon follows it. An id starting `file:` is an image file a person added as an icon (#87),
+//! `file:/Users/me/Pictures/moon.png`: read where it is, it shows while it can be read; those added
+//! are kept in order under `app_icon_images`.
+//! The manifest's `themes` table is the design's record of which icon suits which
 //! theme; the app reads each theme's own from the theme.
 
 #[cfg(target_os = "macos")]
@@ -22,6 +25,28 @@ use serde::{Deserialize, Serialize};
 
 /// The key of the choice in `gui.json`.
 pub const SETTING: &str = "app_icon";
+
+/// The largest image file that can be added as an icon, in bytes: a bigger one would slow every
+/// launch, as the images are read and decoded then.
+pub const MAX_IMAGE: u64 = 4_000_000;
+
+/// Whether `bytes` are an image the system can decode (a file's extension says nothing).
+fn decodes(bytes: &[u8]) -> bool {
+    #[cfg(target_os = "macos")]
+    return appkit::image(bytes).is_some();
+    #[cfg(not(target_os = "macos"))]
+    return !bytes.is_empty();
+}
+
+/// What the id of an image file added as an icon starts with, its path after it.
+pub const FILE: &str = "file:";
+
+/// What a half of the choice holds to follow the theme while the other half doesn't (#87):
+/// `{"dark": "theme", "light": "full-moon"}`. Both halves following is no choice (`None`).
+pub const FOLLOW: &str = "theme";
+
+/// The key in `gui.json` of the images added as icons, by id, in the order they were added.
+pub const ADDED: &str = "app_icon_images";
 
 /// One icon, or a dark and a light one swapped with the Appearance: what the user chose (the
 /// choice is `Option<Icons>`, `None` following the theme) and what following the theme shows.
@@ -64,7 +89,7 @@ pub struct Icon {
 /// A designed pair, a dark icon and a light one made to go together, as the picker offers it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Pair {
-    /// "‹dark› / ‹light›".
+    /// A short name of its own: "Memento Mori". Its icons' names are in its hover.
     pub name: String,
     pub dark: String,
     pub light: String,
@@ -81,6 +106,8 @@ impl Pair {
 #[derive(Debug)]
 pub struct Manifest {
     icons: Vec<Icon>,
+    /// The image files added as icons, read: their tiles are the sheet's own, after these.
+    files: Vec<Icon>,
     /// Index into `icons` of the bundle's compiled icon.
     default: usize,
     /// The designed pairs whose icons can all be shown, in the picker's order.
@@ -131,7 +158,7 @@ impl Manifest {
             })
             .collect();
         let default = icons.iter().position(|icon| icon.id == file.default)?;
-        let mut manifest = Manifest { icons, default, pairs: Vec::new() };
+        let mut manifest = Manifest { icons, files: Vec::new(), default, pairs: Vec::new() };
         manifest.pairs = file.pairs.into_iter().filter(|pair| pair.icons().known(&manifest)).collect();
         Some(manifest)
     }
@@ -146,7 +173,35 @@ impl Manifest {
     }
 
     pub fn icon(&self, id: &str) -> Option<&Icon> {
-        self.icons.iter().find(|icon| icon.id == id)
+        self.everyone().find(|icon| icon.id == id)
+    }
+
+    /// Every icon it can show: those it offers, then the image files a well took.
+    pub fn everyone(&self) -> impl Iterator<Item = &Icon> {
+        self.icons.iter().chain(&self.files)
+    }
+
+    /// Reads each image file `icons` names that isn't read yet ([`FILE`]), named by its file name
+    /// without the extension; the ids it read. One that can't be read: why.
+    pub fn adopt(&mut self, icons: &Icons) -> Result<Vec<String>, String> {
+        let mut added = Vec::new();
+        for dark in [true, false] {
+            let id = icons.side(dark);
+            let Some(path) = id.strip_prefix(FILE).filter(|_| self.icon(id).is_none()) else { continue };
+            let file = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+            let size = std::fs::metadata(path).map_err(|e| format!("can't read {file}: {e}"))?.len();
+            if size > MAX_IMAGE {
+                return Err(format!("{file} is over {} MB", MAX_IMAGE / 1_000_000));
+            }
+            let bytes = std::fs::read(path).map_err(|e| format!("can't read {file}: {e}"))?;
+            if !decodes(&bytes) {
+                return Err(format!("{file} isn't an image"));
+            }
+            let name = Path::new(path).file_stem().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+            self.files.push(Icon { id: id.to_owned(), name, bytes });
+            added.push(id.to_owned());
+        }
+        Ok(added)
     }
 
     /// The bundle's compiled icon, which Phantom shows by touching nothing.
@@ -159,11 +214,15 @@ impl Manifest {
     }
 }
 
-/// The icon to show now: the choice if the manifest has it, else `theme`'s (what each
-/// Appearance's look gives) if it has those, else the default. `dark` is the effective Appearance.
+/// The icon to show now, for the half `dark` says (the effective Appearance): the choice's for
+/// it if the manifest has it, else `theme`'s (what each Appearance's look gives) if it has that,
+/// else the default. A half that follows the theme ([`FOLLOW`]) or names an icon there isn't (an
+/// image moved or removed) shows the theme's, never the other half's; the theme's own pair shows
+/// whole or not at all.
 pub fn resolve<'m>(choice: Option<&Icons>, manifest: &'m Manifest, theme: &Icons, dark: bool) -> &'m Icon {
-    let icons = choice.into_iter().chain([theme]).find(|icons| icons.known(manifest));
-    icons.and_then(|icons| manifest.icon(icons.side(dark))).unwrap_or(manifest.default())
+    let side = |icons: &Icons| manifest.icon(icons.side(dark));
+    let theme = Some(theme).filter(|theme| theme.known(manifest)).and_then(side);
+    choice.and_then(side).or(theme).unwrap_or(manifest.default())
 }
 
 /// The bundle icon Phantom last wrote, kept in `gui.json` so a reset removes only Phantom's own:

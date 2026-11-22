@@ -91,11 +91,15 @@ fn a_pair_swaps_with_the_appearance() {
     assert_eq!(shown(&pair("dark-hour", "phantom"), &m, &phantoms()), ids("dark-hour", "phantom"), "a custom pair with the default");
 }
 
+/// A half naming an icon there isn't (an image moved or removed) follows the theme, never the
+/// other half's icon; so does a half chosen to follow it (#87).
 #[test]
-fn an_unknown_icon_means_follow_theme() {
+fn an_unknown_icon_means_that_half_follows_the_theme() {
     let m = manifest();
-    assert_eq!(shown(&one("gone"), &m, &pair("calling-card", "black-mask")), ids("calling-card", "black-mask"));
-    assert_eq!(shown(&pair("dark-hour", "gone"), &m, &phantoms()), ids("phantom", "phantom"), "a pair never shows half");
+    let theme = || pair("calling-card", "black-mask");
+    assert_eq!(shown(&one("gone"), &m, &theme()), ids("calling-card", "black-mask"));
+    assert_eq!(shown(&pair("dark-hour", "gone"), &m, &theme()), ids("dark-hour", "black-mask"), "the Light half follows");
+    assert_eq!(shown(&pair(FOLLOW, "full-moon"), &m, &theme()), ids("calling-card", "full-moon"), "the Dark half follows");
 }
 
 #[test]
