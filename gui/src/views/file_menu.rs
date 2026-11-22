@@ -59,7 +59,7 @@ pub fn entries(items: &[OnFiles], checked: Option<Priority>) -> Vec<Entry> {
         for item in in_group {
             let spec = item.spec();
             entries.push(Entry::Choice {
-                id: spec.id,
+                id: spec.id.into(),
                 label: spec.name.into(),
                 hint: spec.hint(),
                 // The current priority has the check in the icon gutter, as the other items their

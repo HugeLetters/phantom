@@ -173,8 +173,10 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
     for c in offered {
         entries.push(entry(Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
         if c == OnTorrents::MoveTo {
-            entries.extend(super::recent::offered(s).into_iter().map(|f| Entry {
-                label: client::display::move_to_folder(&super::recent::name(&f.folder)),
+            let folders = super::recent::offered(s);
+            let names = super::recent::names(&folders);
+            entries.extend(folders.into_iter().zip(names).map(|(f, name)| Entry {
+                label: client::display::move_to_folder(&name),
                 hint: None,
                 to: Some(f.folder),
                 ..entry(Command::Torrents(c), Group::Torrents, String::new())

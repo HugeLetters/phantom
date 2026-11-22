@@ -4,7 +4,8 @@
 //! the middle, then "and 2 more", Reveal in Finder small at the end of the first; with more to
 //! ask, "Apply to the remaining N"; then one row of buttons at the bottom right: Cancel, which skips
 //! only this torrent, as Escape does, Rename…, Replace and Use existing (the default, Return), each
-//! saying what it does only in its tooltip. At the smallest window the paths give way first, to
+//! saying what it does only in its tooltip. Return presses the button with the focus, and the
+//! default when none has it. At the smallest window the paths give way first, to
 //! one, so the buttons always fit.
 //!
 //! Rename… turns the dialog into a name field (#335's rules) and Move: the torrent moves in under
@@ -29,7 +30,12 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
     let Some(clash) = &s.clash else { return };
     let [use_existing, replace, cancel, show, rename_to, move_in] = display::clash_choices();
     let [use_help, replace_help, rename_help] = display::clash_choice_help();
-    let cancel = || ui.button("clash-cancel", cancel).on_press(|s: &mut Phantom| choose(s, None)).build();
+    // A button with the focus takes Return itself and presses, rather than the dialog's first
+    // choice, which sends this torrent's own files to the Trash.
+    let presses = |button: El, act: fn(&mut Phantom, &mut Tx)| {
+        button.on_key(move |s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx| return_does(ev, || act(s, tx)))
+    };
+    let cancel = || presses(ui.button("clash-cancel", cancel).on_press(|s: &mut Phantom| choose(s, None)).build(), |s, _| choose(s, None));
     let close = |s: &mut Phantom| choose(s, None);
     if clash.renaming.is_some() {
         let title = display::clash_title(&display::clash_new_name(&clash.name, &clash.to), clash.at, clash.of);
@@ -59,7 +65,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
     let rename_button = |primary: bool| {
         let button = ui.button("clash-rename", rename_to).on_press(rename);
         let button = if primary { button.primary() } else { button };
-        explained("clash-rename", button.build(), rename_help)
+        explained("clash-rename", presses(button.build(), |s, _| rename(s)), rename_help)
     };
     let room = window.is_none_or(|(_, h)| h >= ROOMY);
     let paths = paths(clash, ui, show, if room { PATHS } else { 1 });
@@ -71,20 +77,22 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
             let title = display::clash_title(&display::clash_question_another(&clash.name, &clash.to), clash.at, clash.of);
             let keeps = ui.dialog_line(display::clash_another_keeps());
             let body = col().key("clash-body").w_full().gap(6.0).child(keeps).child(paths);
-            let show_in_list = ui.button("clash-show-in-list", display::clash_show_in_list()).on_press_tx(show_in_list).build();
-            let foot = foot(vec![show_in_list, cancel(), rename_button(true)]);
+            let show = ui.button("clash-show-in-list", display::clash_show_in_list()).on_press_tx(show_in_list).build();
+            let foot = foot(vec![presses(show, show_in_list), cancel(), rename_button(true)]);
             let on_key = |s: &mut Phantom, ev: &KeyEvent, _: &mut Tx| return_does(ev, || rename(s));
             ui.dialog("clash", &title, body, foot, close, on_key, layer);
         }
         None => {
             let title = display::clash_title(&display::clash_question(&clash.name, &clash.files, &clash.to), clash.at, clash.of);
             let replace = ui.button("clash-replace", replace).on_press(|s: &mut Phantom| choose(s, Some(proto::Clash::Replace))).build();
+            let replace = presses(replace, |s, _| choose(s, Some(proto::Clash::Replace)));
             let replace = explained("clash-replace", replace, replace_help);
             let use_existing = ui
                 .button("clash-use-existing", use_existing)
                 .primary()
                 .on_press(|s: &mut Phantom| choose(s, Some(proto::Clash::UseExisting)));
-            let use_existing = explained("clash-use-existing", use_existing.build(), use_help);
+            let use_existing = presses(use_existing.build(), |s, _| choose(s, Some(proto::Clash::UseExisting)));
+            let use_existing = explained("clash-use-existing", use_existing, use_help);
             let body = col().key("clash-body").w_full().child(paths);
             let foot = foot(vec![cancel(), rename_button(false), replace, use_existing]);
             let on_key = |s: &mut Phantom, ev: &KeyEvent, _: &mut Tx| return_does(ev, || choose(s, Some(proto::Clash::UseExisting)));
@@ -98,7 +106,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
     }
 }
 
-/// Return, wherever the focus is in the dialog, is its first choice: `act`.
+/// Return, with no button of the dialog focused, is its first choice: `act`.
 fn return_does(ev: &KeyEvent, act: impl FnOnce()) -> bool {
     if matches!(ev.key, Key::Enter) && ev.mods == rune::Mods::default() {
         act();
@@ -119,7 +127,14 @@ fn paths(clash: &Clash, ui: &Ui, show: &str, most: usize) -> El {
     let lines = files.iter().take(most).enumerate().map(|(i, f)| {
         let path = ui.dialog_path(&f.display().to_string());
         let line = row().w_full().gap(8.0).center_y().child(path);
-        if i == 0 { line.child(el().grow(1.0)).child(ui.button("clash-reveal", show).small().on_press(reveal).build()) } else { line }
+        if i == 0 {
+            let button = ui.button("clash-reveal", show).small().on_press(reveal).build();
+            // With the focus, Return presses it, as on any button of the dialog.
+            let button = button.on_key(|s: &mut Phantom, ev: &KeyEvent, _: &mut Tx| return_does(ev, || reveal(s)));
+            line.child(el().grow(1.0)).child(button)
+        } else {
+            line
+        }
     });
     let first: Vec<El> = lines.collect();
     let more = files.len().saturating_sub(most);

@@ -218,6 +218,48 @@ fn a_click_away_renames() {
     assert!(texts(&rt, "details-name").contains(&"Other".to_owned()), "the header");
 }
 
+/// A click on another row, with the field open, renames the torrent whose field it is, not the
+/// row clicked: the click takes the focus from the field (that renames), then the pane shows the
+/// other torrent.
+#[test]
+fn a_click_on_another_row_renames_the_torrent_of_the_field_only() {
+    let probe;
+    let mut rt = {
+        let service = with_a_movie();
+        probe = service.probe();
+        app(service)
+    };
+    open_field(&mut rt, 1);
+    rt.paste("Other");
+    settle(&mut rt);
+    tap(&mut rt, "rows/2");
+    settle(&mut rt);
+    let sent: Vec<Vec<TorrentId>> = renames_sent(&probe).into_iter().map(|(ids, _)| ids).collect();
+    assert_eq!(sent, [vec![1]], "only the album");
+    assert_eq!(find_torrent(&rt, 1).display_name(), "Other");
+    assert_eq!(find_torrent(&rt, 2).display_name(), "Movie.mkv", "the row clicked keeps its name");
+}
+
+/// The pane showing another torrent while the field keeps its focus (the selection changed under
+/// it) cancels the rename, as Escape does: nothing is sent.
+#[test]
+fn the_pane_showing_another_torrent_cancels_the_open_field() {
+    let probe;
+    let mut rt = {
+        let service = with_a_movie();
+        probe = service.probe();
+        app(service)
+    };
+    open_field(&mut rt, 1);
+    rt.paste("Other");
+    settle(&mut rt);
+    rt.update(|s, _| crate::model::select_for_menu(&mut *s.service, &mut s.table, &s.torrents, &mut s.pane, 2));
+    settle(&mut rt);
+    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "the field closes");
+    assert!(renames_sent(&probe).is_empty(), "nothing is sent");
+    assert_eq!(find_torrent(&rt, 1).display_name(), "Album");
+}
+
 /// A name a file can't have, with a click away: the field stays open, focused, with what was
 /// typed, and the tooltip under it says why until the next keystroke. Nothing is sent.
 #[test]

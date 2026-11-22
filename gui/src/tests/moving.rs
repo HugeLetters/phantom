@@ -456,6 +456,102 @@ fn show_in_list_skips_this_torrent_and_selects_the_other() {
     assert_eq!(rt.state.pane.details.as_ref().map(|d| d.id), Some(31));
 }
 
+/// Show in list skips only this torrent even with "Apply to the remaining N" ticked (Cancel
+/// would skip the rest too): the next torrent's clash is asked about at once.
+#[test]
+fn show_in_list_with_apply_to_the_rest_ticked_skips_only_this_torrent() {
+    let mut torrents = vec![torrent(0, "A")];
+    torrents.extend((1..31).map(|i| torrent(i, &format!("filler {i:02}"))));
+    torrents.push(torrent(31, "A"));
+    let service = MemoryService::new().with_torrents(torrents).kept_in(31, "/Films").holding("/Films").moves_take(2.0);
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    tap(&mut rt, "rows/0");
+    rt.update(|s, _| crate::model::moving::start(s, vec![0, 2], to("/Films")));
+    settle(&mut rt);
+    assert_eq!(asked(&rt), Some((0, 1)));
+    press(&mut rt, "clash-apply-to-rest");
+    press(&mut rt, "clash-show-in-list");
+    assert_eq!(rt.state.clash.as_ref().map(|c| (c.id, c.other)), Some((2, None)), "the next is still asked");
+    assert!(names_sent(&probe).is_empty(), "nothing moved yet");
+}
+
+/// Return presses the button with the focus: Tab to Cancel and Return cancels, it doesn't Use
+/// existing (which sends the torrent's own files to the Trash).
+#[test]
+fn return_presses_the_focused_button_not_use_existing() {
+    let service = three().holding("/Films");
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    // Tab from the start of the dialog until Cancel has the focus.
+    let on_cancel = |rt: &Runtime<Phantom>| rt.elements().iter().any(|e| e.focused && !e.exiting && e.path.contains("/clash-cancel/"));
+    for _ in 0..8 {
+        if on_cancel(&rt) {
+            break;
+        }
+        rt.key(rune::KeyEvent { key: Key::Tab, mods: rune::Mods::default() });
+        settle(&mut rt);
+    }
+    assert!(on_cancel(&rt), "Cancel is focused");
+    enter(&mut rt);
+    wait(&mut rt, 0.2);
+    assert!(rt.state.clash.is_none(), "the dialog closes");
+    assert!(moves_sent(&probe).is_empty(), "Cancel: nothing is moved, nothing Trashed");
+}
+
+/// A folder of Move to ▸ is the one that was clicked, though the default folder changed since the
+/// menu was drawn (a settings snapshot with the menu open): the torrents go there.
+#[test]
+fn a_move_to_folder_picked_after_the_default_changed_is_the_folder_clicked() {
+    let mut rt = app(three());
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| s.recent.record(to("/Volumes/Archive/Films")));
+    tap(&mut rt, "rows/0");
+    super::right_click_row(&mut rt, 0);
+    super::pick_choice(&mut rt, "row-menu", "Move to");
+    // The menu is up with the default Downloads, then Films; the default goes (so Films moves up a
+    // place) and the click lands.
+    let films = rt
+        .elements()
+        .into_iter()
+        .find(|e| !e.exiting && e.role == "menuitem" && e.label.as_deref().is_some_and(|l| l.starts_with("Films")))
+        .expect("Films in the menu");
+    let (x, y) = (films.rect[0] + films.rect[2] / 2.0, films.rect[1] + films.rect[3] / 2.0);
+    // The default goes through the service, as a settings change from another window does.
+    rt.update(|s, _| {
+        s.service.set_setting(proto::Setting::DefaultDestination(None), None, Box::new(|_: &mut Phantom, _, _: &mut rune::Tx| {}))
+    });
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    wait(&mut rt, 2.5);
+    assert_eq!(find_torrent(&rt, 0).location, Some(to("/Volumes/Archive/Films/A")), "the folder clicked");
+}
+
+/// Two recent folders with one name show enough of their path to tell them apart; a name that's
+/// alone shows as it is. The default folder doesn't use one of the five places.
+#[test]
+fn same_named_recent_folders_show_their_parents_and_the_default_is_besides_the_five() {
+    let mut rt = app(three());
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| {
+        for f in ["/Volumes/Archive/Films", "/home/me/Films", "/a", "/b", "/c", "/d"] {
+            s.recent.record(to(f));
+        }
+    });
+    tap(&mut rt, "rows/0");
+    super::right_click_row(&mut rt, 0);
+    super::pick_choice(&mut rt, "row-menu", "Move to");
+    let names: Vec<String> = move_to_menu(&rt).into_iter().flatten().collect();
+    assert_eq!(names, ["Downloads", "d", "c", "b", "a", "Films", "Other…"], "{names:?}");
+    let (a, b) = (to("/Volumes/Archive/Films"), to("/home/me/Films"));
+    let offered = |f: &AbsolutePath| crate::model::recent::Offered { folder: f.clone(), default: false };
+    assert_eq!(crate::model::recent::names(&[offered(&a), offered(&b)]), ["Films — Volumes/Archive", "Films — home/me"]);
+}
+
 /// What Rename… in the clash dialog selects of the free name it opens with (#338), as the inline
 /// field does (#331): the part before the extension for a torrent of one file, all of it for a
 /// folder's, whatever the clash is with: a file of the person's, or another listed torrent's.

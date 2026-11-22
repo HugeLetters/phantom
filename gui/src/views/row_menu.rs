@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use proto::TorrentId;
+use proto::{AbsolutePath, TorrentId};
 use rune::{El, PointerPress, Tx, el};
 
 use crate::commands::{OnTorrents, on_torrents, run_on_torrents};
@@ -88,10 +88,10 @@ fn pick(s: &mut Phantom, picked: &str, tx: &mut Tx) {
     if picked == OTHER {
         return crate::model::moving::move_to(s, tx);
     }
-    if let Some(i) = FOLDERS.iter().position(|id| *id == picked) {
-        if let Some(folder) = recent::offered(s).into_iter().nth(i) {
-            crate::model::moving::move_selection_to(s, folder.folder);
-        }
+    // The folder is in the id, as the palette's entry carries it: the menu may have been drawn
+    // with other folders than are offered now.
+    if let Some(folder) = picked.strip_prefix(FOLDER).and_then(|p| AbsolutePath::new(p).ok()) {
+        crate::model::moving::move_selection_to(s, folder);
         return;
     }
     if let Some(item) = on_torrents(s).into_iter().find(|i| i.spec().id == picked) {
@@ -99,18 +99,18 @@ fn pick(s: &mut Phantom, picked: &str, tx: &mut Tx) {
     }
 }
 
-/// The ids of Move to ▸'s folders, in its order, and of Other….
-const FOLDERS: [&str; 1 + recent::MOST] = ["move-to-0", "move-to-1", "move-to-2", "move-to-3", "move-to-4", "move-to-5"];
+/// The start of the id of a folder of Move to ▸, which ends with the folder's path, and the id of Other….
+const FOLDER: &str = "move-to:";
 const OTHER: &str = "move-other";
 
 /// Move to ▸'s entries: the default folder (its key hint "Default"), the recent ones, then Other….
 fn move_to_entries(folders: &[recent::Offered]) -> Vec<Entry> {
     let mut entries: Vec<Entry> = folders
         .iter()
-        .zip(FOLDERS)
-        .map(|(f, id)| Entry::Choice {
-            id,
-            label: recent::name(&f.folder),
+        .zip(recent::names(folders))
+        .map(|(f, label)| Entry::Choice {
+            id: format!("{FOLDER}{}", f.folder.display()).into(),
+            label,
             hint: f.default.then(|| client::display::default_folder().to_owned()),
             icon: None,
             checked: None,
@@ -119,7 +119,7 @@ fn move_to_entries(folders: &[recent::Offered]) -> Vec<Entry> {
     if !entries.is_empty() {
         entries.push(Entry::Separator);
     }
-    entries.push(Entry::Choice { id: OTHER, label: client::display::other_folder().into(), hint: None, icon: None, checked: None });
+    entries.push(Entry::Choice { id: OTHER.into(), label: client::display::other_folder().into(), hint: None, icon: None, checked: None });
     entries
 }
 
@@ -135,10 +135,16 @@ pub fn entries(items: &[OnTorrents], n: usize, folders: &[recent::Offered], sub:
         let spec = item.spec();
         if *item == OnTorrents::MoveTo {
             let label = client::display::move_to_submenu().into();
-            entries.push(Entry::Sub { id: spec.id, label, icon: spec.icon, entries: move_to_entries(folders), open: sub });
+            entries.push(Entry::Sub { id: spec.id.into(), label, icon: spec.icon, entries: move_to_entries(folders), open: sub });
             continue;
         }
-        entries.push(Entry::Choice { id: spec.id, label: item.wording(n, can_delete), hint: spec.hint(), icon: spec.icon, checked: None });
+        entries.push(Entry::Choice {
+            id: spec.id.into(),
+            label: item.wording(n, can_delete),
+            hint: spec.hint(),
+            icon: spec.icon,
+            checked: None,
+        });
     }
     entries
 }

@@ -2,6 +2,8 @@
 //! at a point or a dropdown under its trigger. Screens say what the choices are and what a pick
 //! or a dismissal does; the look, the keyboard focus and Escape and outside presses are the kit's.
 
+use std::borrow::Cow;
+
 use rune::{El, Tx, el};
 use rune_kit::{MenuEntry, MenuItem, Placement};
 
@@ -11,7 +13,7 @@ use super::{Icon, Ui};
 pub enum Entry {
     /// `id` names it to the pick's handler.
     Choice {
-        id: &'static str,
+        id: Cow<'static, str>,
         label: String,
         /// Its shortcut, shown right-aligned and dimmed, as in macOS menus.
         hint: Option<String>,
@@ -24,7 +26,7 @@ pub enum Entry {
     /// A choice that opens more to its right while `open` (Move to ▸): picking it calls the pick's
     /// handler with `id`, to open or close it; its entries are picked as the menu's own.
     Sub {
-        id: &'static str,
+        id: Cow<'static, str>,
         label: String,
         icon: Option<Icon>,
         entries: Vec<Entry>,
@@ -61,7 +63,7 @@ impl Ui {
         trigger: El,
         open: Option<At>,
         entries: Vec<Entry>,
-        on_pick: impl Fn(&mut S, &'static str, &mut Tx) + Clone + 'static,
+        on_pick: impl Fn(&mut S, &str, &mut Tx) + Clone + 'static,
         on_close: impl Fn(&mut S) + 'static,
         layer: &mut Vec<El>,
     ) -> El {
@@ -88,13 +90,13 @@ impl Ui {
     }
 
     /// A choice, or a submenu with its own, as the kit draws it.
-    fn menu_item<S: 'static>(&self, entry: Entry, on_pick: &(impl Fn(&mut S, &'static str, &mut Tx) + Clone + 'static)) -> MenuItem {
+    fn menu_item<S: 'static>(&self, entry: Entry, on_pick: &(impl Fn(&mut S, &str, &mut Tx) + Clone + 'static)) -> MenuItem {
         let (id, label, icon) = match &entry {
-            Entry::Choice { id, label, icon, .. } | Entry::Sub { id, label, icon, .. } => (*id, label.clone(), *icon),
+            Entry::Choice { id, label, icon, .. } | Entry::Sub { id, label, icon, .. } => (id.clone(), label.clone(), *icon),
             Entry::Title(_) | Entry::Separator => unreachable!("not an item"),
         };
         let pick = on_pick.clone();
-        let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, id, tx));
+        let mut item = MenuItem::new(label).on_select_tx(move |s: &mut S, tx: &mut Tx| pick(s, &id, tx));
         item = match icon {
             Some(icon) => item.icon(self.icon(icon)),
             // An empty slot the icon's size, so every label starts at the same x.
@@ -166,7 +168,7 @@ impl Ui {
         at: Option<(f32, f32)>,
         window: Option<(f32, f32)>,
         entries: Vec<Entry>,
-        on_pick: impl Fn(&mut S, &'static str, &mut Tx) + Clone + 'static,
+        on_pick: impl Fn(&mut S, &str, &mut Tx) + Clone + 'static,
         on_close: impl Fn(&mut S) + 'static,
         layer: &mut Vec<El>,
     ) {

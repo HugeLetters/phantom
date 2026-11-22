@@ -63,9 +63,31 @@ pub struct Offered {
 /// recent ones that aren't it.
 pub fn offered(s: &Phantom) -> Vec<Offered> {
     let default = s.default_folder.iter().map(|folder| Offered { folder: folder.clone(), default: true });
-    let recent =
-        s.recent.list().iter().filter(|f| s.default_folder.as_ref() != Some(*f)).map(|f| Offered { folder: f.clone(), default: false });
+    // Up to [`MOST`] besides the default folder, which isn't one of them.
+    let recent = s
+        .recent
+        .list()
+        .iter()
+        .filter(|f| s.default_folder.as_ref() != Some(*f))
+        .take(MOST)
+        .map(|f| Offered { folder: f.clone(), default: false });
     default.chain(recent).collect()
+}
+
+/// How a menu names each of `folders`: its own name, and for a name another has too, the rest of
+/// its path after a dash ("Films — Volumes/Archive"), so two Films tell apart.
+pub fn names(folders: &[Offered]) -> Vec<String> {
+    folders
+        .iter()
+        .map(|f| {
+            let own = name(&f.folder);
+            if folders.iter().filter(|o| name(&o.folder) == own).count() < 2 {
+                return own;
+            }
+            let parent = f.folder.parent().map(|p| p.display().to_string()).unwrap_or_default();
+            format!("{own} — {}", parent.strip_prefix('/').filter(|p| !p.is_empty()).unwrap_or(&parent))
+        })
+        .collect()
 }
 
 /// How a menu names a folder: its own name ("/" for the root).

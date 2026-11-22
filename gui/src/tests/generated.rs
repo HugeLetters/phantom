@@ -1872,7 +1872,7 @@ fn check_palette(s: &Phantom, listed: &[String], query: &str) {
                     "Move to" => {
                         offered.push(client::display::move_to().into());
                         let folders = crate::model::recent::offered(s);
-                        offered.extend(folders.iter().map(|f| client::display::move_to_folder(&crate::model::recent::name(&f.folder))));
+                        offered.extend(crate::model::recent::names(&folders).iter().map(|n| client::display::move_to_folder(n)));
                     }
                     other => offered.push(other.into()),
                 }
