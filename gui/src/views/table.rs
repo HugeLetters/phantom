@@ -2,8 +2,8 @@
 //! ([`layout::fit`], #33), a drag on a header moving its column, a right-click on the header
 //! listing them all ([`columns_menu`]). A status with a reason (Destination unavailable) shows
 //! it on hover; one moving, what it copied, and its progress is the copy's. A right-click anywhere in a row opens its menu
-//! ([`row_menu`]); a double-click opens the torrent. A torrent being renamed (#331) has a text field
-//! for its Name cell, and a note under it while the name typed isn't one.
+//! ([`row_menu`]); a double-click opens the torrent. A torrent is renamed in the details pane's
+//! header, not here (#331).
 
 use std::borrow::Cow;
 
@@ -13,7 +13,7 @@ use rune::{Align, Drag, El, Phase, Tx, el, row};
 
 use super::{columns_menu, row_menu, space, speed, status_reason};
 use crate::model::layout::{self, Column, Fitted};
-use crate::model::{Phantom, follow_selection, renaming, sort};
+use crate::model::{Phantom, follow_selection, sort};
 use crate::platform::open_torrent;
 use crate::ui::{Table, TableColumn, Tone, Ui};
 
@@ -52,16 +52,10 @@ fn declared(c: Column) -> TableColumn {
     }
 }
 
-pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32, overlays: &mut Vec<El>) -> El {
-    // The list offers the torrent commands, for its selection; Rename… only while the Name column
-    // it edits in is on screen (ADR 0013).
-    let name_shows = fitted.iter().any(|(c, _)| *c == Column::Name);
-    s.mounted.offer(crate::commands::OnTorrents::ALL.into_iter().filter(|c| name_shows || *c != crate::commands::OnTorrents::Rename));
-    // Under the rename field, while what was typed in it isn't a name: the field's own place.
-    let refused = s.rename.note().map(display::name_problem);
-    let close = |s: &mut Phantom| s.rename.refused = None;
-    // The note's anchor is the field, in its cell: drawn there, under the trigger's key.
-    let _ = ui.error_note("rename-note", el(), refused.as_deref().unwrap_or(""), refused.is_some(), close, overlays);
+pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
+    // The list offers the torrent commands, for its selection, but Rename…: the details pane's
+    // header offers it, as its field is the header's name (ADR 0013).
+    s.mounted.offer(crate::commands::OnTorrents::ALL.into_iter().filter(|c| *c != crate::commands::OnTorrents::Rename));
     let cui = ui.clone();
     let mut table = Table::new(
         |s: &Phantom| &s.table,
@@ -92,21 +86,6 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32, overlays
                         hover(id),
                     );
                 }
-                ("name", _) if s.rename.editing(id) => row().key("rename-note-trigger").w_full().child(
-                    cui.text_field("rename-field", &s.rename.field, "Name")
-                        .on_edit(|s: &mut Phantom| &mut s.rename.field)
-                        .on_submit(|s: &mut Phantom, _| renaming::submit(s))
-                        .on_key(|s: &mut Phantom, ev: &rune::KeyEvent, _: &mut rune::Tx| match ev.key {
-                            rune::Key::Escape => {
-                                renaming::close(s);
-                                true
-                            }
-                            _ => false,
-                        })
-                        .build()
-                        .grow(1.0)
-                        .min_w(0.0),
-                ),
                 ("name", _) => cui.cell_text(t.display_name(), Tone::Normal, false),
                 // The free-space warning, while its disk is short for the torrents that need it (#127,
                 // #209): its status as ever, in the warning colour with a warning icon, and the

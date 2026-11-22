@@ -6,6 +6,11 @@ A screen override is a last resort for a genuinely different layout (the torrent
 
 The **App icon** is independent of the look ([GUI glossary](../../gui/GLOSSARY.md)): it follows the active Theme Look unless the user picks one, so switching themes never overrides a deliberate choice. A theme declares nothing about the system's Appearance, and has no palettes: a variant is a theme setting or another theme. Which theme and settings are shown, per Appearance, is the Look Preset's business ([ADR 0011](0011-look-presets.md)).
 
+What macOS draws itself stays outside "everything themeable": the menu bar, and the folder picker
+(Move to ▸'s Other…, Add's when there's no default folder), which only takes a title and a starting
+folder. A field edited in place shows its focus through a block (`Blocks::field_focus`), so a theme
+draws that too.
+
 Themes are built into the app (Rust code with their assets in their own folder). User-made themes loaded at runtime, as herdr-app does with layout files and scripted mods, are out of scope.
 
 ## Considered options

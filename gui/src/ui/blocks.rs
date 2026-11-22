@@ -37,6 +37,10 @@ pub type TabBar = Rc<dyn Fn(&Ui, Vec<El>) -> El>;
 /// Draws what goes in the titlebar band's free room on one side (a logo), which stays a place to
 /// drag the window by.
 pub type Band = Rc<dyn Fn(&Ui, BandSide) -> El>;
+/// Draws how a field edited in place shows its focus, around the `field` (plain, no box of its
+/// own), over `behind`, the colour of the row it's in. It's opaque: the field covers the cell's
+/// own text.
+pub type FieldFocus = Rc<dyn Fn(&Ui, El, rune::Color) -> El>;
 /// The icons a theme draws: `None` for one it leaves to its parent.
 pub type Icons = Rc<dyn Fn(Icon) -> Option<&'static rune::Icon>>;
 
@@ -49,6 +53,7 @@ pub struct BlockOverrides {
     pub tab: Option<Tab>,
     pub tab_bar: Option<TabBar>,
     pub band: Option<Band>,
+    pub field_focus: Option<FieldFocus>,
 }
 
 /// Every block, as a look draws it.
@@ -60,6 +65,7 @@ pub struct Blocks {
     pub tab: Tab,
     pub tab_bar: TabBar,
     pub band: Band,
+    pub field_focus: FieldFocus,
 }
 
 impl Blocks {
@@ -73,6 +79,7 @@ impl Blocks {
             tab: Rc::new(super::tabs::phantom_tab),
             tab_bar: Rc::new(super::tabs::phantom_tab_bar),
             band: Rc::new(super::tabs::phantom_band),
+            field_focus: Rc::new(super::text_field::phantom_focus),
         }
     }
 
@@ -90,6 +97,7 @@ impl Blocks {
             tab: theme.tab.clone().unwrap_or(self.tab),
             tab_bar: theme.tab_bar.clone().unwrap_or(self.tab_bar),
             band: theme.band.clone().unwrap_or(self.band),
+            field_focus: theme.field_focus.clone().unwrap_or(self.field_focus),
         }
     }
 

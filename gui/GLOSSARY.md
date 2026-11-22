@@ -114,8 +114,24 @@ A notice of severity Error: where errors with no better place show: the adds mad
 (files dropped on it or opened from Finder, a magnet clicked in a browser), Add file…, the folder
 picker and failed commands. In the status bar in the error colour, the pill red, explained in the
 popover a click opens (an error never opens it by itself), and dismissed with ×; a batch of adds stays one notice ("Couldn't add 2 of
-5", each failure under it as its view). Errors that have a place stay there: the link field's by
-Add, a disabled button's on the button.
+5", each failure under it as its view). What the service refuses is a notice, the field's own add
+too ("No peers have this torrent"). What's known before anything is sent stays on the control: a
+**tooltip**.
+
+**Tooltip**:
+Why something can't be done, known before anything is sent, on the control clicked: a disabled
+button's (Resume with nothing paused), Add's with text that isn't a link, a name the Rename field
+can't take (under the field, until the next keystroke). Neutral, the same in Light and Dark: one
+shape, a raised surface with a single hairline, the text's own colour, never the error colour. A
+hover's explanation (what a clash's choice does, once the pointer rests on it for 0.5 s) is one too. It's Phantom's own block (`ui/popover.rs`), not the system's tooltip, so it looks the same everywhere.
+_Avoid_: error note, red bubble, alert
+
+## Wording
+
+**What happens, not why**:
+The window says what happens, never why Phantom is designed that way. A dialog asks its question in
+its title and names what each choice does in that choice's tooltip; a rule behind it ("A torrent's
+files are never replaced or used by another's") goes unsaid.
 
 ## Commands
 
@@ -126,5 +142,5 @@ app's own (Add file…, Undo named after what it takes back). Each group is unde
 naming what it acts on (the torrent's or file's name, "3 torrents", "2 files", "Phantom"); a
 heading shows only while one of its commands matches. Typing filters by name,
 the letters in order; ↑ ↓ move, Return runs, Escape closes. A command that asks for more starts its
-usual flow (Rename… the Name cell's field, Move to… the folder picker).
+usual flow (Rename… the header's name field, Move to… the folder picker).
 _Avoid_: launcher, quick open, command bar

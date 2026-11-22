@@ -72,6 +72,8 @@ pub fn press_notices(s: &mut Phantom) {
 /// A menu opens, over whatever else was open.
 pub fn open_menu(s: &mut Phantom, open: menu::Open) {
     opening(s, Overlay::Menu);
+    // A menu opens with its Move to ▸ closed.
+    s.move_sub = None;
     s.menu = s.menu.then(menu::Event::Open(open));
 }
 
@@ -91,9 +93,12 @@ mod tests {
             to: proto::AbsolutePath::new("/Films").unwrap(),
             files: vec![proto::AbsolutePath::new("/Films/Album/a").unwrap()],
             remaining: 0,
+            at: 1,
+            of: 1,
             apply_to_rest: false,
             other: None,
             renaming: None,
+            explained: None,
         };
         for which in Overlay::ALL {
             for open in 0..16u8 {

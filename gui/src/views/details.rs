@@ -7,7 +7,7 @@
 //! ```
 //!
 //! The name, shortened in the middle as Finder does where it's too long (whole on hover, with the
-//! original name after a Rename, #331), and on its right the Size and how much is Off when some
+//! original name after a Rename, #331; Rename… turns it into a field, in place, as wide), and on its right the Size and how much is Off when some
 //! files are. Under it, where it is, always, shortened in the middle as well (whole on hover), and
 //! on its right the problem it has, short and in the error colour, when it has one. Where the
 //! window is short the header is one line (name · size · where), the problem on its hover. Then
@@ -25,10 +25,11 @@ use client::display;
 use proto::{Action, File, Priority, TorrentInfo};
 use rune::{Align, El, ScrollSpec, Tx, col, el, row};
 
+use crate::commands::OnTorrents;
 use crate::model::layout::{Header, INFO_LINE, INFO_PAD, LINE, NAME_LINE, NO_FILES, PaneContent, PaneTab, TABS};
-use crate::model::{Phantom, copy_magnet, cycle_priority, reveal_target, size_label, sort_files};
+use crate::model::{Phantom, copy_magnet, cycle_priority, renaming, reveal_target, size_label, sort_files};
 use crate::shortcuts;
-use crate::ui::{Table, TableColumn, Tone, Ui};
+use crate::ui::{TEXT_INSET, Table, TableColumn, Tone, Ui};
 
 /// How the pane is drawn: its header's shape and its width, for fitting the header's sides.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +80,8 @@ const HEADER_INSET: f32 = 10.0;
 const SIDES_GAP: f32 = 16.0;
 
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
+    // The header offers Rename…, as its name is where the field opens (ADR 0013).
+    s.mounted.offer([OnTorrents::Rename]);
     let fetching = t.content.is_none();
     let name = t.display_name();
     let location = match reveal_target(t) {
@@ -102,6 +105,9 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
         (!lines.is_empty()).then(|| lines.join("\n"))
     };
     let heading = |room: f32| {
+        if s.rename.editing(t.id) {
+            return rename_field(s, ui, room);
+        }
         let shown = shorten_middle(name, |text| ui.heading_width(text) <= room);
         let heading = ui.heading(shown.clone()).key("details-name").min_w(0.0).shrink();
         match name_hover(&shown) {
@@ -192,6 +198,35 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
 
     ui.panel().key("details").w_full().child(col().w_full().h_full().child(header).child(tabs).child(body.grow(1.0).min_h(0.0)))
 }
+
+/// The rename field (#331), in place of the header's name: its text where the name was, `room`
+/// wide as the name may be (the 60 % cap), a long name scrolling inside it. Its tooltip, while the
+/// name typed is refused, is drawn by the window under the element keyed [`RENAME_FIELD`].
+fn rename_field(s: &Phantom, ui: &Ui, room: f32) -> El {
+    let (font, behind) = ui.heading_field_look();
+    let field = ui
+        .text_field("rename-field", &s.rename.field, "Name")
+        .plain()
+        .text_style(font)
+        .height(NAME_LINE)
+        .on_edit(|s: &mut Phantom| &mut s.rename.field)
+        .on_submit(|s: &mut Phantom, _| renaming::submit(s))
+        .on_key(|s: &mut Phantom, ev: &rune::KeyEvent, _: &mut Tx| match ev.key {
+            rune::Key::Escape => {
+                renaming::close(s);
+                true
+            }
+            _ => false,
+        })
+        .build()
+        .grow(1.0)
+        .min_w(0.0);
+    let field = ui.in_place(row().w_full().h(NAME_LINE).child(field), behind).w(room + TEXT_INSET).h(NAME_LINE);
+    row().key(RENAME_FIELD).ml(-TEXT_INSET).shrink().min_w(0.0).child(field)
+}
+
+/// The key of the rename field's place in the header, which its tooltip hangs under.
+pub const RENAME_FIELD: &str = "rename-over";
 
 /// The Info tab: a line for each of [`info_lines`], what it is on the left, its text after, cut
 /// with all of it on hover, scrolling where the pane is short; the magnet link's with a Copy

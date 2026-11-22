@@ -175,13 +175,37 @@ pub fn moved_of(moved: usize, selected: usize) -> String {
     format!("Moved {moved} of {selected}")
 }
 
-/// The title of a clash's dialog: "Already in Films".
-pub fn clash_title(to: &AbsolutePath) -> String {
-    format!("Already in {}", folder_name(to))
-}
-
 fn folder_name(to: &AbsolutePath) -> String {
     to.file_name().map_or_else(|| to.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// The row menu's Move to, which opens a submenu of folders (#87): no "…", as it asks nothing.
+pub fn move_to_submenu() -> &'static str {
+    "Move to"
+}
+
+/// Beside the default folder in Move to ▸.
+pub fn default_folder() -> &'static str {
+    "Default"
+}
+
+/// Move to ▸'s last item, which asks for a folder.
+pub fn other_folder() -> &'static str {
+    "Other…"
+}
+
+/// The palette's entry for a folder Move to ▸ offers: "Move to Films".
+pub fn move_to_folder(folder: &str) -> String {
+    format!("Move to {folder}")
+}
+
+/// The clash dialog's title, the question it asks, with where it is among several: "Album is
+/// already in Films · 2 of 3". One alone has no counter.
+pub fn clash_title(question: &str, at: usize, of: usize) -> String {
+    match of {
+        0 | 1 => question.to_owned(),
+        _ => format!("{question} · {at} of {of}"),
+    }
 }
 
 /// What a clash asks, before a Move: "3 files of Album are already in Films".
@@ -198,10 +222,25 @@ pub fn clash_question(name: &str, files: &[AbsolutePath], to: &AbsolutePath) -> 
     }
 }
 
-/// What a clash with another listed torrent's files asks (#270): "Another torrent, Album, keeps its
-/// files where Album would go in Films".
-pub fn clash_question_another(name: &str, other: &str, to: &AbsolutePath) -> String {
-    format!("Another torrent, {other}, keeps its files where {name} would go in {}", folder_name(to))
+/// What a clash with another listed torrent's files says (#270), as its title: "Album can't go
+/// into Films".
+pub fn clash_question_another(name: &str, to: &AbsolutePath) -> String {
+    format!("{name} can't go into {}", folder_name(to))
+}
+
+/// Over the other torrent's path, in a clash with its files.
+pub fn clash_another_keeps() -> &'static str {
+    "Another torrent in the list keeps its files there:"
+}
+
+/// The clash dialog's button that shows the other torrent, in a clash with its files.
+pub fn clash_show_in_list() -> &'static str {
+    "Show in list"
+}
+
+/// Under the paths a clash shows, for those it leaves out: "and 2 more".
+pub fn clash_more(more: usize) -> String {
+    format!("and {more} more")
 }
 
 /// What the clash dialog asks once Rename… is pressed: "A new name for Album in Films".
@@ -221,15 +260,9 @@ pub fn clash_apply_to_remaining(remaining: usize) -> String {
     format!("Apply to the remaining {remaining}")
 }
 
-/// What each choice of a clash does, under it.
-pub fn clash_help() -> &'static str {
-    "Use existing checks those files and keeps what's valid; this torrent's own copies of them go to the Trash. Replace moves those files \
-     to the Trash and puts this torrent's in their place. Other files there stay. Rename… moves it in under another name."
-}
-
-/// What a clash with another listed torrent's files can do, under its question (#270).
-pub fn clash_help_another() -> &'static str {
-    "A torrent's files are never replaced or used by another's. Rename… moves this one in under another name."
+/// What each of a clash's choices does, as its tooltip: Use existing, Replace, Rename….
+pub fn clash_choice_help() -> [&'static str; 3] {
+    ["Keep the files there; this torrent's go to the Trash", "Move the files there to the Trash", "Move it in under another name"]
 }
 
 /// Why a Move didn't happen, as a sentence's tail: "the new destination's disk is full".

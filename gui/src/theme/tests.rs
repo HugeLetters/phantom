@@ -127,6 +127,7 @@ impl Draws {
             tab: self.tabs.0.then(|| Rc::new(|_: &Ui, _: &str, _| rune::el()) as Tab),
             tab_bar: self.tabs.1.then(|| Rc::new(|_: &Ui, _| rune::el()) as TabBar),
             band: self.tabs.2.then(|| Rc::new(|_: &Ui, _| rune::el()) as Band),
+            field_focus: None,
         };
         let screens = ScreenOverrides {
             details: self.details.then(|| Rc::new(|_: &Phantom, _: &Ui, _: &TorrentInfo, _| rune::el()) as DetailsScreen),

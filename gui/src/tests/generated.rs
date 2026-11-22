@@ -351,8 +351,6 @@ enum Via {
 enum Said {
     /// Its row is in the list, and the status bar tells of it.
     Added(TorrentId),
-    /// The field held its link: the error shows by Add.
-    FailedByAdd(String),
     /// The batch is answered and some of it failed: its note shows.
     Noted(Note),
     /// Refused for want of a destination: the picker asks.
@@ -419,8 +417,6 @@ struct Rows {
     frame: u64,
     /// What the link field holds.
     field: String,
-    /// The link the error by Add is about, while one may show.
-    error_by_add: Option<String>,
     /// Adds on their way, in the order they were sent.
     sent: Vec<Sent>,
     /// Adds refused for want of a destination, waiting for the picker; the first is asking.
@@ -463,7 +459,6 @@ impl Rows {
             next_id: 2,
             frame: 0,
             field: String::new(),
-            error_by_add: None,
             sent: Vec::new(),
             picker: VecDeque::new(),
             errors: Vec::new(),
@@ -568,15 +563,11 @@ impl Rows {
         let mut note = Note { total: 0, failed: Vec::new(), moved: false };
         let button = sent.field == Some(Via::Button);
         for link in sent.links {
+            // A failure, the field's too, goes to its batch's notice.
             let said = if link.fails() {
-                if holds {
-                    self.error_by_add = Some(link.text());
-                    Said::FailedByAdd(self.field.clone())
-                } else {
-                    note.total += 1;
-                    note.failed.push((link.named(), link.reason().to_owned()));
-                    continue;
-                }
+                note.total += 1;
+                note.failed.push((link.named(), link.reason().to_owned()));
+                continue;
             } else {
                 note.total += 1;
                 // A click on Add left the focus on the button: the field may take it back.
@@ -800,16 +791,8 @@ impl ReferenceStateMachine for Screen {
                 rows.dismissed = Some(rows.errors.remove(*n));
             }
             Action::Escape => rows.selected = None,
-            Action::Type(link) => {
-                let text = link.text();
-                if text != rows.field {
-                    rows.error_by_add = None;
-                }
-                rows.field = text;
-            }
-            // Every send says something new by Add, or nothing.
+            Action::Type(link) => rows.field = link.text(),
             Action::Send { button } => {
-                rows.error_by_add = None;
                 if link_problem(&rows.field).is_none() {
                     let via = if *button { Via::Button } else { Via::Return };
                     rows.send(vec![Link::of(&rows.field).expect("a link from the pool")], Some(via), false);
@@ -1159,7 +1142,11 @@ impl StateMachineTest for Screen {
                     _ => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
                 }
                 step(rt);
-                // Move to… asks where, starting where the torrent is, and the person answers.
+                // Move to ▸ opened its folders: Other… asks for one.
+                if label.as_deref().is_some_and(|l| l.starts_with("Move to")) && rt.state.menu.is_open() {
+                    pick_in(rt, "row-menu", client::display::other_folder());
+                }
+                // Other… asks where, starting where the torrent is, and the person answers.
                 if let (Some(label), Leave::Click(Pick::Move(folder)) | Leave::Keys(Pick::Move(folder)) | Leave::Hint(Pick::Move(folder))) =
                     (&label, leave)
                     && label.starts_with("Move to")
@@ -1441,10 +1428,6 @@ impl StateMachineTest for Screen {
         // Nothing under a dialog takes a press: a clash's is modal.
         let modal = rows.clash.is_some();
         assert_eq!(enabled(rt, "add"), !modal && link_problem(&s.magnet.text).is_none(), "Add is on for a link, under no dialog");
-        // An error by Add is about the link in the field, and no other.
-        if let Some(note) = s.add_note.as_ref().filter(|n| n.error && n.text == s.magnet.text) {
-            assert_eq!(rows.error_by_add.as_deref(), Some(note.text.trim()), "the error by Add is about {:?}", note.text);
-        }
         assert_eq!(rt.file_dialog().is_some(), !rows.picker.is_empty(), "the picker asks while an add waits for a folder");
         // The clash dialog is open exactly while the model says, over its torrent and folder.
         assert_eq!(
@@ -1631,10 +1614,6 @@ fn check_landed(rt: &Runtime<Phantom>, rows: &Rows, frame: u64) {
     for (i, said) in landed.iter().enumerate() {
         match said {
             Said::Added(id) => assert!(s.torrents.iter().any(|t| t.id == *id), "added torrent {id} is listed from frame {frame}"),
-            Said::FailedByAdd(text) => {
-                let shown = s.add_note.as_ref().is_some_and(|n| n.error && n.text == *text && n.text == s.magnet.text);
-                assert!(shown, "the failure of {text:?} shows by Add from frame {frame}");
-            }
             Said::Noted(note) => {
                 // The error is in the status bar from the frame it lands, in the error colour's severity,
                 // with the popover still closed; its list is what a click on the bar shows.
@@ -1833,7 +1812,7 @@ const MENU_ITEMS: [(&str, Option<Do>, u8); 12] = [
     ("Cancel move", Some(Do::CancelMove), 0),
     ("Open", Some(Do::Open), 1),
     ("Reveal in Finder", Some(Do::Reveal), 1),
-    ("Move to…", Some(Do::Move), 1),
+    ("Move to", Some(Do::Move), 1),
     ("Rename…", Some(Do::Rename), 1),
     ("Copy magnet link", None, 2),
     ("Remove", Some(Do::Remove), 3),
@@ -1886,11 +1865,17 @@ fn check_palette(s: &Phantom, listed: &[String], query: &str) {
         let delete = t.actions.does(Do::Delete);
         for (label, action, _) in MENU_ITEMS {
             if action.is_none_or(|a| t.actions.does(a)) && (action.is_some_and(|a| matches!(a, Do::Open | Do::Reveal)) <= s.target_there) {
-                offered.push(match label {
-                    "Remove" => client::display::remove_choice(1, delete),
-                    "Delete" => client::display::delete_choice(1),
-                    other => other.into(),
-                });
+                match label {
+                    "Remove" => offered.push(client::display::remove_choice(1, delete)),
+                    "Delete" => offered.push(client::display::delete_choice(1)),
+                    // Move to ▸: Move to… (Other…), and its folders, each by name.
+                    "Move to" => {
+                        offered.push(client::display::move_to().into());
+                        let folders = crate::model::recent::offered(s);
+                        offered.extend(crate::model::recent::names(&folders).iter().map(|n| client::display::move_to_folder(n)));
+                    }
+                    other => offered.push(other.into()),
+                }
             }
         }
     }

@@ -1,25 +1,26 @@
-//! Rename… (#331): the row menu's item turns the torrent's Name cell into a text field holding its
-//! name, the part before the extension selected as Finder does it (of a torrent of one file; a
-//! folder's whole name), and the field has the focus. Return renames it, if the name is one a file
-//! can have; otherwise the field stays, and a note under it says why, until its text changes.
-//! Escape cancels, and so does a click away (the field losing the focus), or the torrent leaving
-//! the list. What the service refuses (something at that name) is told in the status bar, as any
-//! command's failure.
+//! Rename… (#331): the row menu's item (or the palette's) turns the name in the details pane's
+//! header into a text field holding it, the part before the extension selected as Finder does it
+//! (of a torrent of one file; a folder's whole name), and the field has the focus. Return renames
+//! it, if the name is one a file can have, and so does a click away (the field losing the focus),
+//! as in Finder; a name a file can't have keeps the field open, and a tooltip under it says why
+//! until the next keystroke. Only Escape cancels, or the pane no longer showing the torrent. What
+//! the service refuses (something at that name) is told in the status bar, as any command's
+//! failure.
 
 use proto::{FileName, NameProblem, TorrentId};
 use rune::TextEdit;
 
 use super::Phantom;
 
-/// The field, while a torrent's name is being edited in its row.
+/// The field, while a torrent's name is being edited in the details pane's header.
 #[derive(Default)]
 pub struct Rename {
-    /// The torrent whose Name cell is the field; none while no name is edited.
+    /// The torrent whose name in the header is the field; none while no name is edited.
     pub id: Option<TorrentId>,
     pub field: TextEdit,
     /// Why the name sent with Return isn't one, with that text: shown until the text changes.
     pub refused: Option<(String, NameProblem)>,
-    /// The field had the focus at the last frame: losing it cancels.
+    /// The field had the focus at the last frame: losing it renames.
     had_focus: bool,
 }
 
@@ -35,7 +36,7 @@ impl Rename {
     }
 }
 
-/// Opens the field in torrent `id`'s Name cell, focused, with its name and the part of it before
+/// Opens the field in place of torrent `id`'s name in the header, focused, with its name and the part of it before
 /// the extension selected: all of it for a torrent of several files, whose name is a folder's.
 pub fn open(s: &mut Phantom, id: TorrentId) {
     let Some(t) = s.torrents.iter().find(|t| t.id == id) else { return };
@@ -65,8 +66,8 @@ pub fn stem(name: &str) -> usize {
     }
 }
 
-/// Return in the field: renames the torrent to the name typed and closes the field; the same name
-/// closes it; a name a file can't have keeps it open, saying why.
+/// Return in the field, or a click away: renames the torrent to the name typed and closes the
+/// field; the same name closes it; a name a file can't have keeps it open, focused, saying why.
 pub fn submit(s: &mut Phantom) {
     let Some(id) = s.rename.id else { return };
     let text = s.rename.field.text.clone();
@@ -85,20 +86,23 @@ pub fn submit(s: &mut Phantom) {
     }
 }
 
-/// Escape in the field, or a click away: nothing renames, the name shows again.
+/// Escape in the field: nothing renames, the name shows again.
 pub fn close(s: &mut Phantom) {
     s.rename = Rename::default();
 }
 
 /// Called before every frame: the field that had the focus and hasn't now (a click elsewhere, Tab)
-/// cancels, and so does its torrent leaving the list, or the Name column leaving the screen (hidden,
-/// or dropped by a narrow window): the field would be nowhere, yet still pending.
+/// renames, as Return does; its torrent leaving the list, or the pane no longer showing it (another
+/// selection), closes it.
 pub fn follow_focus(s: &mut Phantom) {
     let Some(id) = s.rename.id else { return };
-    let gone = !s.torrents.iter().any(|t| t.id == id);
-    let left = s.rename.had_focus && !s.rename.field.focused;
-    let unseen = !s.mounted.offers(crate::commands::OnTorrents::Rename);
-    if gone || left || unseen {
+    if !s.torrents.iter().any(|t| t.id == id) {
+        return close(s);
+    }
+    if s.rename.had_focus && !s.rename.field.focused {
+        return submit(s);
+    }
+    if super::shown_torrent(&s.table, &s.torrents, &s.pane).is_none_or(|t| t.id != id) {
         return close(s);
     }
     s.rename.had_focus = s.rename.field.focused;

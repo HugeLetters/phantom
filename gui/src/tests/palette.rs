@@ -81,7 +81,17 @@ fn the_palette_lists_what_the_row_menu_offers_and_the_apps_commands() {
         press(&mut rt, Key::Escape);
         cmd_p(&mut rt);
         assert!(rt.state.palette.is_open() && field_focused(&rt), "{selection}: open, its field focused");
-        let mut want = menu;
+        // Move to ▸ is Move to… (Other…) there, then "Move to <folder>" for each of its folders.
+        let folders = crate::model::recent::offered(&rt.state);
+        let mut want: Vec<(String, Option<String>)> = Vec::new();
+        for (label, hint) in menu {
+            if label != "Move to" {
+                want.push((label, hint));
+                continue;
+            }
+            want.push(("Move to…".into(), None));
+            want.extend(folders.iter().map(|f| (format!("Move to {}", crate::model::recent::name(&f.folder)), None)));
+        }
         want.extend(app_commands());
         assert_eq!(drawn_palette(&rt), want, "{selection}");
         press(&mut rt, Key::Escape);
@@ -302,21 +312,21 @@ fn rename_from_the_palette_opens_the_name_field_of_the_selected_torrent() {
     assert_eq!(find_torrent(&rt, 1).display_name(), "Best of");
 }
 
-/// Rename… edits in the Name cell: the palette doesn't list it while Name isn't on screen.
+/// Rename… opens in the details pane's header: the palette lists it while one torrent is
+/// selected, the Name column hidden too, and opens the field there.
 #[test]
-fn the_palette_has_no_rename_while_the_name_column_is_hidden() {
+fn the_palette_has_rename_with_the_name_column_hidden() {
     let mut rt = app(with_an_album());
-    select(&mut rt, 1);
-    cmd_p(&mut rt);
-    assert!(labels(&rt).iter().any(|l| l == "Rename…"), "Name shows: listed");
-    press(&mut rt, Key::Escape);
     rt.update(|s, _| {
         s.prefs.kept.hidden.insert(crate::model::layout::Column::Name);
     });
     settle(&mut rt);
+    select(&mut rt, 1);
     cmd_p(&mut rt);
-    let listed = labels(&rt);
-    assert!(!listed.is_empty() && !listed.iter().any(|l| l == "Rename…"), "{listed:?}");
+    type_text(&mut rt, "ren");
+    press(&mut rt, Key::Enter);
+    assert_eq!(rt.state.rename.id, Some(1));
+    assert!(rt.find("rename-field").is_some(), "the field, in the header");
 }
 
 /// Escape and a click outside close it, running nothing and keeping the selection; with nothing
@@ -401,8 +411,9 @@ fn a_row_menu_near_the_bottom_moves_up_inside_the_window() {
     }
 }
 
-/// Each screen shown registers the commands it offers: the torrent list every torrent command, the
-/// details pane's Files list every file command while it shows; a screen not shown, none. The
+/// Each screen shown registers the commands it offers: the torrent list every torrent command but
+/// Rename…, the details pane's header Rename… and its Files list every file command while they
+/// show; a screen not shown, none. The
 /// default theme's conformance test: a theme drawing its own screens must pass it too.
 #[test]
 fn each_screen_shown_registers_its_commands() {
@@ -414,15 +425,17 @@ fn each_screen_shown_registers_its_commands() {
             OnFiles::ALL.iter().filter(|c| rt.state.mounted.offers(**c)).count(),
         )
     };
-    assert_eq!(offered(&rt), (OnTorrents::ALL.len(), 0), "the list, no pane");
+    assert_eq!(offered(&rt), (OnTorrents::ALL.len() - 1, 0), "the list, no pane");
+    assert!(!rt.state.mounted.offers(OnTorrents::Rename), "no header, no Rename…");
     select(&mut rt, 1);
-    assert_eq!(offered(&rt), (OnTorrents::ALL.len(), OnFiles::ALL.len()), "the list and the Files list");
+    assert_eq!(offered(&rt), (OnTorrents::ALL.len(), OnFiles::ALL.len()), "the list, the header and the Files list");
     press(&mut rt, Key::Escape);
-    assert_eq!(offered(&rt), (OnTorrents::ALL.len(), 0), "the pane closed");
+    assert_eq!(offered(&rt), (OnTorrents::ALL.len() - 1, 0), "the pane closed");
 }
 
-/// A theme whose details screen leaves out the Files list leaves its commands offered nowhere: the
-/// file menu has nothing, and the palette lists only the torrent's and the app's.
+/// A theme whose details screen leaves out the Files list and the header leaves their commands
+/// offered nowhere: the file menu has nothing, the palette no Rename…, only the list's torrent
+/// commands and the app's.
 #[test]
 fn a_screen_that_registers_no_command_offers_none() {
     use crate::commands::{OnFiles, on_files};
@@ -465,7 +478,9 @@ fn a_screen_that_registers_no_command_offers_none() {
     assert!(OnFiles::ALL.iter().all(|c| !rt.state.mounted.offers(*c)), "no Files list, no file command");
     assert!(on_files(&rt.state).is_empty());
     cmd_p(&mut rt);
-    assert!(labels(&rt).iter().any(|l| l == "Rename…"), "the list's commands still are: {:?}", labels(&rt));
+    let listed = labels(&rt);
+    assert!(listed.iter().any(|l| l == "Copy magnet link"), "the list's commands still are: {listed:?}");
+    assert!(!listed.iter().any(|l| l == "Rename…"), "no header, no Rename…: {listed:?}");
 }
 
 /// The headings the open palette draws, top to bottom, with the labels of the commands under each.

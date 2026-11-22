@@ -53,7 +53,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // What Settings asked first: a change made there is older than anything the service sends now.
     let posted = Inbox::run(s, |s| &s.inbox, tx);
     let incoming = s.service.poll(now);
-    let changed = posted || !incoming.is_empty() || s.add_note.as_ref().is_some_and(|n| n.alerting);
+    let changed = posted || !incoming.is_empty();
     for incoming in incoming {
         match incoming {
             Incoming::Live(live) => s.apply(live),
@@ -65,7 +65,6 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::close_empty_menu(s);
     model::renaming::follow_focus(s);
     platform::menu_bar::name_undo(&changes::menu_title(s));
-    model::age_add_note(&mut s.add_note, now, tx);
     scripted_drag(now, tx);
     // After the answers, so a notice they tell starts its clock in this frame.
     let changed = s.bar.passed(now) || changed;
@@ -237,6 +236,16 @@ fn few_rows_files() -> Vec<File> {
     };
     (0..24).map(file).collect()
 }
+
+/// Folders torrents were moved to, for Move to ▸ in scenes: Films last.
+fn recent_demo(s: &mut Phantom) {
+    for inside in ["/Clash", "/Isos", "/Films"] {
+        s.recent.record(archive(inside));
+    }
+}
+
+/// A name longer than the details header's room for it, in `rename-long`.
+const LONG_ISO: &str = "ubuntu-24.04.3-desktop-amd64 (Noble Numbat, the point release with the long description of its build).iso";
 
 /// A drive to move torrents to, in the `moves` scenes.
 const ARCHIVE: &str = "/Volumes/Archive";
@@ -419,6 +428,12 @@ fn looks(headless: bool) -> Looks {
     }
     let stored: preset::Stored = settings::file::read(preset::SETTING).unwrap_or_default();
     Looks::new(LookPreset::read(&stored).0, |preset: &LookPreset| settings::file::keep(preset::SETTING, Some(&preset.stored())))
+}
+
+/// The folders Move to ▸ offers, as `gui.json` keeps them (repaired already), each change kept there.
+fn recent_folders() -> model::recent::RecentFolders {
+    let kept: Vec<AbsolutePath> = settings::file::read(model::recent::SETTING).unwrap_or_default();
+    model::recent::RecentFolders::new(kept, |list: &[AbsolutePath]| settings::file::keep(model::recent::SETTING, Some(list)))
 }
 
 /// The saved Look Presets kept in `gui.json` (repaired already), each change kept there; headless,
@@ -615,8 +630,9 @@ fn spec() -> AppSpec<Phantom> {
             }),
             // Rename (#331) of Big Buck Bunny, a folder of files: `rename` has its field open, the
             // name selected; `renamed` shows it renamed, its details its original name;
-            // `rename-refused` a name a file can't have, said under the field. `renames` is the demo
-            // as it is, for a script to rename one in.
+            // `rename-refused` a name a file can't have for Ubuntu's (a row in sight at the smallest
+            // window), said in a tooltip under the field. `renames` is the demo as it is, for a
+            // script to rename one in.
             ("renames", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("4");
@@ -655,9 +671,10 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("rename-refused", |s| {
                 listed(s, demo_service());
-                s.table.select("4");
-                model::renaming::open(s, 4);
-                s.rename.field = rune::TextEdit::new("Big Buck Bunny: Director's Cut");
+                s.table.select("1");
+                model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
+                model::renaming::open(s, 1);
+                s.rename.field = rune::TextEdit::new("Ubuntu: Noble Numbat");
                 s.rename.field.focused = true;
                 model::renaming::submit(s);
             }),
@@ -693,7 +710,7 @@ fn spec() -> AppSpec<Phantom> {
                 model::moving::start(s, vec![0, 1, 2], archive("/Clash"));
             }),
             // A Move into a folder where another torrent of the same name keeps its files (#270): the
-            // dialog offers only Rename… and Cancel, and names that torrent.
+            // dialog offers only Show in list, Cancel and Rename…, and says where it keeps them.
             ("clash-another", |s| {
                 let ubuntu = t(5, "ubuntu-24.04.3-desktop-amd64.iso", Status::Seeding, 6100 * MIB, 6100 * MIB, 0, 0, 2);
                 s.service = Box::new(moves().with_torrents(vec![ubuntu]).kept_in(5, format!("{ARCHIVE}/Isos")));
@@ -705,6 +722,66 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(moves().moves_take(0.0));
                 s.table.select("1");
                 model::moving::start(s, vec![0, 3, 4], archive(""));
+            }),
+            // Rename… on a name longer than the header's room for it (it scrolls inside the field,
+            // as wide as the header's name may be), a clash of several files, the Add tooltip, a
+            // refused add as a notice, and Move to ▸ with recent folders in the palette
+            // (`moves-recent`, for a script to open the row menu's).
+            ("rename-long", |s| {
+                let iso = File {
+                    index: 0,
+                    path: LONG_ISO.into(),
+                    size_bytes: 6100 * MIB,
+                    progress_bytes: 6100 * MIB,
+                    priority: Priority::Normal,
+                    missing: false,
+                    on_disk: false,
+                };
+                let long = t(5, LONG_ISO, Status::Seeding, 6100 * MIB, 6100 * MIB, 0, 0, 3);
+                listed(s, demo_service().with_torrents(vec![long]).with_files(5, vec![iso]));
+                s.table.select("5");
+                model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
+                for incoming in s.service.poll(0.1) {
+                    if let Incoming::Live(live) = incoming {
+                        s.apply(live);
+                    }
+                }
+                model::renaming::open(s, 5);
+            }),
+            // The same field on a name shorter than the header's room.
+            ("rename-short", |s| {
+                listed(s, demo_service());
+                s.table.select("4");
+                model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
+                model::renaming::open(s, 4);
+            }),
+            ("clash-files", |s| {
+                s.service = Box::new(moves().holding_all(format!("{ARCHIVE}/Films")));
+                s.table.select("4");
+                model::moving::start(s, vec![4], archive("/Films"));
+            }),
+            ("add-note", |s| {
+                s.service = Box::new(demo_service());
+                s.magnet = rune::TextEdit::new("hello");
+                s.add_note = Some(model::AddNote::about(&s.magnet, display::link_problem(client::LinkProblem::NotALink)));
+            }),
+            ("add-refused", |s| {
+                s.service = Box::new(failing_adds().adds_after(0.0, 0.0));
+                s.magnet = rune::TextEdit::new(NOBODY);
+                model::submit_url(&mut *s.service, &s.magnet, &mut s.add_note, &mut s.refocus_link, true);
+            }),
+            ("move-palette", |s| {
+                listed(s, moves());
+                s.table.select("1");
+                recent_demo(s);
+                model::palette::open(s);
+                s.palette.query = rune::TextEdit::new("move");
+                s.palette.query.focused = true;
+            }),
+            // Moves, with recent folders: for a script to move one to a recent folder.
+            ("moves-recent", |s| {
+                s.service = Box::new(moves());
+                recent_demo(s);
             }),
             ("notice", |s| {
                 s.service = Box::new(demo_service());
@@ -1017,10 +1094,11 @@ fn main() {
         };
         let prefs = window_prefs(rune::tooling::headless_run().is_some());
         let mut app = Phantom { window, looks, settings: to_settings, inbox: main_inbox, prefs, ..Phantom::new(service) };
-        // Headless runs keep the fake finder: nothing opens.
+        // Headless runs keep the fake finder (nothing opens) and keep no recent folders.
         if rune::tooling::headless_run().is_none() {
             app.finder = Box::new(platform::SystemFinder);
             app.relauncher = Box::new(platform::SystemRelauncher);
+            app.recent = recent_folders();
         }
         match &reset {
             Ok(reset) => {

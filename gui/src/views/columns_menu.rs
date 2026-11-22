@@ -33,7 +33,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, shown: &[Column
             // ticked too.
             let wanted = !s.prefs.hidden().contains(&c) || shown == [c];
             Entry::Choice {
-                id: c.id(),
+                id: c.id().into(),
                 label: c.title().into(),
                 hint: (wanted && !shown.contains(&c)).then(|| client::display::no_room().into()),
                 icon: wanted.then_some(Icon::Check),

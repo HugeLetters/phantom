@@ -70,8 +70,11 @@ pub struct Palette {
     seen: String,
     /// The command highlighted, as last arrowed to, clicked or opened on: the highlight follows it
     /// when rows come and go under it ([`highlighted`]). Meaningful only while `seen` is the text.
-    on: Option<Command>,
+    on: Option<Pin>,
 }
+
+/// What identifies a listed command: the command, and for "Move to Films" its folder.
+type Pin = (Command, Option<proto::AbsolutePath>);
 
 impl Palette {
     pub fn is_open(&self) -> bool {
@@ -87,8 +90,8 @@ impl Palette {
     }
 
     /// The command the highlight is pinned to, unless the text changed since.
-    fn pinned(&self) -> Option<Command> {
-        if self.query.text == self.seen { self.on } else { None }
+    fn pinned(&self) -> Option<&Pin> {
+        if self.query.text == self.seen { self.on.as_ref() } else { None }
     }
 
     fn then(&mut self, event: Event) {
@@ -140,24 +143,50 @@ pub struct Entry {
     pub label: String,
     pub hint: Option<String>,
     pub icon: Option<Icon>,
+    /// A folder Move to ▸ offers (#87), for "Move to Films": it moves there with no picker.
+    pub to: Option<proto::AbsolutePath>,
+}
+
+impl Entry {
+    fn pin(&self) -> Pin {
+        (self.command, self.to.clone())
+    }
 }
 
 /// Every command available now, in the list's order: the selected torrents', the selected files'
-/// (while the Files list shows some selected), then the app's.
+/// (while the Files list shows some selected), then the app's. Move to… (which asks for a folder)
+/// is followed by "Move to <folder>" for each folder Move to ▸ offers.
 pub fn offered(s: &Phantom) -> Vec<Entry> {
     let selected = Selected::of(&s.table, &s.torrents, s.target_there);
     let offered = on_torrents(s);
     let can_delete = offered.contains(&OnTorrents::Delete);
     let n = selected.torrents.len();
-    let torrents = offered.into_iter().map(|c| (Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
+    let entry = |command: Command, group: Group, label: String| Entry {
+        command,
+        group,
+        label,
+        hint: command.spec().hint(),
+        icon: command.spec().icon,
+        to: None,
+    };
+    let mut entries = Vec::new();
+    for c in offered {
+        entries.push(entry(Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
+        if c == OnTorrents::MoveTo {
+            let folders = super::recent::offered(s);
+            let names = super::recent::names(&folders);
+            entries.extend(folders.into_iter().zip(names).map(|(f, name)| Entry {
+                label: client::display::move_to_folder(&name),
+                hint: None,
+                to: Some(f.folder),
+                ..entry(Command::Torrents(c), Group::Torrents, String::new())
+            }));
+        }
+    }
     // Worded as the file menu words them.
-    let files = on_files(s).into_iter().map(|c| (Command::Files(c), Group::Files, c.spec().name.to_owned()));
-    let app = InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| (Command::App(c), Group::App, c.wording(s)));
-    torrents
-        .chain(files)
-        .chain(app)
-        .map(|(command, group, label)| Entry { command, group, label, hint: command.spec().hint(), icon: command.spec().icon })
-        .collect()
+    entries.extend(on_files(s).into_iter().map(|c| entry(Command::Files(c), Group::Files, c.spec().name.to_owned())));
+    entries.extend(InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| entry(Command::App(c), Group::App, c.wording(s))));
+    entries
 }
 
 /// What the palette lists for its text: the commands offered whose label matches it, group by
@@ -215,7 +244,7 @@ pub fn open(s: &mut Phantom) {
     s.palette.query = TextEdit::new("");
     s.palette.query.focused = true;
     s.palette.then(Event::Open);
-    s.palette.on = listed(s).first().map(|e| e.command);
+    s.palette.on = listed(s).first().map(Entry::pin);
 }
 
 /// Escape, a click outside, or another overlay opening.
@@ -229,7 +258,7 @@ pub fn close(s: &mut Phantom) {
 /// or the last row when the list has shrunk past it, so the highlight lands on a neighbour.
 pub fn highlighted(s: &Phantom) -> usize {
     let list = listed(s);
-    let pinned = s.palette.pinned().and_then(|c| list.iter().position(|e| e.command == c));
+    let pinned = s.palette.pinned().and_then(|c| list.iter().position(|e| e.pin() == *c));
     pinned.unwrap_or_else(|| s.palette.at().min(list.len().saturating_sub(1)))
 }
 
@@ -238,7 +267,7 @@ fn settle(s: &mut Phantom) -> Vec<Entry> {
     let (list, at) = (listed(s), highlighted(s));
     s.palette.state = State::Open { at };
     s.palette.seen = s.palette.query.text.clone();
-    s.palette.on = list.get(at).map(|e| e.command);
+    s.palette.on = list.get(at).map(Entry::pin);
     list
 }
 
@@ -246,7 +275,7 @@ fn arrow(s: &mut Phantom, tx: &mut Tx, event: impl FnOnce(usize) -> Event) {
     let list = settle(s);
     s.palette.then(event(list.len()));
     let at = s.palette.at();
-    s.palette.on = list.get(at).map(|e| e.command);
+    s.palette.on = list.get(at).map(Entry::pin);
     tx.scroll_into_view(row_key(at));
 }
 
@@ -268,6 +297,9 @@ pub fn run(s: &mut Phantom, tx: &mut Tx) {
     let at = highlighted(s);
     let Some(entry) = listed(s).into_iter().nth(at) else { return };
     close(s);
+    if let Some(to) = entry.to {
+        return super::moving::move_selection_to(s, to);
+    }
     match entry.command {
         Command::Torrents(c) => crate::commands::run_on_torrents(s, c, tx),
         Command::App(c) => crate::commands::run_in_app(s, c, tx),
@@ -279,7 +311,7 @@ pub fn run(s: &mut Phantom, tx: &mut Tx) {
 pub fn pick(s: &mut Phantom, i: usize, tx: &mut Tx) {
     s.palette.seen = s.palette.query.text.clone();
     s.palette.state = State::Open { at: i };
-    s.palette.on = listed(s).get(i).map(|e| e.command);
+    s.palette.on = listed(s).get(i).map(Entry::pin);
     run(s, tx);
 }
 
