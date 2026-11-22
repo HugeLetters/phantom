@@ -1149,7 +1149,10 @@ fn main() {
         platform::app_icon::appkit::install(looks.app_icons());
     }
     // The two windows, each with its own state, and the ways from one to the other (`windows`).
-    let settings_app = App::new(settings_spec()).on_close(settings_on_close).on_focus(settings_on_focus);
+    let settings_app = App::new(settings_spec())
+        .chrome(rune::Chrome { traffic_lights: Some(ui::TRAFFIC_LIGHTS), ..rune::Chrome::DEFAULT })
+        .on_close(settings_on_close)
+        .on_focus(settings_on_focus);
     #[cfg(target_os = "macos")]
     let settings_app = settings_app.on_window(|window| platform::remember_frame(window, "Settings"));
     let settings_handle = settings_app.handle();
