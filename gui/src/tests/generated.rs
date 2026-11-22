@@ -1386,7 +1386,8 @@ impl StateMachineTest for Screen {
         // An add sent by a click on Add landed: the link field takes the focus if it was on Add
         // just before (a click on Add leaves it there, the add turns Add off), and leaves it where
         // the person put it otherwise, nowhere included. The click's own step lands with the
-        // focus on Add.
+        // focus on Add. An add that selects another torrent switches the pane: the focus in it
+        // may go with what it was on, to nowhere, and still not to the field.
         if rows.refocus_due {
             let on_add = |path: &Option<String>| path.as_deref().is_some_and(|p| p.split('/').any(|part| part == "add"));
             let focused = focused_path(rt);
@@ -1394,6 +1395,11 @@ impl StateMachineTest for Screen {
                 assert!(
                     focused.as_deref().is_some_and(|p| p.split('/').any(|part| part == "magnet-field")),
                     "the focus after a click on Add landed is in the link field, not {focused:?} (it was {focus_before:?})"
+                );
+            } else if rows.selected != rows_before.selected && focus_before.as_deref().is_some_and(|p| p.contains("/details/")) {
+                assert!(
+                    focused.is_none() || focused == focus_before,
+                    "the focus in the pane an add switched stays or goes nowhere, not to {focused:?} (it was {focus_before:?})"
                 );
             } else {
                 assert_eq!(focused, focus_before, "the focus stays where it was put when an add lands");
@@ -2146,6 +2152,31 @@ fn the_fake_sends_one_snapshot_for_each_epoch_version_and_watching() {
         Action::Select(1),
         Action::Toggle(1),
         Action::Toggle(1),
+        Action::Wait(1.5),
+    ];
+    replay(setup, steps);
+}
+
+/// #362, found by the generated test: a click on Add, then Enter sends the same link again; the
+/// album's file list takes the focus, and both adds land. The second selects the row the first
+/// added, so the pane switches and the focus on the album's files goes nowhere (as it does after
+/// Enter alone). The model had it stay where it was put.
+#[test]
+fn an_add_that_selects_a_listed_torrent_takes_the_focus_from_the_files_it_hides() {
+    let setup = Setup {
+        add_frames: 0,
+        torrent_url_frames: 78,
+        default_destination: true,
+        details_frames: 0,
+        stale_frames: 0,
+        paused: false,
+        tight: false,
+    };
+    let steps = [
+        Action::Type(Link::TorrentUrl),
+        Action::Send { button: true },
+        Action::Send { button: false },
+        Action::OffGoneNormal { row: 0, back: false },
         Action::Wait(1.5),
     ];
     replay(setup, steps);
