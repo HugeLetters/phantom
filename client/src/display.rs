@@ -429,11 +429,6 @@ impl Listing {
         Self { groups: failures.into_iter().map(|(what, why)| std::iter::once(add_what(what)).chain(why.lines()).collect()).collect() }
     }
 
-    /// One group: `first`, then the `reason`'s lines.
-    pub fn failure(first: Line, reason: &Reason) -> Self {
-        Self { groups: vec![std::iter::once(first).chain(reason.lines()).collect()] }
-    }
-
     /// `self` with one more group at its end.
     pub fn then(mut self, group: Vec<Line>) -> Self {
         if !group.is_empty() {
@@ -450,11 +445,6 @@ impl Listing {
     /// Its lines, one each, as plain text.
     pub fn plain(&self) -> String {
         self.lines().map(Line::text).collect::<Vec<_>>().join("\n")
-    }
-
-    /// Every text it shows, for measuring.
-    pub fn texts(&self) -> impl Iterator<Item = &str> {
-        self.lines().map(Line::text).filter(|t| !t.is_empty())
     }
 
     /// Whether a group has more than one line: the groups are then set further apart.
@@ -491,15 +481,6 @@ impl Reason {
     pub fn lines(&self) -> Vec<Line> {
         let words = [&self.text, &self.label].into_iter().filter(|t| !t.is_empty()).map(|t| Line::Muted(t.clone()));
         words.chain(self.paths.iter().map(|p| Line::Path(p.clone()))).collect()
-    }
-
-    /// On one line, for where a list isn't (the CLI, a tooltip): "Something is already at: /a/b".
-    pub fn inline(&self) -> String {
-        match (self.paths.is_empty(), self.label.is_empty()) {
-            (true, _) => self.text.clone(),
-            (false, true) => format!("{}: {}", self.text, self.paths.join(", ")),
-            (false, false) => format!("{}. {} {}", self.text, self.label, self.paths.join(", ")),
-        }
     }
 }
 
@@ -1280,10 +1261,10 @@ pub fn refused_why(why: &TorrentRefusal) -> Reason {
         TorrentRefusal::NotMoved { why, .. } | TorrentRefusal::NotRenamed { why, .. } => not_moved_reason(why),
         TorrentRefusal::DestinationUnavailable { reason, .. } => unavailable_reason(reason),
         TorrentRefusal::NotTrashed { kept, .. } if no_trash(kept) => Reason::new("The drive has no Trash"),
-        TorrentRefusal::NotTrashed { kept, .. } => kept_reason("Couldn't move everything to the Trash", "Still at:", kept),
+        TorrentRefusal::NotTrashed { kept, .. } => kept_reason("Phantom stopped before moving everything to the Trash", "Still at:", kept),
         TorrentRefusal::FilesNotTrashed { kept, .. } if no_trash(kept) => Reason::new("The drive has no Trash to move its files to"),
         TorrentRefusal::FilesNotTrashed { kept, .. } => {
-            kept_reason("Couldn't move every file to the Trash", "Still at (set to Off):", kept)
+            kept_reason("Phantom stopped before moving every file to the Trash", "Still at (set to Off):", kept)
         }
         other => Reason::new(torrent_reason(other)),
     }
@@ -1296,7 +1277,7 @@ fn kept_reason(stopped: &str, label: &str, kept: &[Kept]) -> Reason {
         KeptWhy::Failed { detail } => Some(sentence(without_os_code(detail))),
         KeptWhy::NoTrash | KeptWhy::Interrupted => None,
     });
-    let text = detail.unwrap_or_else(|| stopped.replace("Couldn't move", "Phantom stopped before moving"));
+    let text = detail.unwrap_or_else(|| stopped.to_owned());
     Reason::new(text).still(label, kept.iter().map(|k| k.path.display().to_string()).collect())
 }
 
@@ -1513,10 +1494,6 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
 /// and why under it, a path on a line of its own.
 pub fn command_failure(name: &str, failure: &Failure) -> (String, Reason) {
     match failure {
-        Failure::Refused(Refusal::Torrent {
-            why: why @ (TorrentRefusal::NotTrashed { name, .. } | TorrentRefusal::FilesNotTrashed { name, .. }),
-            ..
-        }) => (name.clone(), refused_why(why)),
         Failure::Refused(Refusal::Torrent { why, .. }) => (name.to_owned(), refused_why(why)),
         other => (name.to_owned(), Reason::new(sentence(&format!("{other:#}")))),
     }
@@ -1660,7 +1637,6 @@ mod tests {
         let path = at("/Users/me/Downloads/Album");
         let taken = refused_why(&TorrentRefusal::NameTaken { path: path.clone() });
         assert_eq!((taken.text.as_str(), taken.paths.clone()), ("Something is already at", vec!["/Users/me/Downloads/Album".to_owned()]));
-        assert_eq!(taken.inline(), "Something is already at: /Users/me/Downloads/Album");
         let full = refused_why(&TorrentRefusal::NotMoved { name: "Album".into(), why: NotMoved::DiskFull });
         assert_eq!(full.text, "The new destination's disk is full", "no \"Not moved:\", the line says it");
         let gone = cant_undo_reason(&CantUndo::NotInTrash { path });

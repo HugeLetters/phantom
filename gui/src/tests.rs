@@ -1599,7 +1599,6 @@ fn a_failure_landing_with_another_answer_is_still_shown() {
         vec![["Couldn't add the torrent", "Nobody", "No peers have this torrent"]],
         "the link's name, not the link"
     );
-    let _ = NOBODY;
 }
 
 /// An example, not a property: the sequence the generated test shrank to on #111 (slow details,

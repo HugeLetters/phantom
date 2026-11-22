@@ -1158,7 +1158,11 @@ fn a_failed_open_offers_the_files_folder_while_that_is_there() {
     assert_eq!(list_of(&mut rt, id).lines().collect::<Vec<_>>(), ["Can't open the file", PART, "It isn't on disk", "Show folder"]);
     super::generated::show_notice(&mut rt, id);
     tap(&mut rt, "notice-action");
-    assert_eq!(shown.all(), vec![("/Users/me/Downloads/Pack".into(), crate::platform::Show::Open)], "the folder is opened");
+    assert_eq!(
+        shown.all(),
+        vec![("/Users/me/Downloads/Pack".into(), crate::platform::Show::Reveal)],
+        "the folder is revealed, never opened"
+    );
 }
 
 /// Rule 5: a "Couldn't undo" is an error whatever it was of, in one wording.

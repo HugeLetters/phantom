@@ -415,7 +415,7 @@ fn undid(s: &mut Phantom, asked: u64, undone: Result<SettingUndone, Failure>) {
             // Nothing there: another client undid it first, and the list follows.
             if !matches!(failure, Failure::Refused(Refusal::NothingToUndo)) {
                 let why = display::sentence(&format!("{failure:#}"));
-                s.bar.tell(Notice::error(display::undo_failed()).with_names_and_why(&format!("{}\n{why}", of.unwrap_or_default())));
+                s.bar.tell(Notice::error(display::undo_failed()).with_listing(display::Listing::new(&of.unwrap_or_default(), &why)));
             }
         }
     }

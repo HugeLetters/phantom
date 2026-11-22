@@ -118,13 +118,6 @@ impl Notice {
         Self { more: Some(Listing::new(&names.into(), "")), ..self }
     }
 
-    /// `text` as `client::display` words a list of names and why: the names a line each, then the
-    /// reason on the last line.
-    pub fn with_names_and_why(self, text: &str) -> Self {
-        let (names, why) = text.rsplit_once('\n').unwrap_or(("", text));
-        Self { more: Some(Listing::new(names, why)), ..self }
-    }
-
     /// Its buttons, the first the default.
     pub fn with_actions(self, actions: Vec<NoticeAction>) -> Self {
         Self { actions, ..self }
@@ -216,19 +209,19 @@ impl NoticeAction {
 
     /// Reveal in Finder for `path`, offered while it's on disk.
     pub fn reveal(path: &std::path::Path) -> Self {
-        Self::on_disk(display::reveal_in_finder(), path, crate::platform::Show::Reveal)
+        Self::on_disk(display::reveal_in_finder(), path)
     }
 
-    /// Show folder: opens `folder` in Finder, offered while it's on disk (a failed Open's, the
-    /// file's folder).
+    /// Show folder: reveals `folder` in Finder (never opens it: a package would launch), offered
+    /// while it's on disk (a failed Open's, the file's folder).
     pub fn folder(folder: &std::path::Path) -> Self {
-        Self::on_disk(display::show_folder(), folder, crate::platform::Show::Open)
+        Self::on_disk(display::show_folder(), folder)
     }
 
-    /// A button that hands `path` to the system as `how`, offered while it's on disk.
-    fn on_disk(title: &str, path: &std::path::Path, how: crate::platform::Show) -> Self {
+    /// A button that reveals `path` in Finder, offered while it's on disk.
+    fn on_disk(title: &str, path: &std::path::Path) -> Self {
         let (run, there) = (path.to_path_buf(), path.to_path_buf());
-        let mut action = Self::new(title, move |s: &mut Phantom| crate::platform::show(s, &run, how));
+        let mut action = Self::new(title, move |s: &mut Phantom| crate::platform::show(s, &run, crate::platform::Show::Reveal));
         action.shown = Some(Rc::new(move |s: &Phantom| s.finder.exists(&there)));
         action
     }

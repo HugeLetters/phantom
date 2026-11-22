@@ -1730,7 +1730,7 @@ fn answer(row: Row) -> Done<Result<Settings, Failure>> {
         if let Err(failure @ (Failure::Failed(_) | Failure::Error(_))) = &result {
             let of = row_setting(row).map(|key| display::setting_short(key).to_owned()).unwrap_or_default();
             let why = display::sentence(&format!("{failure:#}"));
-            s.bar.tell(Notice::error(display::setting_not_changed()).with_names_and_why(&format!("{of}\n{why}")));
+            s.bar.tell(Notice::error(display::setting_not_changed()).with_listing(display::Listing::new(&of, &why)));
         }
         s.settings.post(move |s, _| {
             let Some(sheet) = &mut s.sheet else { return };
