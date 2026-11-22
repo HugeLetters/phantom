@@ -723,11 +723,10 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("1");
                 model::moving::start(s, vec![0, 3, 4], archive(""));
             }),
-            // #87's prototype: Rename… on a name longer than the header's room for it (it scrolls
-            // inside the field, as wide as the header's name may be; `PHANTOM_FIELD_FOCUS` picks its
-            // focus look), a clash of several files, the Add tooltip, a refused add as a notice, and
-            // Move to ▸ with recent folders in the palette (`moves-recent`, for a script to open the
-            // row menu's).
+            // Rename… on a name longer than the header's room for it (it scrolls inside the field,
+            // as wide as the header's name may be), a clash of several files, the Add tooltip, a
+            // refused add as a notice, and Move to ▸ with recent folders in the palette
+            // (`moves-recent`, for a script to open the row menu's).
             ("rename-long", |s| {
                 let iso = File {
                     index: 0,

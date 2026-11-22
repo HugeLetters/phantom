@@ -113,50 +113,20 @@ const PLACEHOLDER_INSET: f32 = 8.0;
 /// edited in place starts this far left of the text it replaces, so the text doesn't move.
 pub const TEXT_INSET: f32 = 8.0;
 
-/// How a field edited in place (the details pane's name) shows that it has the focus, drawn over `behind`,
-/// the colour of what it sits on: Phantom's [`Blocks::field_focus`](super::Blocks) slot. The three
-/// are drawn side by side for the user to pick one; `PHANTOM_FIELD_FOCUS` (underline, tint,
-/// hairline) switches them, a debug switch until then.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FocusLook {
-    /// An accent line under the text only, nothing around it.
-    Underline,
-    /// A soft wash of the accent behind it, no outline.
-    Tint,
-    /// A hairline outline in a muted colour.
-    Hairline,
-}
-
-impl FocusLook {
-    /// The look `PHANTOM_FIELD_FOCUS` names; the underline otherwise.
-    pub fn from_env() -> FocusLook {
-        match std::env::var("PHANTOM_FIELD_FOCUS").as_deref() {
-            Ok("tint") => FocusLook::Tint,
-            Ok("hairline") => FocusLook::Hairline,
-            _ => FocusLook::Underline,
-        }
-    }
-}
-
-/// Phantom's field edited in place: opaque (it covers the cell's own text), the
-/// colour of the row it's in, and `look` for its focus.
-pub fn phantom_focus(ui: &Ui, look: FocusLook, field: El, behind: rune::Color) -> El {
+/// How a field edited in place (the details pane's name) shows that it has the focus, drawn over
+/// `behind`, the colour of what it sits on: Phantom's [`Blocks::field_focus`](super::Blocks) slot,
+/// an accent line under the text and nothing around it. Opaque: it covers the cell's own text, in
+/// the colour of the row it's in.
+pub fn phantom_focus(ui: &Ui, field: El, behind: rune::Color) -> El {
     let k = &ui.k;
     let c = &k.c;
     let radius = k.radius.sm;
     let base = row().radius(radius).fill(c.bg_base);
     let face = row().w_full().h_full().radius(radius).fill(behind);
-    let face = match look {
-        FocusLook::Underline => {
-            // Under the text, not the whole box: from the text's start to the field's end, less
-            // the same inset there.
-            let line = el().pin(Some(TEXT_INSET), None, Some(TEXT_INSET), Some(3.0)).h(1.5).fill(c.text_accent).inert();
-            face.child(field).child(line)
-        }
-        FocusLook::Tint => face.child(row().w_full().h_full().radius(radius).fill(k.alpha(c.text_accent, 0.14)).child(field)),
-        FocusLook::Hairline => face.border(1.0, k.alpha(c.text_muted, 0.45)).child(field),
-    };
-    base.key("focus-look").child(face)
+    // Under the text, not the whole box: from the text's start to the field's end, less the same
+    // inset there.
+    let line = el().pin(Some(TEXT_INSET), None, Some(TEXT_INSET), Some(3.0)).h(1.5).fill(c.text_accent).inert();
+    base.key("focus-look").child(face.child(field).child(line))
 }
 
 impl Ui {

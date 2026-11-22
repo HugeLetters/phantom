@@ -123,7 +123,7 @@ Why something can't be done, known before anything is sent, on the control click
 button's (Resume with nothing paused), Add's with text that isn't a link, a name the Rename field
 can't take (under the field, until the next keystroke). Neutral, the same in Light and Dark: one
 shape, a raised surface with a single hairline, the text's own colour, never the error colour. A
-hover's explanation (what a clash's choice does, once the pointer rests on it) is one too.
+hover's explanation (what a clash's choice does, once the pointer rests on it for 0.5 s) is one too. It's Phantom's own block (`ui/popover.rs`), not the system's tooltip, so it looks the same everywhere.
 _Avoid_: error note, red bubble, alert
 
 ## Wording

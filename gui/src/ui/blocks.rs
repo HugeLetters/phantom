@@ -79,10 +79,7 @@ impl Blocks {
             tab: Rc::new(super::tabs::phantom_tab),
             tab_bar: Rc::new(super::tabs::phantom_tab_bar),
             band: Rc::new(super::tabs::phantom_band),
-            field_focus: {
-                let look = super::text_field::FocusLook::from_env();
-                Rc::new(move |ui: &Ui, field, behind| super::text_field::phantom_focus(ui, look, field, behind))
-            },
+            field_focus: Rc::new(super::text_field::phantom_focus),
         }
     }
 
