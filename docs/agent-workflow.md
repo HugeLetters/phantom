@@ -50,6 +50,11 @@
    never-built feature stays absent (such as "an error never opens the popover"): the model-based
    tests compare the whole state after every step, so an unwanted change already fails them. A
    removed feature leaves only its machine-table row, stating what happens now.
+
+   **Proptest seeds:** a fix's shrunk case goes into a named test, and its seed line is deleted
+   from `proptest-regressions/` in the same PR. Every property test in a source file replays every
+   seed in that file's regressions file, on top of its cases, and a seed is an RNG seed: once the
+   generator changes it draws another case, so it no longer pins the bug.
 5. **Artifacts:** for every user-visible change, render the real app headlessly:
    - stills: `target/debug/phantom-gui --snap out.png --scene <scene> --size 960x600 --scale 2`
      (both `--theme dark` and `light` when colours change), plus the 640x320 minimum size;

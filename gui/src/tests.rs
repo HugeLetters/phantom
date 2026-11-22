@@ -2056,3 +2056,25 @@ fn a_shortcut_pressed_with_the_focus_dropped_while_an_add_is_on_its_way_leaves_i
     assert_eq!(rt.state.torrents.len(), 3, "the add landed");
     assert_eq!(focus_path(&rt), None);
 }
+
+/// A click on Add, then a click on a file's priority with no pane open: nothing is there to
+/// click, so nothing takes the focus, and the field takes it from Add as the add lands. (Found by
+/// the generated test, which had that click count as the person moving the focus.)
+#[test]
+fn a_click_on_a_files_priority_with_no_pane_open_while_an_add_is_on_its_way_leaves_the_focus_on_add() {
+    let service = with_an_album().adds_after(0.5, 0.5).with_default_destination(Some("/srv/torrents".into()));
+    let mut rt = app(service);
+    tap(&mut rt, "magnet-field");
+    rt.paste(MAGNET);
+    settle(&mut rt);
+    tap(&mut rt, "add");
+    assert!(focus_path(&rt).is_some_and(|p| p.ends_with("add/#0")), "the click left the focus on Add");
+    assert!(rt.find("files/viewport/rows/0/priority").is_none(), "no pane is open");
+    generated::press(&mut rt, "files/viewport/rows/0/priority");
+    assert!(focus_path(&rt).is_some_and(|p| p.ends_with("add/#0")), "the click moved no focus");
+    for _ in 0..60 {
+        rt.frame(FRAME);
+    }
+    assert_eq!(rt.state.torrents.len(), 3, "the add landed");
+    assert!(focus_path(&rt).is_some_and(|p| p.contains("magnet-field")), "the field took the focus: {:?}", focus_path(&rt));
+}

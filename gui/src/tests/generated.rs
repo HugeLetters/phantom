@@ -1738,7 +1738,7 @@ fn step(rt: &mut Runtime<Phantom>) {
 
 /// Presses the element at `key`, if it's there; a disabled button does nothing. A note open by
 /// Add takes the first click anywhere (it closes), so the person closes it first.
-fn press(rt: &mut Runtime<Phantom>, key: &str) {
+pub(crate) fn press(rt: &mut Runtime<Phantom>, key: &str) {
     close_notes(rt);
     if let Some((x, y)) = rt.find(key) {
         rt.pointer_down(x, y);
@@ -2118,6 +2118,39 @@ fn the_pane_shows_the_selected_torrent_once_its_details_came() {
         Action::PasteMagnet(0),
         Action::Wait(1.5),
     ];
+    replay(setup, steps);
+}
+
+/// #148, found by the generated test: the fake sent two different snapshots for one
+/// `(epoch, version, watching)`. A command's own snapshot, taken before the slow details came,
+/// landed after the stream's with them, and the app took the equal version as current: the pane
+/// went back to waiting and, the torrents being paused, stayed blank. The fake asserts the
+/// protocol on every snapshot it sends, so the case fails if it breaks it again.
+#[test]
+fn the_fake_sends_one_snapshot_for_each_epoch_version_and_watching() {
+    let setup = Setup {
+        add_frames: 0,
+        torrent_url_frames: 0,
+        default_destination: false,
+        details_frames: 47,
+        stale_frames: 47,
+        paused: true,
+        tight: false,
+    };
+    let remove = Leave::Click(Pick::Remove { delete: false });
+    let steps = [
+        Action::RowMenu { id: 0, leave: remove, small: false },
+        Action::Select(1),
+        Action::Toggle(1),
+        Action::Toggle(1),
+        Action::Wait(1.5),
+    ];
+    replay(setup, steps);
+}
+
+/// Runs `steps` in a screen set up as `setup`, the model and the checks after each step as in the
+/// generated tests.
+fn replay(setup: Setup, steps: impl IntoIterator<Item = Action>) {
     let mut rows = Rows::start(setup);
     let mut sut = <Screen as StateMachineTest>::init_test(&rows);
     for action in steps {
