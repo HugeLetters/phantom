@@ -363,7 +363,8 @@ pub fn plan(
 /// full length) is found in `to` under `name` (none: its own), its files moved or renamed there by
 /// hand (#358): nothing at any of their paths in `from`, its own folder (or its one file) in `to`,
 /// each of its files there a real file reached through real folders, no longer than its own (a
-/// check sets each file's length, which would cut a longer one short), and one at least. What's
+/// check sets each file's length, which would cut a longer one short) and of no other hard link
+/// (writing it would change that other name's file too), and one at least. What's
 /// there, as a clash finds it: the files a Move takes as they are, as Use existing does.
 pub fn found_in(from: &Path, to: &Path, name: Option<&str>, files: &[(usize, PathBuf, u64)]) -> Option<Vec<Found>> {
     if files.is_empty() || files.iter().any(|(_, path, _)| meta(&from.join(path)).is_some()) {
@@ -380,7 +381,7 @@ pub fn found_in(from: &Path, to: &Path, name: Option<&str>, files: &[(usize, Pat
         let new = to.join(path);
         match (meta(&new), reached(to, path)) {
             (None, _) => {}
-            (Some(_), Some(m)) if m.len() <= *len => there.extend(found(&new, &m)),
+            (Some(_), Some(m)) if m.len() <= *len && m.nlink() == 1 => there.extend(found(&new, &m)),
             (Some(_), _) => return None,
         }
     }

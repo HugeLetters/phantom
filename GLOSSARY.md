@@ -258,12 +258,13 @@ A torrent the person moved or renamed in Finder, which Move to… the folder it'
 Rename… to the name it has now, points at where it is (#358). It's found when none of its files is
 at its path where it was (it's Missing files there), and where it's going its own folder (or its
 one file, for a torrent of one file) is there, every file of it there is a file no longer than its
-own (reached through real folders, no link), at least one is, and it isn't another listed
-torrent's place. Then nothing moves, and nothing is made, written over or removed in either
-place: the torrent is pointed there and checked in full, then runs or stays stopped as before.
-The status bar says "Found", with its name and where it is in the list (and Reveal in Finder);
-`phantom move` and `phantom rename` print it. Not found (files of it still where it was, a file
-there longer than its own, or none of its files there), it's a Move or a Rename as ever: a Move
+own (reached through real folders, no link) with no other hard link, at least one is, and it isn't
+another listed torrent's place. Then nothing moves: the Move makes, writes over or removes nothing
+in either place, and the torrent is pointed there and checked in full, then runs or stays stopped
+as before. The status bar says "Found", with its name and where it is in the list (and Reveal in
+Finder); `phantom move` and `phantom rename` print it. Not found (files of it still where it was, a
+file there longer than its own or with another hard link, or none of its files there), it's a Move
+or a Rename as ever: a Move
 asks about the files there as a clash, a Rename finds the name taken. A found Rename is one step
 of Undo, which points it back at its old name, moving nothing, Missing files again (or found there,
 if the person put it back); a found Move isn't undone, as a Move isn't. What's found is taken as

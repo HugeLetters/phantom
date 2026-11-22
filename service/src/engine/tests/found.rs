@@ -2,8 +2,8 @@
 //! from its place, Move to… the folder it's in now or Rename… to its new name moves nothing: the
 //! record points there and the torrent is checked there, then it runs or stays stopped as before.
 //! Only when none of its files is at its old place, and at the new one its own folder (or its one
-//! file) is there, with each of its files there no longer than the torrent's own; else it's a
-//! Move or a Rename as ever. Every destination is the test's own temp dir, and so is the Trash.
+//! file) is there, with each of its files there no longer than the torrent's own and of no other
+//! hard link; else it's a Move or a Rename as ever. Every destination is the test's own temp dir, and so is the Trash.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
@@ -311,6 +311,51 @@ async fn nothing_is_found_through_a_link() {
         assert_eq!((stamps(&downloads.join("Album")), stamps(&mine)), (album, theirs), "{link}: nothing changed");
         let t = find(&engine, id).await;
         assert_eq!((t.status, t.location), (Status::MissingFiles, at(downloads.join("pack"))), "{link}");
+        engine.stop().await;
+    }
+}
+
+/// A file there with other hard links isn't found: the torrent's folder renamed or moved in Finder,
+/// its last file then hard-linked from a folder of the person's, Rename… to the new name is refused
+/// as the name is taken, and Move to… the folder asks about the clash, as ever. Both names keep
+/// their bytes. With that other link gone, the same place is found.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_with_other_hard_links_is_not_found() {
+    for how in ["rename", "move"] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let downloads = dir.path().join("downloads");
+        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, true).await.unwrap().id;
+        wait_for(&engine, id, Status::Done { reached: None }).await;
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let (now, command) = match how {
+            "rename" => (downloads.join("Album"), rename("Album")),
+            _ => (elsewhere.join("pack"), move_to(&elsewhere)),
+        };
+        std::fs::rename(downloads.join("pack"), &now).unwrap();
+        let mine = dir.path().join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::hard_link(now.join("c.bin"), mine.join("c.bin")).unwrap();
+        wait_for(&engine, id, Status::MissingFiles).await;
+        let (there, theirs) = (bytes_in(&now), bytes_in(&mine));
+
+        let why = refusal(engine.command(id, command.clone()).await);
+        match how {
+            "rename" => assert_eq!(why, (id, TorrentRefusal::NameTaken { path: AbsolutePath::new(&now).unwrap() })),
+            _ => assert!(matches!(why, (_, TorrentRefusal::Clash { ref files }) if files.len() == 3), "{why:?}"),
+        }
+        assert_eq!((bytes_in(&now), bytes_in(&mine)), (there.clone(), theirs), "{how}: both names' bytes as they were");
+        let t = find(&engine, id).await;
+        assert_eq!((t.status, t.location), (Status::MissingFiles, at(downloads.join("pack"))), "{how}");
+
+        std::fs::remove_file(mine.join("c.bin")).unwrap();
+        let answer = engine.commanded(vec![id], command).await.unwrap();
+        assert_eq!(answer.found, vec![id], "{how}: one link only, found");
+        moved(&engine, id).await;
+        wait_for(&engine, id, Status::Done { reached: None }).await;
+        assert_eq!(find(&engine, id).await.location, at(now.clone()), "{how}");
+        assert_eq!(bytes_in(&now), there, "{how}");
         engine.stop().await;
     }
 }
