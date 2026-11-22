@@ -1086,6 +1086,11 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 s.app_icon.choice = Some(platform::app_icon::Icons::Pair { dark: "phantom".into(), light: "full-moon".into() });
             }),
+            // One icon in both halves: the row shows it once.
+            ("settings-icon-row-one", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.app_icon.choice = Some(platform::app_icon::Icons::One { icon: "full-moon".into() });
+            }),
         ],
         ..AppSpec::new("Settings", SETTINGS_SIZE, SettingsWindow::detached, views::settings::view)
     }

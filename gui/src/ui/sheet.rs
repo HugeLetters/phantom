@@ -543,7 +543,7 @@ impl Ui {
             .hover_group()
             .child(picture)
             .child(self.tile_name(label))
-            .child(row().gap(CHIP_GAP).children(chips))
+            .child(row().gap(CHIP_GAP).mt(CHIPS_MARGIN).children(chips))
             .children(remove)
     }
 
@@ -570,12 +570,19 @@ impl Ui {
         self.look_chip(key, chip, false, Some(Box::new(on_press)))
     }
 
-    /// A tile's name: one line, shortened in the middle to fit it (the whole of it is the tile's hover).
+    /// A tile's name: centred over up to two lines, cut with "…" only past the second (the whole of
+    /// it is the tile's hover). Its box is two lines tall for any name, so what's under it stays put.
     fn tile_name(&self, label: &str) -> El {
         let k = &self.k;
-        let room = TILE_W - 2.0 * TILE_PAD;
-        let shown = crate::views::details::shorten_middle(label, |t| rune::text::measure(t, &[], k.ty.text_xsmall, None).0 <= room);
-        text(shown).font(k.ty.text_xsmall).color(k.c.text_muted).h(NAME_H).a11y_hidden()
+        text(label.to_owned())
+            .key("name")
+            .font(k.ty.text_xsmall.lh(NAME_LINE))
+            .color(k.c.text_muted)
+            .align(rune::Align::Center)
+            .max_lines(2)
+            .w(TILE_W - 2.0 * TILE_PAD)
+            .h(NAME_H)
+            .a11y_hidden()
     }
 
     /// A designed pair's tile in the App icon's sheet: its two icons split along the diagonal from
@@ -733,14 +740,18 @@ const HALF_TOGGLE: f32 = 46.0;
 
 /// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's
 /// (and "+ Add image…") as tall as its drawing, name and chips need; a designed pair's, with no
-/// chips, as tall as its drawing and name need. The padding, and the gap between the parts.
+/// chips, as tall as its drawing and name (two lines) need. The padding, and the gap between the parts.
 const TILE_W: f32 = 96.0;
 const PICTURE: f32 = 40.0;
 const TILE_PAD: f32 = 4.0;
 const TILE_GAP: f32 = 3.0;
-const NAME_H: f32 = 13.0;
+/// A name's line height; its box holds two lines.
+pub(crate) const NAME_LINE: f32 = 13.0;
+const NAME_H: f32 = 2.0 * NAME_LINE;
+/// Extra room over the chips, so an in-use outline (3 pt wide, 2 pt out) clears the name above.
+const CHIPS_MARGIN: f32 = IN_USE + IN_USE_GAP - TILE_GAP;
 const PAIR_H: f32 = 2.0 * TILE_PAD + PICTURE + TILE_GAP + NAME_H;
-const TILE_H: f32 = PAIR_H + TILE_GAP + CHIP;
+const TILE_H: f32 = PAIR_H + TILE_GAP + CHIPS_MARGIN + CHIP;
 
 /// The gap between an App icon's chips: their in-use outlines, 3 pt wide and 2 pt out, never meet;
 /// three chips and two gaps fill a tile's width less its padding.

@@ -15,9 +15,9 @@ use crate::changes::Target;
 use crate::model::settings::presets;
 use crate::model::settings::{
     AppIcon, Chip, Editor, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, add_image, chip_in_use, choose_chip, choose_folder,
-    choose_image, choose_pair, choose_theme, clear_folder, close, close_icons, close_theme_menu, edit_icons, escape, icon_name,
-    pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_colour, submit_limit, submit_port, submit_seeding,
-    toggle, toggle_theme_menu,
+    choose_image, choose_pair, choose_theme, clear_folder, close, close_icons, close_theme_menu, edit_icons, escape, icon_full_name,
+    icon_name, pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_colour, submit_limit, submit_port,
+    submit_seeding, toggle, toggle_theme_menu,
 };
 use crate::model::settings::{Held, THEME, ThemeRow, ThemeRows, focused_side, join_row, split_row, theme_rows};
 use crate::theme::preset::{Appearance, LookPreset};
@@ -575,9 +575,9 @@ const SAVE_AS_HEIGHT: f32 = 32.0;
 /// How wide a colour's field is: `#rrggbb`.
 const COLOUR_WIDTH: f32 = 84.0;
 
-/// The App icon's row: the icon each Appearance shows now, small (both, each with a small ☀ or ☾
-/// under it, while they differ; one while they're the same), what it is, and Edit…, which opens
-/// its sheet.
+/// The App icon's row, one line: what it is, the icon each Appearance shows now, small (both,
+/// each with a ☀ or ☾ at its corner, while they differ; one while they're the same), and Edit…,
+/// which opens its sheet.
 fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
     let label = display::setting_label("app_icon");
     if icon.manifest.is_none() {
@@ -596,8 +596,10 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         .first_focus(first(sheet, "app_icon"))
         .on_press(edit_icons)
         .build();
-    let controls = row().gap(8.0).center_y().child(preview).child(edit);
-    ui.setting_row("app_icon", label, controls, vec![(icon_name(icon, icon.choice.as_ref()), Tone::Muted)])
+    // One line: the caption (whole on hover), the previews, Edit….
+    let caption = ui.caption(icon_name(icon, icon.choice.as_ref())).key("app_icon-note").help(icon_full_name(icon, icon.choice.as_ref()));
+    let controls = row().gap(8.0).center_y().child(caption).child(preview).child(edit);
+    ui.setting_row("app_icon", label, controls, Vec::new())
 }
 
 /// The faces of the App icon's chips and marks, `(page, text)` of ☀ then ☾: a fresh install's Light

@@ -34,6 +34,8 @@ pub use blocks::{ProgressBar, StatusDot};
 pub use icon::Icon;
 pub use menu::Entry;
 pub use palette::PaletteRow;
+#[cfg(test)]
+pub(crate) use sheet::NAME_LINE;
 pub use sheet::{Halves, IMAGES, LookChip};
 pub use status::Tone;
 pub use table::{Table, TableColumn};

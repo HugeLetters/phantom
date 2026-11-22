@@ -3603,3 +3603,85 @@ fn the_app_icon_rows_caption_names_what_the_halves_show() {
     assert_eq!(light, "Full Moon");
     assert!(dark.contains('…') && dark.chars().count() <= 24, "a long one shortened in the middle: {dark}");
 }
+
+/// The name drawn in the tile keyed `tile`: its text and its box.
+fn tile_name_of(d: &Desk, tile: &str) -> (String, [f32; 4]) {
+    let end = format!("{tile}/name");
+    let e = d.settings.elements().into_iter().find(|e| e.path.ends_with(&end) && !e.exiting).unwrap_or_else(|| panic!("{end}"));
+    (e.text.unwrap_or_default(), e.rect)
+}
+
+/// No icon's or pair's name in the sheet is shortened: each is drawn whole, in the two lines its box
+/// holds (#87).
+#[test]
+fn no_name_in_the_icon_sheet_is_shortened() {
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    let m = manifest();
+    let tiles: Vec<(String, String)> = m
+        .pairs()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (format!("icon-pair-{i}"), p.name.clone()))
+        .chain(m.icons().iter().map(|i| (format!("icon-{}", i.id), i.name.clone())))
+        .collect();
+    assert!(tiles.len() >= 20);
+    let font = Look::build(LookPreset::fresh().get(Appearance::Light)).ui.tokens().ty.text_xsmall.lh(crate::ui::NAME_LINE);
+    for (tile, name) in tiles {
+        let (shown, rect) = tile_name_of(&d, &tile);
+        assert_eq!(shown, name, "{tile}: the name whole");
+        let (_, wrapped) = rune::text::measure(&name, &[], font, Some(rect[2]));
+        assert!(wrapped <= rect[3] + 0.5, "{tile}: {name:?} wraps to {wrapped} pt, past its box {rect:?}");
+    }
+}
+
+/// An in-use chip's outline (3 pt, 2 pt out) never reaches the name above it, whatever the name's
+/// length (#87).
+#[test]
+fn a_chips_outline_keeps_clear_of_the_name() {
+    let mut d = appearance_tab();
+    let bytes = std::fs::read(manifest_dir().join("full-moon.icns")).expect("a shipped icon");
+    let json = r#"{"default": "a", "icons": [{"id": "a", "name": "An icon with a name far too long to show in two lines at all", "file": "a.icns"},
+        {"id": "b", "name": "Moon", "file": "b.icns"}], "pairs": []}"#;
+    let long = Manifest::parse(json, |_| Ok(bytes.clone())).expect("a manifest");
+    d.settings.state.app_icon = AppIcon::new(Some(long), None, Looks::default().app_icons(), |_| {});
+    d.settle();
+    press(&mut d, "app-icon-edit");
+    for id in ["a", "b"] {
+        let (_, name) = tile_name_of(&d, &format!("icon-{id}"));
+        for half in ["both", "light", "dark"] {
+            let chip = super::generated::rect_of(&d.settings, &format!("icon-{id}-{half}")).expect("a chip");
+            assert!(chip[1] - 5.0 >= name[1] + name[3], "icon {id}'s {half} chip {chip:?}: its outline reaches the name {name:?}");
+        }
+    }
+}
+
+/// The tab's App icon row is one line: the label, then in a row the caption, the previews and Edit…,
+/// no taller than another row (#87).
+#[test]
+fn the_app_icon_row_is_one_line() {
+    let mut d = appearance_tab();
+    let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+    // A setting's row: a 36 pt line (`min_h`) in 4 pt padding.
+    let single = 36.0 + 2.0 * 4.0;
+    for pair in [false, true] {
+        if pair {
+            press(&mut d, "app-icon-edit");
+            press(&mut d, "icon-pair-0");
+            press(&mut d, "icons-done");
+        }
+        let (row, edit, caption) = (rect(&d, "app_icon"), rect(&d, "app-icon-edit"), rect(&d, "app_icon-note"));
+        assert!(row[3] <= single, "pair {pair}: the row {row:?} is one line: as tall as another setting's ({single})");
+        let middle = |r: [f32; 4]| r[1] + r[3] / 2.0;
+        assert!((middle(caption) - middle(edit)).abs() <= 0.5, "pair {pair}: caption {caption:?} on Edit…'s line {edit:?}");
+        let previews: Vec<[f32; 4]> = ["both", "light", "dark"]
+            .iter()
+            .filter_map(|h| super::generated::rect_of(&d.settings, &format!("app-icon-preview-{h}")))
+            .collect();
+        assert!(!previews.is_empty());
+        let first = previews.iter().map(|p| p[0]).fold(f32::MAX, f32::min);
+        let last = previews.iter().map(|p| p[0] + p[2]).fold(0.0, f32::max);
+        assert!(caption[0] + caption[2] <= first + 0.5, "pair {pair}: the caption before the previews");
+        assert!(last <= edit[0] + 0.5, "pair {pair}: the previews before Edit…");
+    }
+}

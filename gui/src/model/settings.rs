@@ -1211,6 +1211,15 @@ const NAME_CHARS: usize = 24;
 /// it; else both, "Light · Dark" (the Light's first), each shortened in the middle when long.
 /// "Follow theme" is a name like any other.
 pub fn icon_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
+    named(icon, choice, NAME_CHARS)
+}
+
+/// [`icon_name`] with nothing shortened: what the row's caption says on hover.
+pub fn icon_full_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
+    named(icon, choice, usize::MAX)
+}
+
+fn named(icon: &AppIcon, choice: Option<&Icons>, chars: usize) -> String {
     let manifest = icon.manifest.as_ref();
     let name = |id: &str| match id {
         FOLLOW => "Follow theme".to_owned(),
@@ -1222,7 +1231,7 @@ pub fn icon_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
         Some(Icons::One { icon }) => name(icon),
         Some(Icons::Pair { dark, light }) if dark == light => name(light),
         Some(Icons::Pair { dark, light }) => {
-            let short = |id: &str| crate::views::details::shorten_middle(&name(id), |t| t.chars().count() <= NAME_CHARS);
+            let short = |id: &str| crate::views::details::shorten_middle(&name(id), |t| t.chars().count() <= chars);
             format!("{} · {}", short(light), short(dark))
         }
     }
