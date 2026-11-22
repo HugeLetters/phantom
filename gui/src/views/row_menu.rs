@@ -40,7 +40,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layout: impl Fn
         .iter()
         .enumerate()
         .filter_map(|(i, e)| match e {
-            Entry::Choice { .. } => Some((i, false)),
+            Entry::Choice { .. } | Entry::Disabled { .. } => Some((i, false)),
             Entry::Sub { .. } => Some((i, true)),
             Entry::Title(_) | Entry::Separator => None,
         })

@@ -23,6 +23,13 @@ pub enum Entry {
         /// gutter), never the kit's own mark at the right edge, which is blanked.
         checked: Option<bool>,
     },
+    /// A choice that can't be picked now: drawn dimmed, `checked` as [`Entry::Choice`]'s.
+    Disabled {
+        id: Cow<'static, str>,
+        label: String,
+        icon: Option<Icon>,
+        checked: Option<bool>,
+    },
     /// A choice that opens more to its right while `open` (Move to ▸): picking it calls the pick's
     /// handler with `id`, to open or close it; its entries are picked as the menu's own.
     Sub {
@@ -92,7 +99,9 @@ impl Ui {
     /// A choice, or a submenu with its own, as the kit draws it.
     fn menu_item<S: 'static>(&self, entry: Entry, on_pick: &(impl Fn(&mut S, &str, &mut Tx) + Clone + 'static)) -> MenuItem {
         let (id, label, icon) = match &entry {
-            Entry::Choice { id, label, icon, .. } | Entry::Sub { id, label, icon, .. } => (id.clone(), label.clone(), *icon),
+            Entry::Choice { id, label, icon, .. } | Entry::Sub { id, label, icon, .. } | Entry::Disabled { id, label, icon, .. } => {
+                (id.clone(), label.clone(), *icon)
+            }
             Entry::Title(_) | Entry::Separator => unreachable!("not an item"),
         };
         let pick = on_pick.clone();
@@ -109,6 +118,13 @@ impl Ui {
                 }
                 match hint {
                     Some(hint) => item.shortcut(hint),
+                    None => item,
+                }
+            }
+            Entry::Disabled { checked, .. } => {
+                let item = item.disabled(true);
+                match checked {
+                    Some(on) => item.checked(on),
                     None => item,
                 }
             }
@@ -143,6 +159,7 @@ impl Ui {
         };
         let widest = entries.iter().map(|e| match e {
             Entry::Choice { label, hint, .. } => item(label, hint),
+            Entry::Disabled { label, .. } => item(label, &None),
             // Its chevron at the right edge, the width of a key's gap and a glyph.
             Entry::Sub { label, .. } => item(label, &None) + GAP + 16.0,
             Entry::Title(title) => 24.0 + measure(title, k.ty.small_medium),

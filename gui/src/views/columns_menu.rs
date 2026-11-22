@@ -1,7 +1,8 @@
 //! The list header's menu (#33): a right-click on the header lists every column, in the list's
 //! order, each ticked while it's wanted; a pick shows or hides it, kept in `gui.json`. A wanted
 //! column the window has no room for says so. The list always keeps one column: a pick of the last
-//! one showing leaves it.
+//! one showing leaves it, and its entry is dimmed. The menu stays open as columns are ticked, so
+//! several can be shown or hidden in one go (#352); Escape or a press outside closes it.
 
 use rune::{El, PointerEvent, Tx};
 
@@ -32,13 +33,11 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, shown: &[Column
             // Ticked while wanted; the one column left when every other is hidden shows, so it's
             // ticked too.
             let wanted = !s.prefs.hidden().contains(&c) || shown == [c];
-            Entry::Choice {
-                id: c.id().into(),
-                label: c.title().into(),
-                hint: (wanted && !shown.contains(&c)).then(|| client::display::no_room().into()),
-                icon: wanted.then_some(Icon::Check),
-                checked: Some(wanted),
+            let (id, label, icon, checked) = (c.id().into(), c.title().into(), wanted.then_some(Icon::Check), Some(wanted));
+            if shown == [c] {
+                return Entry::Disabled { id, label, icon, checked };
             }
+            Entry::Choice { id, label, hint: (wanted && !shown.contains(&c)).then(|| client::display::no_room().into()), icon, checked }
         })
         .collect();
     ui.context_menu(
@@ -47,7 +46,6 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, shown: &[Column
         window,
         entries,
         move |s: &mut Phantom, picked, _| {
-            s.menu = s.menu.then(Event::Close);
             if let Some(column) = Column::from_id(picked) {
                 s.prefs.toggle(column, &shown_now);
             }

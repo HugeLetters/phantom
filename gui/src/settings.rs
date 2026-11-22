@@ -14,7 +14,7 @@ use std::path::Path;
 use proto::tolerant;
 use serde::{Deserialize, Serialize};
 
-use crate::model::layout::{Column, ColumnOrder, PaneHeight, PaneTab};
+use crate::model::layout::{Column, ColumnOrder, ColumnWidths, PaneHeight, PaneTab};
 use crate::platform::app_icon::{Icons, Written};
 use crate::theme::preset::{LookPreset, Stored};
 use crate::theme::saved;
@@ -22,7 +22,8 @@ use crate::theme::saved;
 /// Every key of `gui.json`: [`crate::platform::app_icon::SETTING`],
 /// [`crate::platform::app_icon::WRITTEN`], [`crate::theme::preset::SETTING`],
 /// [`crate::theme::saved::SETTING`], and the main window's [`crate::model::layout::COLUMN_ORDER`],
-/// [`crate::model::layout::HIDDEN_COLUMNS`], [`crate::model::layout::PANE_HEIGHT`] and
+/// [`crate::model::layout::HIDDEN_COLUMNS`], [`crate::model::layout::COLUMN_WIDTHS`],
+/// [`crate::model::layout::PANE_HEIGHT`] and
 /// [`crate::model::layout::PANE_TAB`].
 #[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(default)]
@@ -36,6 +37,8 @@ pub struct GuiSettings {
     pub column_order: ColumnOrder,
     /// The list's columns the person hid (#33).
     pub hidden_columns: Vec<Column>,
+    /// The widths the person dragged the list's columns to (#352).
+    pub column_widths: ColumnWidths,
     /// The height the details pane's divider was let go at (#33).
     pub pane_height: Option<PaneHeight>,
     /// The details pane's tab last shown (#33).
@@ -83,7 +86,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::model::layout::{COLUMN_ORDER, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB};
+    use crate::model::layout::{COLUMN_ORDER, COLUMN_WIDTHS, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB};
     use crate::model::recent::SETTING as RECENT;
     use crate::platform::app_icon::{SETTING, WRITTEN};
     use crate::theme::preset::SETTING as LOOK;
@@ -103,24 +106,32 @@ mod tests {
         proptest::option::of(("[a-z-]{1,8}", any::<u64>()).prop_map(|(id, fingerprint)| Written { id, fingerprint }))
     }
 
-    fn layout() -> impl Strategy<Value = (ColumnOrder, Vec<Column>, Option<PaneHeight>, PaneTab)> {
+    fn widths() -> impl Strategy<Value = ColumnWidths> {
+        let resizable: Vec<Column> = Column::ALL.into_iter().filter(|c| *c != Column::Status).collect();
+        proptest::collection::btree_map(proptest::sample::select(resizable), (40u16..900).prop_map(f32::from), 0..4)
+            .prop_map(|widths| ColumnWidths::try_from(widths).unwrap())
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn layout() -> impl Strategy<Value = (ColumnOrder, Vec<Column>, ColumnWidths, Option<PaneHeight>, PaneTab)> {
         let order = Just(Column::ALL.to_vec()).prop_shuffle().prop_map(|o| ColumnOrder::try_from(o).unwrap());
         let hidden = proptest::sample::subsequence(Column::ALL.to_vec(), 0..Column::ALL.len());
         let tab = proptest::sample::select(PaneTab::ALL.to_vec());
-        (order, hidden, proptest::option::of((60u16..1200).prop_map(|h| PaneHeight::try_from(f32::from(h)).unwrap())), tab)
+        (order, hidden, widths(), proptest::option::of((60u16..1200).prop_map(|h| PaneHeight::try_from(f32::from(h)).unwrap())), tab)
     }
 
     fn settings() -> impl Strategy<Value = GuiSettings> {
         let recent = proptest::collection::vec("/[a-z]{1,6}(/[a-z]{1,6})?", 0..=5)
             .prop_map(|paths| paths.into_iter().map(|p| proto::AbsolutePath::new(p).unwrap()).collect::<Vec<_>>());
         (icons(), written(), preset(), saved(), layout(), recent).prop_map(
-            |(app_icon, app_icon_written, preset, presets, (order, hidden, height, tab), recent_folders)| GuiSettings {
+            |(app_icon, app_icon_written, preset, presets, (order, hidden, widths, height, tab), recent_folders)| GuiSettings {
                 app_icon,
                 app_icon_written,
                 look_preset: preset.stored(),
                 saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
                 column_order: order,
                 hidden_columns: hidden,
+                column_widths: widths,
                 pane_height: height,
                 details_tab: tab,
                 recent_folders,
@@ -133,7 +144,7 @@ mod tests {
         fn the_fields_are_the_keys_the_stores_use(settings in settings()) {
             let value = serde_json::to_value(settings).unwrap();
             let keys: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().cloned().collect();
-            let expected = [SETTING, WRITTEN, LOOK, SAVED, COLUMN_ORDER, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB, RECENT].map(String::from).into_iter().collect();
+            let expected = [SETTING, WRITTEN, LOOK, SAVED, COLUMN_ORDER, HIDDEN_COLUMNS, COLUMN_WIDTHS, PANE_HEIGHT, PANE_TAB, RECENT].map(String::from).into_iter().collect();
             prop_assert_eq!(keys, expected);
         }
 
@@ -165,7 +176,7 @@ mod tests {
         /// Good settings read back as they are and are left alone; a bad field is reset, named and
         /// written back with the others kept, and the file as it was kept as a copy.
         #[test]
-        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..12usize) {
+        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..14usize) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("gui.json");
             let good = serde_json::to_vec(&settings).unwrap();
@@ -237,6 +248,17 @@ mod tests {
                     file[PANE_HEIGHT] = json!(-400.0);
                     expected.pane_height = None;
                     PANE_HEIGHT.to_owned()
+                }
+                // Widths that aren't: a negative one, one for no column, one for Status.
+                12 => {
+                    file[COLUMN_WIDTHS] = json!({"name": -4.0});
+                    expected.column_widths = ColumnWidths::default();
+                    COLUMN_WIDTHS.to_owned()
+                }
+                13 => {
+                    file[COLUMN_WIDTHS] = json!({"nonsense": 90.0});
+                    expected.column_widths = ColumnWidths::default();
+                    COLUMN_WIDTHS.to_owned()
                 }
                 _ => {
                     let mut dark = Stored::default().dark;
