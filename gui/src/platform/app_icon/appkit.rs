@@ -106,13 +106,23 @@ pub fn choose(choice: Option<&Icons>) {
     file::keep(SETTING, choice);
     let shown = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
-        if let Some(choice) = choice {
-            let _ = state.manifest.adopt(choice);
-        }
         state.choice = choice.cloned();
         Some(())
     });
     if shown.is_some() {
+        apply(Bundle::Write);
+    }
+}
+
+/// An added image has been read: the Dock and the bundle show it if the choice names it.
+pub fn loaded(icon: &Icon) {
+    let named = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        state.manifest.add_file(icon.clone());
+        let names = |choice: &Icons| [true, false].into_iter().any(|dark| choice.side(dark) == icon.id);
+        state.choice.as_ref().is_some_and(names).then_some(())
+    });
+    if named.is_some() {
         apply(Bundle::Write);
     }
 }
@@ -132,11 +142,10 @@ pub fn follow(theme: &Icons) {
 impl State {
     fn load(theme: Icons) -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;
-        let mut manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
+        let manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
+        // An image file the choice names shows once it's read ([`loaded`]), off the main thread;
+        // until then its half shows the theme's icon.
         let choice: Option<Icons> = file::read(SETTING);
-        if let Some(choice) = &choice {
-            let _ = manifest.adopt(choice);
-        }
         Some(State { manifest, bundle, choice, theme, dock: None })
     }
 
@@ -247,4 +256,108 @@ pub(crate) fn set_bundle_icon(bundle: &Path, image: Option<&NSImage>) -> bool {
         workspace.noteFileSystemChanged_(&path);
     }
     set
+}
+
+/// ImageIO and CoreFoundation, for [`scaled_png`]: thread-safe, unlike AppKit's drawing.
+mod imageio {
+    use std::ffi::{c_char, c_void};
+
+    pub type Ref = *const c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        pub static kCFTypeDictionaryKeyCallBacks: c_void;
+        pub static kCFTypeDictionaryValueCallBacks: c_void;
+        pub static kCFBooleanTrue: Ref;
+        pub fn CFRelease(cf: Ref);
+        pub fn CFDataCreate(allocator: Ref, bytes: *const u8, length: isize) -> Ref;
+        pub fn CFDataCreateMutable(allocator: Ref, capacity: isize) -> Ref;
+        pub fn CFDataGetLength(data: Ref) -> isize;
+        pub fn CFDataGetBytePtr(data: Ref) -> *const u8;
+        pub fn CFNumberCreate(allocator: Ref, kind: isize, value: *const c_void) -> Ref;
+        pub fn CFStringCreateWithCString(allocator: Ref, bytes: *const c_char, encoding: u32) -> Ref;
+        pub fn CFDictionaryCreate(
+            allocator: Ref,
+            keys: *const Ref,
+            values: *const Ref,
+            count: isize,
+            key_callbacks: *const c_void,
+            value_callbacks: *const c_void,
+        ) -> Ref;
+    }
+
+    #[link(name = "ImageIO", kind = "framework")]
+    unsafe extern "C" {
+        pub static kCGImageSourceCreateThumbnailFromImageAlways: Ref;
+        pub static kCGImageSourceCreateThumbnailWithTransform: Ref;
+        pub static kCGImageSourceThumbnailMaxPixelSize: Ref;
+        pub fn CGImageSourceCreateWithData(data: Ref, options: Ref) -> Ref;
+        pub fn CGImageSourceCreateThumbnailAtIndex(source: Ref, index: usize, options: Ref) -> Ref;
+        pub fn CGImageDestinationCreateWithData(data: Ref, kind: Ref, count: usize, options: Ref) -> Ref;
+        pub fn CGImageDestinationAddImage(destination: Ref, image: Ref, properties: Ref);
+        pub fn CGImageDestinationFinalize(destination: Ref) -> bool;
+    }
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {}
+}
+
+/// `bytes`, an image in any format the system reads, decoded once and scaled to fit `max` px on
+/// its long side (never up), as a PNG; `None` if they aren't an image. Any size goes in, and only
+/// the scaled image comes out. Safe on any thread.
+pub(crate) fn scaled_png(bytes: &[u8], max: u32) -> Option<Vec<u8>> {
+    use imageio::*;
+    // SAFETY: each CoreFoundation object created here is released before returning; the callbacks
+    // and keys are the frameworks' own statics, which live for the process.
+    unsafe {
+        let mut release = Vec::new();
+        let mut keep = |r: Ref| {
+            if !r.is_null() {
+                release.push(r);
+            }
+            r
+        };
+        let data = keep(CFDataCreate(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize));
+        let source = keep(CGImageSourceCreateWithData(data, std::ptr::null()));
+        let out = (|| {
+            if source.is_null() {
+                return None;
+            }
+            let max = max as i32;
+            let number = keep(CFNumberCreate(std::ptr::null(), 9, (&raw const max).cast()));
+            let keys = [
+                kCGImageSourceCreateThumbnailFromImageAlways,
+                kCGImageSourceCreateThumbnailWithTransform,
+                kCGImageSourceThumbnailMaxPixelSize,
+            ];
+            let values = [kCFBooleanTrue, kCFBooleanTrue, number];
+            let options = keep(CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                3,
+                &raw const kCFTypeDictionaryKeyCallBacks,
+                &raw const kCFTypeDictionaryValueCallBacks,
+            ));
+            let image = keep(CGImageSourceCreateThumbnailAtIndex(source, 0, options));
+            if image.is_null() {
+                return None;
+            }
+            let out = keep(CFDataCreateMutable(std::ptr::null(), 0));
+            let png = keep(CFStringCreateWithCString(std::ptr::null(), c"public.png".as_ptr(), 0x0800_0100));
+            let destination = keep(CGImageDestinationCreateWithData(out, png, 1, std::ptr::null()));
+            if destination.is_null() {
+                return None;
+            }
+            CGImageDestinationAddImage(destination, image, std::ptr::null());
+            if !CGImageDestinationFinalize(destination) {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(CFDataGetBytePtr(out), CFDataGetLength(out) as usize).to_vec())
+        })();
+        for r in release {
+            CFRelease(r);
+        }
+        out
+    }
 }

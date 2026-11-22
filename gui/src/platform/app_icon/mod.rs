@@ -26,16 +26,36 @@ use serde::{Deserialize, Serialize};
 /// The key of the choice in `gui.json`.
 pub const SETTING: &str = "app_icon";
 
-/// The largest image file that can be added as an icon, in bytes: a bigger one would slow every
-/// launch, as the images are read and decoded then.
-pub const MAX_IMAGE: u64 = 4_000_000;
+pub mod loader;
 
-/// Whether `bytes` are an image the system can decode (a file's extension says nothing).
-fn decodes(bytes: &[u8]) -> bool {
+/// The image file `id` names ([`FILE`]), read, and checked to decode as an image (a file's
+/// extension says nothing); its name is the file's, without the extension. Any size: it reads the
+/// whole file, so it's for a thread of its own ([`loader`]). One that can't be read: why.
+pub fn read_image(id: &str) -> Result<Icon, String> {
+    let path = id.strip_prefix(FILE).ok_or_else(|| format!("{id} isn't an image file"))?;
+    let file = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+    let bytes = std::fs::read(path).map_err(|e| format!("can't read {file}: {e}"))?;
+    let bytes = scaled(bytes).ok_or_else(|| format!("{file} isn't an image"))?;
+    Ok(Icon { id: id.to_owned(), name: image_name(id), bytes })
+}
+
+/// The longest side of an added image as it's kept, in pixels: enough for the Dock, the bundle's
+/// icon and the tiles, so a photo's full size is never kept, nor decoded again.
+pub const ICON_SIZE: u32 = 1024;
+
+/// `bytes` decoded once and scaled to [`ICON_SIZE`] (a PNG); `None` if they aren't an image.
+fn scaled(bytes: Vec<u8>) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
-    return appkit::image(bytes).is_some();
+    return appkit::scaled_png(&bytes, ICON_SIZE);
     #[cfg(not(target_os = "macos"))]
-    return !bytes.is_empty();
+    return (!bytes.is_empty()).then_some(bytes);
+}
+
+/// What an added image is called before it's read, and after: its file's name without the
+/// extension.
+pub fn image_name(id: &str) -> String {
+    let path = id.strip_prefix(FILE).unwrap_or(id);
+    Path::new(path).file_stem().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
 }
 
 /// What the id of an image file added as an icon starts with, its path after it.
@@ -78,7 +98,7 @@ impl Icons {
 }
 
 /// An icon that ships, with its `.icns` already read.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Icon {
     pub id: String,
     /// What the picker calls it: "Dark Hour".
@@ -181,27 +201,12 @@ impl Manifest {
         self.icons.iter().chain(&self.files)
     }
 
-    /// Reads each image file `icons` names that isn't read yet ([`FILE`]), named by its file name
-    /// without the extension; the ids it read. One that can't be read: why.
-    pub fn adopt(&mut self, icons: &Icons) -> Result<Vec<String>, String> {
-        let mut added = Vec::new();
-        for dark in [true, false] {
-            let id = icons.side(dark);
-            let Some(path) = id.strip_prefix(FILE).filter(|_| self.icon(id).is_none()) else { continue };
-            let file = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
-            let size = std::fs::metadata(path).map_err(|e| format!("can't read {file}: {e}"))?.len();
-            if size > MAX_IMAGE {
-                return Err(format!("{file} is over {} MB", MAX_IMAGE / 1_000_000));
-            }
-            let bytes = std::fs::read(path).map_err(|e| format!("can't read {file}: {e}"))?;
-            if !decodes(&bytes) {
-                return Err(format!("{file} isn't an image"));
-            }
-            let name = Path::new(path).file_stem().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
-            self.files.push(Icon { id: id.to_owned(), name, bytes });
-            added.push(id.to_owned());
+    /// An image file read ([`read_image`]), an icon of its own from now on; one with its id
+    /// already is left as it is.
+    pub fn add_file(&mut self, icon: Icon) {
+        if self.icon(&icon.id).is_none() {
+            self.files.push(icon);
         }
-        Ok(added)
     }
 
     /// The bundle's compiled icon, which Phantom shows by touching nothing.

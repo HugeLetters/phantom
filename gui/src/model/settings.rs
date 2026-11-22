@@ -28,7 +28,8 @@ use rune::{FileDialogOptions, TextEdit, Tx};
 use super::Phantom;
 use crate::changes::{Presets, Target};
 use crate::notice::{Notice, NoticeAction};
-use crate::platform::app_icon::{FOLLOW, Icons, Manifest};
+use crate::platform::app_icon::loader::Loader;
+use crate::platform::app_icon::{FILE, FOLLOW, Icons, Manifest};
 use crate::service::Done;
 use crate::theme::preset::Appearance;
 use crate::theme::preset::LookPreset;
@@ -99,8 +100,9 @@ pub struct SettingsSheet {
     pub seed_time: TextEdit,
     /// Why each row's last change was refused, until its next change.
     pub refused: Vec<Refused>,
-    /// The App icon's sheet is open over the window: a tile for every icon, each with its chips.
-    pub icons: bool,
+    /// The App icon's sheet, while it's open over the window: a tile for every icon, each with its
+    /// chips.
+    pub icons: Option<IconSheet>,
     /// A Look Preset being edited, in a sheet over the window, while it's open.
     pub edit: Option<EditSheet>,
     /// The chip an undo of an Apply focuses, with `focus` naming the saved presets.
@@ -116,6 +118,11 @@ pub struct SettingsSheet {
     /// Where an edit goes that's for a colour field no longer shown (an Apply or an undo changed
     /// the theme under it, and the window still had it focused): nowhere.
     gone: TextEdit,
+}
+
+/// The App icon's sheet: what the icon was when it opened, for the one undo step its Done keeps.
+pub struct IconSheet {
+    pub opened: Option<Icons>,
 }
 
 /// One editor's own state, over the Look Preset it edits.
@@ -324,7 +331,7 @@ impl SettingsSheet {
             seed_ratio: TextEdit::new(""),
             seed_time: TextEdit::new(""),
             refused: Vec::new(),
-            icons: false,
+            icons: None,
             edit: None,
             chip: None,
             waiting: Vec::new(),
@@ -383,7 +390,7 @@ impl SettingsSheet {
 
     /// Whether a sheet is open over the window: a Look Preset's, or the App icon's.
     pub fn over(&self) -> bool {
-        self.edit.is_some() || self.icons
+        self.edit.is_some() || self.icons.is_some()
     }
 
     /// The sheet's editor, while it's open.
@@ -685,7 +692,29 @@ pub struct AppIcon {
     pub added: Vec<String>,
     /// What decodes them, an image added too; `None` where nothing is drawn (tests).
     cache: Option<Rc<rune::ImageCache>>,
+    /// Reads the image files, off the main thread in the app ([`Self::load_in_background`]).
+    loader: Loader,
+    /// The image files kept (in the choice, or among those added) that aren't read yet: a half
+    /// naming one shows the theme's icon, and its tile is a placeholder, until it is.
+    loading: Vec<String>,
+    /// The image files just added, being read and checked: a tile once they are, refused else.
+    adding: Vec<String>,
+    /// The kept images that couldn't be read: their halves follow the theme, as no step of the user's.
+    gone: Vec<String>,
     show: Box<dyn FnMut(IconChange<'_>)>,
+}
+
+/// What reading an image file came to ([`AppIcon::poll`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Arrival {
+    /// An image kept is read: its tile and the halves naming it show it.
+    Loaded,
+    /// An image kept can't be read: its tile is gone, and its half follows the theme.
+    Gone,
+    /// An image just added is a tile now.
+    Added,
+    /// An image just added can't be an icon: why.
+    Refused(String),
 }
 
 /// What changed about the App icon, for the Dock and the bundle.
@@ -696,50 +725,159 @@ pub enum IconChange<'a> {
     Theme(&'a Icons),
     /// The images added as icons, to keep.
     Added(&'a [String]),
+    /// An added image has been read: the Dock and the bundle show it if they were waiting for it.
+    Loaded(&'a crate::platform::app_icon::Icon),
 }
 
 impl AppIcon {
     /// `manifest`, with `choice` as kept and `theme` what following the theme shows, and `show` to
-    /// show (and keep) each change.
+    /// show (and keep) each change. An image file the choice names is read by [`Self::load`].
     pub fn new(manifest: Option<Manifest>, choice: Option<Icons>, theme: Icons, show: impl FnMut(IconChange<'_>) + 'static) -> Self {
-        let mut icon = Self { manifest, choice, theme, images: Vec::new(), added: Vec::new(), cache: None, show: Box::new(show) };
-        // The image files the choice names, read so they can show; a half whose icon isn't there
-        // (an image moved or deleted) follows the theme.
-        if let Some(choice) = icon.choice.clone() {
-            for half in halves(Some(&choice)).into_iter().flatten() {
-                let _ = icon.adopt(&Icons::One { icon: half });
-            }
-            if let Some(manifest) = &icon.manifest {
-                let known = halves(Some(&choice)).map(|half| half.filter(|id| manifest.icon(id).is_some()));
-                icon.choice = choice_of(known);
+        let mut icon = Self {
+            manifest,
+            choice,
+            theme,
+            images: Vec::new(),
+            added: Vec::new(),
+            cache: None,
+            loader: Loader::now(),
+            loading: Vec::new(),
+            adding: Vec::new(),
+            gone: Vec::new(),
+            show: Box::new(show),
+        };
+        // A half whose icon isn't there (a shipped one that's gone) follows the theme; an image
+        // file's is known once it's read.
+        if let (Some(choice), Some(manifest)) = (icon.choice.clone(), &icon.manifest) {
+            let known = halves(Some(&choice)).map(|half| half.filter(|id| id.starts_with(FILE) || manifest.icon(id).is_some()));
+            icon.choice = choice_of(known);
+            for id in halves(icon.choice.as_ref()).into_iter().flatten().filter(|id| id.starts_with(FILE)) {
+                // Both halves naming an image read it once.
+                if !icon.loading.contains(&id) {
+                    icon.loading.push(id);
+                }
             }
         }
         icon
     }
 
-    /// With the images added as icons `added` (those that can be read), as `gui.json` keeps them.
+    /// With the images added as icons `added`, as `gui.json` keeps them: tiles, placeholders until
+    /// [`Self::load`] has read them.
     pub fn with_added(mut self, added: Vec<String>) -> Self {
         // Only image files: a shipped icon's id here is no image added.
-        for id in added.into_iter().filter(|id| id.starts_with(crate::platform::app_icon::FILE)) {
-            if self.adopt(&Icons::One { icon: id.clone() }).is_ok() && !self.added.contains(&id) {
-                self.added.push(id);
+        for id in added.into_iter().filter(|id| id.strip_prefix(FILE).is_some_and(|path| !path.is_empty())) {
+            if !self.added.contains(&id) {
+                self.added.push(id.clone());
+            }
+            if !self.loading.contains(&id) {
+                self.loading.push(id);
             }
         }
         self
     }
 
-    /// Reads the image files `icons` names that aren't known yet, and decodes them to draw, or
-    /// says why one can't be read.
-    pub fn adopt(&mut self, icons: &Icons) -> Result<(), String> {
-        let Some(manifest) = &mut self.manifest else { return Err("the icons can't be read".into()) };
-        let added = manifest.adopt(icons)?;
-        if let Some(cache) = &self.cache {
-            for id in added {
-                let bytes = manifest.icon(&id).map(|i| i.bytes.clone()).unwrap_or_default();
-                self.images.push((id, cache.load(bytes)));
+    /// Reads the image files kept: what [`Self::poll`] then takes as they're read. One that can't
+    /// be read is no tile, and its half follows the theme.
+    pub fn load(&mut self) {
+        for id in self.loading.clone() {
+            self.loader.request(id);
+        }
+    }
+
+    /// Reads the image files on threads of their own from now on, `wake` telling the window one
+    /// is ready: the window opens at once, whatever their size.
+    pub fn load_in_background(&mut self, wake: rune::Waker) {
+        self.loader = Loader::background(wake);
+    }
+
+    /// Holds the reading of the image files until the loader is released: for a test of what shows
+    /// meanwhile.
+    #[cfg(test)]
+    pub fn hold_loads(&mut self) {
+        self.loader = Loader::held();
+    }
+
+    #[cfg(test)]
+    pub fn release_loads(&mut self) {
+        self.loader.release();
+    }
+
+    /// Takes what's been read, as each image is: an icon the Dock and the app icon show from now
+    /// on, a tile and an image to draw; what can't be one is refused if it was just added, else
+    /// it's gone from the tiles and its half follows the theme.
+    pub fn poll(&mut self) -> Vec<Arrival> {
+        let mut arrived = Vec::new();
+        while let Some((id, read)) = self.loader.next() {
+            let adding = self.adding.contains(&id);
+            let wanted = adding || self.loading.contains(&id);
+            self.adding.retain(|a| *a != id);
+            self.loading.retain(|l| *l != id);
+            // An image removed while it was read, or read twice, is no one's any more.
+            if !wanted {
+                continue;
+            }
+            match read {
+                Ok(icon) => {
+                    self.gone.retain(|g| *g != id);
+                    if let Some(manifest) = &mut self.manifest {
+                        manifest.add_file(icon.clone());
+                    }
+                    if let Some(cache) = &self.cache
+                        && !self.images.iter().any(|(i, _)| *i == id)
+                    {
+                        self.images.push((id.clone(), cache.load(icon.bytes.clone())));
+                    }
+                    (self.show)(IconChange::Loaded(&icon));
+                    if !adding {
+                        arrived.push(Arrival::Loaded);
+                    }
+                    if adding {
+                        if !self.added.contains(&id) {
+                            self.added.push(id);
+                            (self.show)(IconChange::Added(&self.added));
+                        }
+                        arrived.push(Arrival::Added);
+                    }
+                }
+                Err(why) if adding => arrived.push(Arrival::Refused(why)),
+                Err(_) => {
+                    arrived.push(Arrival::Gone);
+                    self.gone.push(id.clone());
+                    self.added.retain(|a| *a != id);
+                    self.choice = choice_of(halves(self.choice.as_ref()).map(|half| half.filter(|h| *h != id)));
+                }
             }
         }
-        Ok(())
+        arrived
+    }
+
+    /// The icon the App icon sheet opened on, as it is now: without the kept images that couldn't
+    /// be read since, whose halves follow the theme without the user having changed anything.
+    pub fn opened_now(&self, opened: Option<Icons>) -> Option<Icons> {
+        choice_of(halves(opened.as_ref()).map(|half| half.filter(|h| !self.gone.contains(h))))
+    }
+
+    /// The image `id` is no tile any more: a read of it still on its way applies nothing.
+    fn forget(&mut self, id: &str) {
+        self.added.retain(|added| added != id);
+        self.loading.retain(|loading| loading != id);
+    }
+
+    /// The image file `id` names is asked for: read and checked off the main thread, then a tile
+    /// ([`Self::poll`]).
+    fn add(&mut self, id: String) {
+        if self.manifest.as_ref().is_some_and(|m| m.icon(&id).is_some()) {
+            // Read already (its tile removed since).
+            if !self.added.contains(&id) {
+                self.added.push(id);
+                (self.show)(IconChange::Added(&self.added));
+            }
+            return;
+        }
+        if !self.adding.contains(&id) {
+            self.adding.push(id.clone());
+            self.loader.request(id);
+        }
     }
 
     /// Follows the theme's icon `theme` from now on; shown at once when it's another.
@@ -757,6 +895,15 @@ impl AppIcon {
             self.images = manifest.everyone().map(|icon| (icon.id.clone(), cache.load(icon.bytes.clone()))).collect();
         }
         self.cache = Some(cache);
+    }
+
+    /// What an icon is called: its name, or an image file's before it's read, its file's.
+    pub fn name(&self, id: &str) -> String {
+        match self.manifest.as_ref().and_then(|m| m.icon(id)) {
+            Some(icon) => icon.name.clone(),
+            None if id.starts_with(FILE) => crate::platform::app_icon::image_name(id),
+            None => id.to_owned(),
+        }
     }
 
     pub fn image(&self, id: &str) -> Option<&rune::Image> {
@@ -860,6 +1007,7 @@ pub fn close(s: &mut SettingsWindow) {
 pub fn closed(s: &mut SettingsWindow) {
     // A Look Preset's sheet keeps what was done in it, as Done does.
     presets::close(s);
+    close_icons(s);
     leave_all(s);
     s.sheet = None;
     // A saved preset's sheet goes with it, and so does its preview.
@@ -1039,7 +1187,7 @@ pub fn escape(s: &mut SettingsWindow) -> bool {
         presets::cancel(s);
         return true;
     }
-    if sheet.icons {
+    if sheet.icons.is_some() {
         close_icons(s);
         return true;
     }
@@ -1113,10 +1261,17 @@ pub fn clear_folder(s: &mut SettingsWindow) {
 pub fn choose_icon(s: &mut SettingsWindow, choice: Option<Icons>) {
     follow_focus(s);
     if choice != s.app_icon.choice {
-        let was = crate::changes::Was::Icon(s.app_icon.choice.clone());
+        let words = icon_change_words(&s.app_icon, s.app_icon.choice.as_ref(), choice.as_ref());
+        let was = crate::changes::Was::Icon(s.app_icon.choice.clone(), words);
         app_changed(s, crate::changes::machine::AppSetting::Icon, was);
     }
     show_icon(s, choice);
+}
+
+/// What Edit ▸ Undo calls a change of the App icon from `old` to `new`: "App icon: Dark Hour →
+/// Memento Mori".
+fn icon_change_words(icon: &AppIcon, old: Option<&Icons>, new: Option<&Icons>) -> String {
+    display::app_icon_change(&icon_full_name(icon, old), &icon_full_name(icon, new))
 }
 
 /// The app setting `of` changed, from `was`: a change ⌘Z takes back, on the main window's list.
@@ -1131,10 +1286,16 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
     use crate::changes::Was;
     use crate::changes::machine::AppSetting;
     let told = match (of, was) {
-        (AppSetting::Icon, Was::Icon(choice)) => {
+        (AppSetting::Icon, Was::Icon(choice, _)) => {
             let undone = icon_name(&s.app_icon, s.app_icon.choice.as_ref());
             show_icon(s, choice.clone());
-            show_setting(s, "app_icon", Some(tx));
+            // The App icon's sheet, open, shows the pick it went back to and stays open: ⌘Z in it
+            // is its own, as in a Look Preset's editor. Any other sheet closes to show it.
+            if s.sheet.as_ref().is_some_and(|sheet| sheet.icons.is_some()) {
+                s.window.raise();
+            } else {
+                show_setting(s, "app_icon", Some(tx));
+            }
             Notice::setting_undone(display::setting_short("app_icon"), &undone, &icon_name(&s.app_icon, choice.as_ref()))
         }
         (AppSetting::Theme { key, label }, Was::Theme(was, target, side)) => {
@@ -1175,9 +1336,9 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
         }
         // A change's `was` is always of its setting (`app_changed`'s callers).
         (AppSetting::Icon, Was::Theme(..) | Was::Presets(..) | Was::Edit(..))
-        | (AppSetting::Theme { .. }, Was::Icon(_) | Was::Presets(..) | Was::Edit(..))
-        | (AppSetting::Presets, Was::Icon(_) | Was::Theme(..) | Was::Edit(..))
-        | (AppSetting::Edit, Was::Icon(_) | Was::Theme(..) | Was::Presets(..)) => return,
+        | (AppSetting::Theme { .. }, Was::Icon(..) | Was::Presets(..) | Was::Edit(..))
+        | (AppSetting::Presets, Was::Icon(..) | Was::Theme(..) | Was::Edit(..))
+        | (AppSetting::Edit, Was::Icon(..) | Was::Theme(..) | Was::Presets(..)) => return,
     };
     s.main.post(move |s, _| s.bar.tell(told));
 }
@@ -1216,7 +1377,7 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
             && s.saved.get(name).is_none()
         {
             sheet.edit = None;
-            s.main.post(|s, _| crate::changes::editor_closed(s, None));
+            s.main.post(|s, _| crate::changes::sheet_dropped(s));
         }
     }
     looks_changed(s);
@@ -1241,7 +1402,7 @@ fn named(icon: &AppIcon, choice: Option<&Icons>, chars: usize) -> String {
     let manifest = icon.manifest.as_ref();
     let name = |id: &str| match id {
         FOLLOW => "Follow theme".to_owned(),
-        id => manifest.and_then(|m| m.icon(id)).map_or(id.to_owned(), |i| i.name.clone()),
+        id => icon.name(id),
     };
     match choice {
         None => "Follow theme".into(),
@@ -1534,17 +1695,39 @@ pub fn theme_rows(preset: &LookPreset, editor: &Editor) -> ThemeRows {
 /// The App icon's Edit…: its sheet over Settings.
 pub fn edit_icons(s: &mut SettingsWindow) {
     follow_focus(s);
-    if let Some(sheet) = &mut s.sheet {
-        sheet.icons = true;
+    if let Some(sheet) = &mut s.sheet
+        && sheet.icons.is_none()
+    {
+        sheet.icons = Some(IconSheet { opened: s.app_icon.choice.clone() });
+        // Its picks are its own for ⌘Z, until it closes.
+        s.main.post(|s, _| crate::changes::sheet_opened(s, crate::changes::session::Sheet::Icons));
     }
 }
 
 /// Done in the App icon's sheet, Escape or ⌘W: it closes.
 pub fn close_icons(s: &mut SettingsWindow) {
-    if let Some(sheet) = &mut s.sheet {
-        sheet.icons = false;
-        sheet.refused.retain(|r| r.row != Row::Image);
-    }
+    let Some(sheet) = &mut s.sheet else { return };
+    sheet.refused.retain(|r| r.row != Row::Image);
+    let Some(IconSheet { opened }) = sheet.icons.take() else { return };
+    // What the visit changed is one step of Undo, as the editor's Done is: what's left of it once
+    // a ⌘Z pressed just before has taken its step. The icon the sheet opened on is what it is now
+    // ([`poll_icons`] takes an image that's gone out of it).
+    end_sheet(s, move |s| {
+        let opened = s.app_icon.opened_now(opened);
+        (s.app_icon.choice != opened).then(|| {
+            let words = icon_change_words(&s.app_icon, opened.as_ref(), s.app_icon.choice.as_ref());
+            (crate::changes::machine::AppSetting::Icon, crate::changes::Was::Icon(opened, words))
+        })
+    });
+}
+
+/// A sheet over Settings closed: `finish` runs once what was pressed before has
+/// ([`crate::changes::sheet_closing`]) and says the one step its visit folds into, if any.
+pub(crate) fn end_sheet(
+    s: &SettingsWindow,
+    finish: impl FnOnce(&mut SettingsWindow) -> Option<(crate::changes::machine::AppSetting, crate::changes::Was)> + 'static,
+) {
+    s.main.post(move |s, _| crate::changes::sheet_closing(s, Box::new(finish)));
 }
 
 /// Each half of the App icon `choice`, `[dark, light]`: an icon's id, or `None` following the
@@ -1635,27 +1818,31 @@ pub fn choose_image(s: &mut SettingsWindow, tx: &mut Tx) {
 pub fn add_image(s: &mut SettingsWindow, path: &Path) {
     follow_focus(s);
     let id = format!("{}{}", crate::platform::app_icon::FILE, path.display());
-    if let Err(why) = s.app_icon.adopt(&Icons::One { icon: id.clone() }) {
-        if let Some(sheet) = &mut s.sheet {
-            sheet.refuse(Row::Image, display::sentence(&why));
-        }
-        return;
-    }
     if let Some(sheet) = &mut s.sheet {
         sheet.refused.retain(|r| r.row != Row::Image);
     }
-    if !s.app_icon.added.contains(&id) {
-        s.app_icon.added.push(id);
-        let icon = &mut s.app_icon;
-        (icon.show)(IconChange::Added(&icon.added));
+    s.app_icon.add(id);
+    poll_icons(s);
+}
+
+/// What the loader has read of the image files, taken: a tile for each image just added, a line
+/// under the tiles for each that can't be one; whether there was any.
+pub fn poll_icons(s: &mut SettingsWindow) -> bool {
+    let arrived = s.app_icon.poll();
+    let any = !arrived.is_empty();
+    for arrival in arrived {
+        if let (Arrival::Refused(why), Some(sheet)) = (arrival, &mut s.sheet) {
+            sheet.refuse(Row::Image, display::sentence(&why));
+        }
     }
+    any
 }
 
 /// An added image's ×: its tile goes. A half showing it follows the theme from then, never the
 /// other half's icon: a change ⌘Z takes back (the tile stays gone).
 pub fn remove_image(s: &mut SettingsWindow, id: &str) {
     follow_focus(s);
-    s.app_icon.added.retain(|added| added != id);
+    s.app_icon.forget(id);
     let icon = &mut s.app_icon;
     (icon.show)(IconChange::Added(&icon.added));
     let choice = choice_of(halves(s.app_icon.choice.as_ref()).map(|half| half.filter(|h| h != id)));

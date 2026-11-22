@@ -834,6 +834,11 @@ pub fn undo_entry(undo: &Undoable) -> String {
     format!("Undo {} of {}", undo_action(undo.action), undo_names(undo))
 }
 
+/// An App icon change, as Edit ▸ Undo names it: "App icon: Dark Hour → Memento Mori".
+pub fn app_icon_change(old: &str, new: &str) -> String {
+    format!("{}: {}", setting_short("app_icon"), changed(old, new))
+}
+
 /// Edit ▸ Undo naming the change it takes back: "Undo Port Change".
 pub fn undo_change(short: &str) -> String {
     let title: Vec<String> = short

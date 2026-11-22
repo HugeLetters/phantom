@@ -14,6 +14,7 @@
 //! the app forgets its settings changes (the service keeps the torrents' stack).
 
 pub mod machine;
+pub mod session;
 
 use std::collections::BTreeMap;
 
@@ -29,6 +30,7 @@ use crate::theme::preset::{Appearance, LookPreset, Looks};
 use crate::theme::saved::{Name, Saved, SavedPreset};
 use crate::windows::Which;
 use machine::{AppSetting, Command, Do, Entry, Event, Observed, Of};
+use session::{Session, Sheet};
 
 /// The app's side of the settings changes.
 pub struct Changes {
@@ -41,16 +43,19 @@ pub struct Changes {
     /// words them: what an undo tells it undid. The stream may bring the undone value back before
     /// the undo's own answer does, so the one before is kept too.
     seen: BTreeMap<proto::SettingName, (Option<String>, String)>,
-    /// While a Look Preset's editor is open: the ids of the changes made in it, oldest first.
-    /// ⌘Z then takes only these, newest first; its Done folds them into one, its Cancel drops
-    /// them (#87).
-    editor: Option<Vec<u64>>,
+    /// While a sheet over Settings that edits things is open: its steps ([`session`]).
+    session: Option<Session>,
+    /// The sessions of sheets that closed, whose folded step isn't known yet ([`sheet_closing`]),
+    /// oldest first.
+    closing: std::collections::VecDeque<Option<Session>>,
 }
 
 /// What an app setting was before a change.
 #[derive(Clone)]
 pub enum Was {
-    Icon(Option<Icons>),
+    /// The App icon as it was: before a pick, or when its sheet opened. With what Edit ▸ Undo
+    /// says of it, "App icon: Dark Hour → Memento Mori".
+    Icon(Option<Icons>, String),
     /// A theme setting set on `side` of the Active look or a saved preset (`Target`): the Look
     /// Presets as they were.
     Theme(Presets, Target, Side),
@@ -136,7 +141,14 @@ impl Default for Changes {
         // From now in nanoseconds, so an id is never one an earlier run of the app gave a change
         // the service still lists.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, seen: BTreeMap::new(), editor: None }
+        Self {
+            state: machine::State::default(),
+            was: BTreeMap::new(),
+            next: now,
+            seen: BTreeMap::new(),
+            session: None,
+            closing: Default::default(),
+        }
     }
 }
 
@@ -195,9 +207,9 @@ pub fn app_changed(s: &mut Phantom, of: AppSetting, was: Was) {
     let c = &mut s.changes;
     let id = c.id();
     c.was.insert(id, was);
-    match (&mut c.editor, of) {
-        (Some(ids), AppSetting::Theme { .. }) => {
-            ids.push(id);
+    match &mut c.session {
+        Some(session) if session.owns(&of) => {
+            session.push(id);
             let _ = c.decide(Event::Command(Command::Edited { id, of }));
         }
         _ => {
@@ -264,11 +276,11 @@ pub fn made(s: &mut Phantom, id: u64, seq: Option<u64>) {
 }
 
 /// ⌘Z, in the main window or in Settings: the newest change, whoever made it; with none, nothing.
-/// While a Look Preset's editor is open, the newest of its own changes, and only those: what
-/// came before it stays until it's closed.
+/// While a sheet is open, the newest of its own steps, and only those ([`session`]): what came
+/// before it stays until it's closed.
 pub fn press(s: &mut Phantom) {
-    let event = match &s.changes.editor {
-        Some(_) => match editor_top(&s.changes) {
+    let event = match &s.changes.session {
+        Some(session) => match session.top(&s.changes.state) {
             Some(id) => Command::PressApp { id },
             None => return,
         },
@@ -279,29 +291,43 @@ pub fn press(s: &mut Phantom) {
     }
 }
 
-/// The newest change made in the open editor that ⌘Z hasn't taken.
-fn editor_top(c: &Changes) -> Option<u64> {
-    let ids = c.editor.as_ref()?;
-    c.state.list.iter().rev().find_map(|ch| match ch {
-        machine::Change::App { id, press: machine::Press::No, .. } if ids.contains(id) => Some(*id),
-        _ => None,
-    })
+/// A sheet opened: its steps are its own from now on, until it closes.
+pub fn sheet_opened(s: &mut Phantom, sheet: Sheet) {
+    s.changes.session = Some(Session::new(sheet));
 }
 
-/// A Look Preset's editor opened: its changes are its own from now on, until it closes.
-pub fn editor_opened(s: &mut Phantom) {
-    s.changes.editor = Some(Vec::new());
+/// The sheet's session ends at once, its steps gone and none folded: its Look Preset is gone.
+pub fn sheet_dropped(s: &mut Phantom) {
+    let session = s.changes.session.take();
+    fold(&mut s.changes, session, None);
 }
 
-/// The editor closed: its changes leave the list. Done's, if the Look Presets aren't what they
-/// were when it opened, become one change, `was` (Cancel's, none).
-pub fn editor_closed(s: &mut Phantom, was: Option<Was>) {
-    let c = &mut s.changes;
-    let ids = c.editor.take().unwrap_or_default();
-    let into = was.map(|was| {
+/// A sheet closed (Done, Cancel, Escape, ⌘W, the window closing): `finish` runs in Settings once
+/// what was pressed before it has (a ⌘Z just before it takes its step first, and shows), settles
+/// what's left of the visit and says the one step it folds into, if any: what it's a change of,
+/// and what it was before the sheet opened ([`fold_closed`]).
+pub fn sheet_closing(s: &mut Phantom, finish: Box<dyn FnOnce(&mut settings::SettingsWindow) -> Option<(AppSetting, Was)>>) {
+    let session = s.changes.session.take();
+    s.changes.closing.push_back(session);
+    s.settings.post(move |w, _| {
+        let into = finish(w);
+        w.main.post(move |s, _| fold_closed(s, into));
+    });
+}
+
+/// What the oldest sheet that closed folds into: its steps leave the list, and `into`, if any,
+/// is the one step they become.
+fn fold_closed(s: &mut Phantom, into: Option<(AppSetting, Was)>) {
+    let session = s.changes.closing.pop_front().flatten();
+    fold(&mut s.changes, session, into);
+}
+
+fn fold(c: &mut Changes, session: Option<Session>, into: Option<(AppSetting, Was)>) {
+    let ids = session.map(Session::into_ids).unwrap_or_default();
+    let into = into.map(|(of, was)| {
         let id = c.id();
         c.was.insert(id, was);
-        (id, AppSetting::Edit)
+        (id, of)
     });
     for id in &ids {
         c.was.remove(id);
@@ -322,8 +348,9 @@ pub fn press_action(s: &mut Phantom, seq: u64) {
 /// own undo ⌘Z then is.
 pub fn menu_title(s: &Phantom) -> String {
     let editing = s.front == Which::Settings && s.settings_editing;
-    let top = match &s.changes.editor {
-        Some(_) => editor_top(&s.changes)
+    let top = match &s.changes.session {
+        Some(session) => session
+            .top(&s.changes.state)
             .and_then(|id| s.changes.state.list.iter().find(|c| matches!(c, machine::Change::App { id: i, .. } if *i == id))),
         None => s.changes.state.top(),
     };
@@ -331,11 +358,11 @@ pub fn menu_title(s: &Phantom) -> String {
         _ if editing => None,
         Some(Of::App(AppSetting::Presets)) => match top.and_then(|c| s.changes.was_of(c)) {
             Some(Was::Presets(_, change)) => Some(display::undo_named(&change.words())),
-            Some(Was::Icon(_) | Was::Theme(..) | Was::Edit(..)) | None => None,
+            Some(Was::Icon(..) | Was::Theme(..) | Was::Edit(..)) | None => None,
         },
         Some(Of::App(AppSetting::Edit)) => match top.and_then(|c| s.changes.was_of(c)) {
             Some(Was::Edit(_, target)) => Some(display::undo_named(&edit_words(target))),
-            Some(Was::Icon(_) | Was::Theme(..) | Was::Presets(..)) | None => None,
+            Some(Was::Icon(..) | Was::Theme(..) | Was::Presets(..)) | None => None,
         },
         // A saved preset's: named with it, "Undo Tone of Evening".
         Some(Of::App(AppSetting::Theme { label, .. }))
@@ -345,7 +372,12 @@ pub fn menu_title(s: &Phantom) -> String {
         }
         Some(Of::Action(seq)) => s.undo.iter().find(|u| u.seq == seq).map(display::undo_entry),
         Some(Of::Service(name)) => Some(display::undo_change(display::setting_short(name.key()))),
-        Some(Of::App(AppSetting::Icon)) => Some(display::undo_change(display::setting_short("app_icon"))),
+        Some(Of::App(AppSetting::Icon)) => match top.and_then(|c| s.changes.was_of(c)) {
+            Some(Was::Icon(_, words)) => Some(display::undo_named(words)),
+            Some(Was::Theme(..) | Was::Presets(..) | Was::Edit(..)) | None => {
+                Some(display::undo_change(display::setting_short("app_icon")))
+            }
+        },
         Some(Of::App(AppSetting::Theme { label, .. })) => Some(display::undo_change(label)),
         // Sent, not listed yet: for a moment.
         Some(Of::Pending) | None => None,

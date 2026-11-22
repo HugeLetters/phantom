@@ -412,6 +412,10 @@ struct Model {
     choice: Option<Icons>,
     /// The App icon's sheet is open; the images added as icons, by id, in order.
     icons_open: bool,
+    /// The picks made since it opened that ⌘Z hasn't taken: with it open, the only changes ⌘Z takes.
+    visit: usize,
+    /// The App icon when its sheet opened: what the visit's one step undoes to.
+    icons_was: Option<Icons>,
     added: Vec<String>,
     /// The shipped icons' ids, and the designed pairs.
     ids: Vec<String>,
@@ -968,6 +972,8 @@ impl ReferenceStateMachine for Sheet {
                     seeding_refused: Default::default(),
                     choice: None,
                     icons_open: false,
+                    visit: 0,
+                    icons_was: None,
                     added: Vec::new(),
                     ids: ids.clone(),
                     pairs: pairs.clone(),
@@ -993,7 +999,7 @@ impl ReferenceStateMachine for Sheet {
                 }
                 // The App icon's sheet open.
                 if start == 2 {
-                    m.icons_open = true;
+                    m.open_icons();
                 }
                 if start == 3 && !m.saved.is_empty() {
                     m.open_editor(Target::Saved(m.saved[0].name.clone()));
@@ -1281,6 +1287,9 @@ impl ReferenceStateMachine for Sheet {
                 }
                 if m.choice != choice {
                     m.push(Change::Icon(choice));
+                    if m.icons_open {
+                        m.visit += 1;
+                    }
                 }
                 let theme = match step {
                     Step::Arrow(side, key, _) | Step::Choose(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => {
@@ -1340,7 +1349,7 @@ impl Model {
         self.seeding_fields = SEEDING.map(|at| self.seeding_text(at));
         self.seeding_refused = Default::default();
         (self.port_refused, self.folder_refused, self.limits_refused) = (None, false, Default::default());
-        self.icons_open = false;
+        self.close_icons();
         self.focused = None;
         (self.sheet, self.opened) = (None, None);
         (self.save_as, self.name_refused, self.name_focused) = (None, None, false);
@@ -1395,23 +1404,29 @@ impl Model {
     /// ⌘Z: the newest change. A setting's in Settings, opened if it was closed, on its tab, its
     /// control focused, and told; a torrent removed back in the list, and told.
     fn undo(&mut self) {
-        // In a Look Preset's editor, only its own changes, newest first.
+        // In a Look Preset's editor, only its own changes, newest first; in the App icon's sheet,
+        // only this visit's picks.
         let at = match self.sheet {
             Some(_) => self.changes.iter().rposition(|c| matches!(c, Change::Theme(..))),
+            None if self.icons_open => self.changes.iter().rposition(|c| matches!(c, Change::Icon(..))).filter(|_| self.visit > 0),
             None => self.changes.len().checked_sub(1),
         };
         let Some(at) = at else { return };
         let change = self.changes.remove(at);
         let refused = matches!(change, Change::Service(name, _) if self.restarts_fail && restarts(name));
+        // An App icon pick undone in its sheet leaves it open, as it is.
+        let in_sheet = self.icons_open && matches!(change, Change::Icon(..));
         // A setting's undo shows Settings in front, opened if it was closed.
         if !refused && !matches!(change, Change::Removed(_)) {
             if !self.open {
                 self.opened();
             }
             self.front = Some(Which::Settings);
-            // Its control takes the focus; a sheet over the window closes, so it shows.
-            self.name_focused = false;
-            self.icons_open = false;
+            if !in_sheet {
+                // Its control takes the focus; a sheet over the window closes, so it shows.
+                self.name_focused = false;
+                self.close_icons();
+            }
         }
         match change {
             Change::Removed(id) => {
@@ -1427,6 +1442,11 @@ impl Model {
                 self.tab = tab_of(name.key()).unwrap();
                 self.focus = Some(control_of(name).into());
                 self.told.push(client::display::setting_undone_short(client::display::setting_short(name.key())));
+            }
+            Change::Icon(was) if in_sheet => {
+                self.visit -= 1;
+                self.choice = was;
+                self.told.push(client::display::setting_undone_short("App icon"));
             }
             Change::Icon(was) => {
                 self.close_sheet();
@@ -1504,7 +1524,28 @@ impl Model {
     /// changes folded into one as Done does; the App icon's).
     fn close_sheet(&mut self) {
         self.close_editor(true);
-        self.icons_open = false;
+        self.close_icons();
+    }
+
+    /// The App icon's sheet opens.
+    fn open_icons(&mut self) {
+        if !self.icons_open {
+            (self.icons_open, self.visit, self.icons_was) = (true, 0, self.choice.clone());
+        }
+    }
+
+    /// The App icon's sheet closes: what the visit changed is one step, as the editor's Done is.
+    fn close_icons(&mut self) {
+        if !std::mem::replace(&mut self.icons_open, false) {
+            return;
+        }
+        for _ in 0..std::mem::take(&mut self.visit) {
+            let at = self.changes.iter().rposition(|c| matches!(c, Change::Icon(..))).expect("a pick of the visit");
+            self.changes.remove(at);
+        }
+        if self.choice != self.icons_was {
+            self.push(Change::Icon(self.icons_was.clone()));
+        }
     }
 
     /// A Look Preset's sheet opens on `target` (one open on another is done first).
@@ -1707,8 +1748,10 @@ fn act(mut m: Model, step: &Step) -> Model {
             let folder = m.stored.folder.clone().unwrap();
             m.gone.remove(&folder);
         }
-        Step::EditIcons => m.icons_open = true,
-        Step::IconsDone => m.icons_open = false,
+        Step::EditIcons => {
+            m.open_icons();
+        }
+        Step::IconsDone => m.close_icons(),
         Step::IconChip(tile, half) => {
             let id = m.tile(tile).0;
             m.chip_choice(id, *half);
@@ -2124,11 +2167,17 @@ impl StateMachineTest for Sheet {
         // In a Look Preset's editor, ⌘Z takes its own changes only.
         let newest = match m.sheet {
             Some(_) => m.changes.iter().rev().find(|c| matches!(c, Change::Theme(..))),
+            // In the App icon's sheet, this visit's picks only.
+            None if m.icons_open => m.changes.iter().rev().find(|c| matches!(c, Change::Icon(..))).filter(|_| m.visit > 0),
             None => m.changes.last(),
         };
         let newest = newest.map(|change| match change {
             Change::Service(name, _) => client::display::undo_change(client::display::setting_short(name.key())),
-            Change::Icon(_) => client::display::undo_change("App icon"),
+            // The pick, or the visit, from `was` to what the icon is now: it's the newest change.
+            Change::Icon(was) => {
+                let name = |choice: Option<&Icons>| crate::model::settings::icon_full_name(&w.app_icon, choice);
+                format!("Undo {}", client::display::app_icon_change(&name(was.as_ref()), &name(m.choice.as_ref())))
+            }
             Change::Theme(presets, target, _, key) => {
                 let label = theme_label(presets, target, key);
                 match target {
@@ -3447,6 +3496,364 @@ fn the_app_icons_sheet() {
     }
 }
 
+/// A sheet over Settings that edits things, as the rules of a sheet's undo session see it
+/// ([`crate::changes::session`]): how to make a change before it opens, open it, take a step in it,
+/// close it with Done, and read what it edits and what the change before it was of.
+struct SheetKind {
+    /// A change made before the sheet opens, and what that one reads as.
+    before: fn(&mut Desk),
+    before_value: fn(&Desk) -> String,
+    open: fn(&mut Desk),
+    /// Step `i` (from 0) in the open sheet; every step changes what the sheet reads.
+    step: fn(&mut Desk, usize),
+    done: fn(&mut Desk),
+    value: fn(&Desk) -> String,
+    /// The key that is only on screen while the sheet is open.
+    key: &'static str,
+}
+
+/// The Look Preset editor, on Night: its steps are its Tone's joining and settings.
+fn the_editor() -> SheetKind {
+    SheetKind {
+        before: |d| {
+            press(d, "app-icon-edit");
+            press(d, "icon-pair-3");
+            press(d, "icons-done");
+        },
+        before_value: |d| format!("{:?}", d.settings.state.app_icon.choice),
+        open: |d| press(d, "preset-1-edit"),
+        step: |d, i| match i {
+            0 => press(d, "edit-tone-join"),
+            n => press(d, &format!("edit-tone-both/#0/segment{}", n % 2)),
+        },
+        done: |d| press(d, "edit-done"),
+        value: |d| format!("{:?}", night_tone(d)),
+        key: "edit-sheet",
+    }
+}
+
+/// The App icon's sheet: its steps are picks of a designed pair.
+fn the_icons_sheet() -> SheetKind {
+    SheetKind {
+        before: |d| {
+            press(d, "preset-1-edit");
+            press(d, "edit-tone-join");
+            press(d, "edit-done");
+        },
+        before_value: |d| format!("{:?}", night_tone(d)),
+        open: |d| press(d, "app-icon-edit"),
+        step: |d, i| press(d, &format!("icon-pair-{}", [2, 1, 0][i % 3])),
+        done: |d| press(d, "icons-done"),
+        value: |d| format!("{:?}", d.settings.state.app_icon.choice),
+        key: "icons-sheet",
+    }
+}
+
+/// One set of rules for every sheet's undo (#87): ⌘Z takes only the sheet's own steps, newest
+/// first, and it stays open; with none left ⌘Z does nothing; once it's closed the visit is one
+/// step, and the change before it is the next.
+fn a_sheets_undo_follows_the_rules(sheet: SheetKind) {
+    let mut d = appearance_tab();
+    (sheet.before)(&mut d);
+    let (before, opened) = ((sheet.before_value)(&d), (sheet.value)(&d));
+    (sheet.open)(&mut d);
+    let mut seen = vec![(sheet.value)(&d)];
+    for i in 0..3 {
+        (sheet.step)(&mut d, i);
+        seen.push((sheet.value)(&d));
+    }
+    assert!(seen.windows(2).all(|w| w[0] != w[1]), "every step changes it: {seen:?}");
+    let undo = |d: &mut Desk| {
+        d.key(cmd('z'));
+        d.settle();
+    };
+    for back in [2, 1, 0] {
+        undo(&mut d);
+        assert!(d.settings.find(sheet.key).is_some(), "⌘Z leaves the sheet open");
+        assert_eq!((sheet.value)(&d), seen[back], "one step back");
+        assert_eq!((sheet.before_value)(&d), before, "nothing older is taken");
+    }
+    undo(&mut d);
+    assert!(d.settings.find(sheet.key).is_some(), "still open with no step left");
+    assert_eq!((sheet.value)(&d), opened, "⌘Z does nothing with no step left");
+    assert_eq!((sheet.before_value)(&d), before, "and takes nothing older");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "Edit ▸ Undo names nothing");
+    for i in 0..3 {
+        (sheet.step)(&mut d, i);
+    }
+    let after = (sheet.value)(&d);
+    (sheet.done)(&mut d);
+    assert!(d.settings.find(sheet.key).is_none(), "Done closes it");
+    assert_eq!((sheet.value)(&d), after, "and keeps what was done");
+    undo(&mut d);
+    assert_eq!((sheet.value)(&d), opened, "one ⌘Z takes the whole visit");
+    assert_eq!((sheet.before_value)(&d), before, "and no more");
+    undo(&mut d);
+    assert_ne!((sheet.before_value)(&d), before, "the next ⌘Z takes the change before it");
+}
+
+#[test]
+fn the_editors_undo_follows_a_sheets_rules() {
+    a_sheets_undo_follows_the_rules(the_editor());
+}
+
+#[test]
+fn the_app_icons_sheets_undo_follows_a_sheets_rules() {
+    a_sheets_undo_follows_the_rules(the_icons_sheet());
+}
+
+/// A click that doesn't wait for the windows to settle: what came before it is still on its way.
+fn press_now(d: &mut Desk, key: &str) {
+    d.front(Which::Settings);
+    let rt = &mut d.settings;
+    scroll_to(rt, key);
+    let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+}
+
+/// ⌘Z and a close in the same breath, before the windows have settled: the one step a visit folds
+/// into says what's left of it, and none if nothing is (#87).
+#[test]
+fn cmd_z_then_close_at_once_folds_what_is_left_of_the_icon_sheets_visit() {
+    let pairs = manifest().pairs().to_vec();
+    let [b, c] = [pairs[2].clone(), pairs[1].clone()];
+    // A → B → C, ⌘Z, Escape: one step, A → B.
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    press(&mut d, "icon-pair-2");
+    press(&mut d, "icon-pair-1");
+    d.key(cmd('z'));
+    d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    assert_eq!(d.settings.state.app_icon.choice, Some(b.icons()));
+    assert_eq!(crate::changes::menu_title(&d.main.state), format!("Undo App icon: Follow theme → {}", b.name));
+    // A → B, ⌘Z, Escape: nothing left of the visit, no step.
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    press(&mut d, "icon-pair-2");
+    d.key(cmd('z'));
+    d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    assert_eq!(d.settings.state.app_icon.choice, None);
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "no step");
+    let _ = c;
+}
+
+/// The same for the Look Preset editor: Done after a ⌘Z folds what's left (none, when the ⌘Z took
+/// the only change), and Escape, its Cancel, leaves the preset as it opened (#87).
+#[test]
+fn cmd_z_then_close_at_once_folds_what_is_left_of_the_editors_visit() {
+    let (light, dark) = (Some(Value::Choice("light")), Some(Value::Choice("dark")));
+    let mut d = appearance_tab();
+    press(&mut d, "preset-1-edit");
+    press(&mut d, "edit-tone-join");
+    d.key(cmd('z'));
+    press_now(&mut d, "edit-done");
+    d.settle();
+    assert_eq!(night_tone(&d), [light, dark], "the join undone");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "no step");
+    let mut d = appearance_tab();
+    press(&mut d, "preset-1-edit");
+    press(&mut d, "edit-tone-join");
+    press(&mut d, "edit-tone-both/#0/segment1");
+    d.key(cmd('z'));
+    d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    assert_eq!(night_tone(&d), [light, dark], "Cancel: as it opened");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "none of its steps left");
+}
+
+/// A visit that ends where it began (A → B → A) leaves no step (#87).
+#[test]
+fn a_visit_to_the_app_icons_sheet_that_ends_where_it_began_leaves_no_step() {
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    press(&mut d, "icon-pair-2");
+    press(&mut d, "icon-follow-both");
+    assert_eq!(d.settings.state.app_icon.choice, None);
+    press(&mut d, "icons-done");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "no step");
+}
+
+/// An image that fails to load while the sheet is open drops its half to the theme's icon: that's
+/// no pick of the user's, so Done leaves no step for it (#87).
+#[test]
+fn an_image_failing_to_load_during_a_visit_is_no_step_of_it() {
+    let gone = format!("{}/nowhere/moon.png", crate::platform::app_icon::FILE);
+    let choice = Icons::Pair { dark: gone, light: "full-moon".into() };
+    let mut d = appearance_tab();
+    let mut icon = AppIcon::new(Some(manifest()), Some(choice), Looks::default().app_icons(), |_| {});
+    icon.hold_loads();
+    icon.load();
+    d.settings.state.app_icon = icon;
+    press(&mut d, "app-icon-edit");
+    d.settings.state.app_icon.release_loads();
+    d.settle();
+    assert_eq!(
+        d.settings.state.app_icon.choice,
+        Some(Icons::Pair { dark: FOLLOW.into(), light: "full-moon".into() }),
+        "its half follows the theme"
+    );
+    press(&mut d, "icons-done");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "no step");
+}
+
+/// A load that finishes after its image's × applies nothing: the tile stays gone, and the Dock
+/// isn't told (#87).
+#[test]
+fn a_late_load_never_brings_back_a_removed_image() {
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let log = heard.clone();
+    let mut d = appearance_tab();
+    let mut icon = AppIcon::new(Some(manifest()), None, Looks::default().app_icons(), move |change| {
+        if let crate::model::settings::IconChange::Loaded(icon) = change {
+            log.borrow_mut().push(icon.id.clone());
+        }
+    })
+    .with_added(vec![file_id(0)]);
+    icon.hold_loads();
+    icon.load();
+    d.settings.state.app_icon = icon;
+    press(&mut d, "app-icon-edit");
+    assert!(d.settings.find("icon-image-0").is_some(), "a placeholder tile while it loads");
+    d.settings.update(|s, _| crate::model::settings::remove_image(s, &file_id(0)));
+    d.settle();
+    assert!(d.settings.state.app_icon.added.is_empty(), "removed");
+    d.settings.state.app_icon.release_loads();
+    d.settle();
+    assert!(d.settings.state.app_icon.added.is_empty() && d.settings.find("icon-image-0").is_none(), "the tile stays gone");
+    assert!(heard.borrow().is_empty(), "nothing applied");
+    assert!(d.settings.state.app_icon.manifest.as_ref().unwrap().icon(&file_id(0)).is_none());
+}
+
+/// An image both halves name is read once (#87).
+#[test]
+fn an_image_in_both_halves_is_read_once() {
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let log = heard.clone();
+    let both = Icons::One { icon: file_id(0) };
+    let mut icon = AppIcon::new(Some(manifest()), Some(both), Icons::One { icon: "phantom".into() }, move |change| {
+        if let crate::model::settings::IconChange::Loaded(icon) = change {
+            log.borrow_mut().push(icon.id.clone());
+        }
+    })
+    .with_added(vec![file_id(0)]);
+    icon.load();
+    assert_eq!(icon.poll(), [crate::model::settings::Arrival::Loaded]);
+    assert_eq!(*heard.borrow(), [file_id(0)], "one read, one Loaded");
+}
+
+/// An image with more than 8192 px a side (more than the sheet's decoder takes) is scaled to icon
+/// size as it's read: a tile that draws, and only the scaled image is kept (#87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_huge_image_is_kept_at_icon_size_and_its_tile_draws() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("huge.png");
+    std::fs::write(&file, blank_png(9000)).unwrap();
+    let id = format!("{}{}", crate::platform::app_icon::FILE, file.display());
+    let mut icon = AppIcon::new(Some(manifest()), None, Icons::One { icon: "phantom".into() }, |_| {}).with_added(vec![id.clone()]);
+    icon.load_images(Rc::new(rune::ImageCache::new(std::sync::Arc::new(|| {}))));
+    icon.load();
+    assert_eq!(icon.poll(), [crate::model::settings::Arrival::Loaded]);
+    let kept = icon.manifest.as_ref().unwrap().icon(&id).expect("read");
+    let side = |at: usize| u32::from_be_bytes(kept.bytes[at..at + 4].try_into().unwrap());
+    assert_eq!([side(16), side(20)], [crate::platform::app_icon::ICON_SIZE; 2], "kept at icon size");
+    assert!(kept.bytes.len() < 4_000_000, "not the 9000 px file: {} bytes", kept.bytes.len());
+    icon.image(&id).expect("an image to draw").wait().expect("it draws");
+}
+
+/// An image smaller than the icon size is kept as it is, never scaled up (#87).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_small_image_is_not_scaled_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("small.png");
+    std::fs::write(&file, blank_png(100)).unwrap();
+    let icon = crate::platform::app_icon::read_image(&format!("{}{}", crate::platform::app_icon::FILE, file.display())).unwrap();
+    assert_eq!(u32::from_be_bytes(icon.bytes[16..20].try_into().unwrap()), 100);
+}
+
+/// A square 1-bit PNG, `side` px a side, all black (stored, not compressed).
+#[cfg(target_os = "macos")]
+fn blank_png(side: u32) -> Vec<u8> {
+    fn crc(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let body: Vec<u8> = kind.iter().chain(data).copied().collect();
+        out.extend(&body);
+        out.extend(crc(&body).to_be_bytes());
+    }
+    let row = (side as usize).div_ceil(8) + 1;
+    let raw = vec![0u8; row * side as usize];
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in &raw {
+        a = (a + u32::from(x)) % 65521;
+        b = (b + a) % 65521;
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        z.push(u8::from(i + 1 == blocks.len()));
+        z.extend((block.len() as u16).to_le_bytes());
+        z.extend((!(block.len() as u16)).to_le_bytes());
+        z.extend(*block);
+    }
+    z.extend(((b << 16) | a).to_be_bytes());
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut header = Vec::new();
+    header.extend(side.to_be_bytes());
+    header.extend(side.to_be_bytes());
+    header.extend([1, 0, 0, 0, 0]);
+    chunk(&mut png, b"IHDR", &header);
+    chunk(&mut png, b"IDAT", &z);
+    chunk(&mut png, b"IEND", &[]);
+    png
+}
+
+/// A visit to the App icon's sheet is one step: three picks and a ⌘Z leave the sheet open on the
+/// pick before; closing it, one ⌘Z puts the icon back to what it was when it opened, and Edit ▸
+/// Undo names the step "App icon: <old> → <new>" (#87).
+#[test]
+fn a_visit_to_the_app_icons_sheet_is_one_undo_step() {
+    let mut d = appearance_tab();
+    let pairs = manifest().pairs().to_vec();
+    let choice = |d: &Desk| d.settings.state.app_icon.choice.clone();
+    press(&mut d, "app-icon-edit");
+    press(&mut d, "icon-pair-3");
+    press(&mut d, "icons-done");
+    assert_eq!(choice(&d), Some(pairs[3].icons()));
+    press(&mut d, "app-icon-edit");
+    for pair in [2, 1, 0] {
+        press(&mut d, &format!("icon-pair-{pair}"));
+    }
+    d.key(cmd('z'));
+    d.settle();
+    assert!(d.settings.find("icons-sheet").is_some(), "⌘Z leaves the sheet open");
+    assert_eq!(choice(&d), Some(pairs[1].icons()), "on the pick before");
+    press(&mut d, "icons-done");
+    let title = crate::changes::menu_title(&d.main.state);
+    assert_eq!(title, "Undo App icon: Phantom Thief (Alt) → Memento Mori");
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(choice(&d), Some(pairs[3].icons()), "the whole visit undone: Phantom Thief (Alt) again");
+    let told = d.main.state.bar.entries().iter().map(|e| e.notice.short.clone()).collect::<Vec<_>>();
+    assert!(told.iter().any(|t| t == "App icon undone"), "no icon's name in the line: {told:?}");
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(choice(&d), None, "the earlier visit is the next step");
+}
+
 /// The page colour a chip keyed `key` is drawn on.
 fn face(d: &Desk, key: &str) -> Option<rune::Color> {
     d.settings.elements().into_iter().find(|e| e.path.ends_with(&format!("{key}/#0/face")) && !e.exiting).map(|e| e.fill)
@@ -3475,30 +3882,82 @@ fn an_image_is_added_and_removed() {
     assert!(d.settings.find("icon-image-1").is_none() && d.settings.find("icon-image-0").is_some(), "its tile gone");
 }
 
-/// A file that isn't an image (whatever its extension says), or is over 4 MB, is refused with a line
-/// under the tiles, and never becomes a tile (#87).
+/// A file that isn't an image (whatever its extension says) is refused with a line under the
+/// tiles, and never becomes a tile; an image of any size is added (#87).
 #[test]
-fn a_file_that_is_no_image_or_too_big_is_refused() {
+fn a_file_that_is_no_image_is_refused_and_a_big_image_is_not() {
     let dir = tempfile::tempdir().unwrap();
     let fake = dir.path().join("fake.png");
     std::fs::write(&fake, "this is text").unwrap();
     let big = dir.path().join("big.icns");
     let mut bytes = std::fs::read(&images()[0]).unwrap();
-    bytes.resize(4_000_001, 0);
+    bytes.resize(20_000_000, 0);
     std::fs::write(&big, bytes).unwrap();
     let mut d = appearance_tab();
     press(&mut d, "app-icon-edit");
-    for (file, line) in [(&fake, "fake.png isn't an image"), (&big, "big.icns is over 4 MB")] {
-        press(&mut d, "icon-add");
-        d.settings.resolve_file_dialog(Some(file.clone())).expect("a file dialog");
-        d.settle();
-        assert!(d.settings.state.app_icon.added.is_empty(), "{line}: no tile");
-        assert!(d.settings.find("image-refused").is_some(), "{line}: a line under the tiles");
-        let shown = text(&d.settings, "image-refused");
-        assert!(shown.to_lowercase().contains(&line.to_lowercase()), "{line}: {shown:?}");
-    }
+    press(&mut d, "icon-add");
+    d.settings.resolve_file_dialog(Some(fake.clone())).expect("a file dialog");
+    d.settle();
+    assert!(d.settings.state.app_icon.added.is_empty(), "no tile");
+    assert!(d.settings.find("image-refused").is_some(), "a line under the tiles");
+    let shown = text(&d.settings, "image-refused");
+    assert!(shown.to_lowercase().contains("fake.png isn't an image"), "{shown:?}");
     drop_on(&mut d, "app_icon_tiles", fake);
     assert!(d.settings.state.app_icon.added.is_empty(), "a drop is refused too");
+    press(&mut d, "icon-add");
+    d.settings.resolve_file_dialog(Some(big.clone())).expect("a file dialog");
+    d.settle();
+    assert_eq!(d.settings.state.app_icon.added.len(), 1, "a 20 MB image is a tile");
+    assert!(d.settings.find("image-refused").is_none(), "and the line is gone");
+}
+
+/// The images kept as icons are read off the main thread: until one is, a half naming it shows the
+/// theme's icon and its tile is there, a placeholder; once it's read the half shows it, and the
+/// Dock hears of it (#87).
+#[test]
+fn a_kept_image_shows_the_themes_icon_until_it_is_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big.icns");
+    let mut bytes = std::fs::read(&images()[0]).unwrap();
+    bytes.resize(20_000_000, 0);
+    std::fs::write(&big, bytes).unwrap();
+    let id = format!("{}{}", crate::platform::app_icon::FILE, big.display());
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let log = heard.clone();
+    let choice = Icons::Pair { dark: id.clone(), light: "full-moon".into() };
+    let mut icon = AppIcon::new(Some(manifest()), Some(choice.clone()), Icons::One { icon: "phantom".into() }, move |change| {
+        if let crate::model::settings::IconChange::Loaded(icon) = change {
+            log.borrow_mut().push(icon.id.clone());
+        }
+    })
+    .with_added(vec![id.clone()]);
+    icon.hold_loads();
+    icon.load();
+    assert!(icon.poll().is_empty(), "nothing read yet: the first frame doesn't wait for it");
+    assert_eq!(icon.added, [id.clone()], "its tile is there, a placeholder");
+    assert!(icon.image(&id).is_none() && icon.manifest.as_ref().unwrap().icon(&id).is_none(), "no image yet");
+    assert_eq!(icon.choice, Some(choice), "the choice is kept");
+    assert_eq!(icon.sides(), Some(["phantom".to_owned(), "full-moon".to_owned()]), "the theme's icon in the half naming it");
+    icon.release_loads();
+    assert_eq!(icon.poll(), [crate::model::settings::Arrival::Loaded]);
+    assert_eq!(icon.sides(), Some([id.clone(), "full-moon".to_owned()]), "the image shows once it's read");
+    assert_eq!(*heard.borrow(), [id], "and the Dock was told");
+}
+
+/// The thread that reads an image answers through the window's waker, and the app takes it as it
+/// comes (#87).
+#[test]
+fn an_image_is_read_on_a_thread_of_its_own() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waker: rune::Waker = std::sync::Arc::new(move || {
+        let _ = tx.send(());
+    });
+    let mut icon = AppIcon::new(Some(manifest()), None, Icons::One { icon: "phantom".into() }, |_| {}).with_added(vec![file_id(0)]);
+    icon.load_in_background(waker);
+    icon.load();
+    rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the thread woke the window");
+    assert_eq!(icon.poll(), [crate::model::settings::Arrival::Loaded]);
+    assert!(icon.manifest.as_ref().unwrap().icon(&file_id(0)).is_some(), "read");
 }
 
 /// A shipped icon's id among the added images is no added image: no tile of its own, no ×; a
@@ -3529,7 +3988,9 @@ fn the_follow_theme_tile_shows_the_themes_icon() {
 fn an_image_gone_makes_its_half_follow_the_theme() {
     let gone = format!("{}/nowhere/moon.png", crate::platform::app_icon::FILE);
     let choice = Icons::Pair { dark: gone, light: "full-moon".into() };
-    let icon = AppIcon::new(Some(manifest()), Some(choice), Icons::One { icon: "phantom".into() }, |_| {});
+    let mut icon = AppIcon::new(Some(manifest()), Some(choice), Icons::One { icon: "phantom".into() }, |_| {});
+    icon.load();
+    assert_eq!(icon.poll(), [crate::model::settings::Arrival::Gone]);
     assert_eq!(icon.choice, Some(Icons::Pair { dark: FOLLOW.into(), light: "full-moon".into() }));
     assert_eq!(icon.sides(), Some(["phantom".to_owned(), "full-moon".to_owned()]), "the theme's in Dark");
 }

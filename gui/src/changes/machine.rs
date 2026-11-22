@@ -32,7 +32,7 @@
 //! | Event \ the change it's about | App | Sent | Listed |
 //! |---|---|---|---|
 //! | Changed / Sent | added newest | added newest | |
-//! | Edited { id, of } (a step in the open editor) | added newest, held out of the last 20 | | |
+//! | Edited { id, of } (a step in the open sheet) | added newest, held out of the last 20 | | |
 //! | Press, the newest not taken | taken (Undo it) | taken: waits until listed | taken (Ask) |
 //! | Asked | | | asked |
 //! | AppUndone | gone | | |
@@ -42,8 +42,8 @@
 //! | Listed { at, changes }, newer | | listed when `by` it | gone unless listed; another client's added, newest |
 //! | Listed, not newer | | | |
 //!
-//! | PressApp { id } (⌘Z in a Look Preset's editor) | taken, if not yet; else nothing | | |
-//! | Fold { ids, into } (the editor closed) | `ids` gone; `into`, if any, added newest | | |
+//! | PressApp { id } (⌘Z in a Look Preset's editor, or the App icon's sheet) | taken, if not yet; else nothing | | |
+//! | Fold { ids, into } (the sheet closed) | `ids` gone; `into`, if any, added newest | | |
 //!
 //! | Event \ the torrent action it's about | Pending | Action |
 //! |---|---|---|
@@ -192,7 +192,7 @@ pub enum Of {
 pub struct State {
     /// Oldest first.
     pub list: Vec<Change>,
-    /// The app changes in `list` made in the open editor ([`Command::Edited`]): they don't count
+    /// The app changes in `list` made in an open sheet ([`Command::Edited`]): they don't count
     /// toward the last [`KEPT`].
     pub held: Vec<u64>,
     /// The largest `seq` the service has listed: a change listed again after it left (it was
@@ -239,8 +239,8 @@ pub enum Event {
 pub enum Command {
     /// An app setting changed, as the app's change `id`.
     Changed { id: u64, of: AppSetting },
-    /// A step in the open Look Preset's editor: as `Changed`, but kept out of the last [`KEPT`]
-    /// until the editor closes ([`Command::Fold`]), so it pushes no older change off the list.
+    /// A step in an open sheet (a Look Preset's editor, the App icon's): as `Changed`, but kept
+    /// out of the last [`KEPT`] until the sheet closes ([`Command::Fold`]), so it pushes no older change off the list.
     Edited { id: u64, of: AppSetting },
     /// A service setting's change was sent, `by` the app's id for it.
     Sent { by: u64, name: SettingName },
@@ -254,10 +254,10 @@ pub enum Command {
     PressAction { seq: u64 },
     /// The service was asked to undo its top torrent action, for the entry `seq`.
     AskedAction { seq: u64 },
-    /// ⌘Z in a Look Preset's editor: its newest change, the app's `id` (#87).
+    /// ⌘Z in an open sheet (a Look Preset's editor, the App icon's): its newest change, the app's `id` (#87).
     PressApp { id: u64 },
-    /// The editor closed: its changes `ids` leave; Done folds them into one, `into`, the newest,
-    /// if they changed anything (Cancel, none).
+    /// The sheet closed: its changes `ids` leave; Done folds them into one, `into`, the newest,
+    /// if they changed anything (the editor's Cancel, none).
     Fold { ids: Vec<u64>, into: Option<(u64, AppSetting)> },
 }
 

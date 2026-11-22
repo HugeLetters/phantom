@@ -66,7 +66,7 @@ the diagonal from bottom-left to top-right, the Light's page top-left and the Da
 its glyph is one ring on the same diagonal, the top-left half an arc in the Light's text colour,
 the bottom-right half an arc in the Dark's, nothing along the seam, for every preset alike). It carries no theme name; its hover says what a press does ("Apply Evening's
 Light to the active look"). In use, it's outlined 3 pt in that half's accent, 2 pt out from it.
-The App icon's sheet has the same chips under each icon, ☀ on a light page and ☾ on a dark one.
+The App icon's sheet has the same chips under each icon, ☀ on a light page and ☾ on a dark one. Like the editor, the sheet is an **undo session**: ⌘Z in it takes back this visit's picks one at a time and it stays open; with none left ⌘Z does nothing; closing it makes the visit one undo step ("App icon: Dark Hour → Memento Mori").
 _Avoid_: swatch, badge, pill
 
 **App icon**:
@@ -74,7 +74,7 @@ The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Lo
 follows the active Theme Look, or it's one icon always, or a light icon and a dark icon that swap with
 the Appearance; any icon from any theme can be picked for either half (its ☀ or ☾ chip), and so can
 an image a person adds, or either half can follow the theme alone (Follow theme's ☀ or ☾). Following
-the theme is the default; a half whose image is gone (removed, or moved on disk) follows it. An added image must decode as an image (not just have an image extension) and be no larger than 4 MB; otherwise it's refused with a line under the tiles and never becomes a tile. Follow theme's tile shows the theme's icon for the window's Appearance. A chip
+the theme is the default; a half whose image is gone (removed, or moved on disk) follows it. An added image, of any size, must decode as an image (not just have an image extension); otherwise it's refused with a line under the tiles and never becomes a tile. Added images are read off the main thread and kept scaled to 1024 px on the long side: until one is read, a half naming it shows the theme's icon and its tile is a placeholder. Follow theme's tile shows the theme's icon for the window's Appearance. A chip
 is in use as the Look Presets' are: ◐ while both halves are that icon, else ☀ under the Light
 half's and ☾ under the Dark half's.
 
