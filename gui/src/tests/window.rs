@@ -935,8 +935,128 @@ fn resize_column(rt: &mut Runtime<Phantom>, column: Column, dx: f32) {
     drag(rt, &format!("grips/{}/resize", column.id()), dx);
 }
 
+/// The right edge of `column`'s header cell.
+fn right_of(rt: &Runtime<Phantom>, column: Column) -> f32 {
+    let r = header(rt).into_iter().find(|(c, _)| *c == column).unwrap_or_else(|| panic!("{column:?} not shown")).1;
+    r[0] + r[2]
+}
+
+/// Where the last shown column ends, and where the list does.
+fn ends(rt: &Runtime<Phantom>) -> (f32, f32) {
+    let last = header(rt).last().map(|(_, r)| r[0] + r[2]).unwrap();
+    let list = rect(rt, "table");
+    (last, list[0] + list[2])
+}
+
+/// Dragging Progress's right edge by +40 moves that edge and nothing left of it: its own left
+/// edge, Name's width and every column before it stay.
+#[test]
+fn a_dragged_edge_leaves_the_columns_left_of_it_in_place() {
+    let mut rt = app(listed());
+    resize(&mut rt, 1400.0, 540.0);
+    let before = header(&rt);
+    resize_column(&mut rt, Column::Progress, 40.0);
+    let after = header(&rt);
+    let progress = before.iter().position(|(c, _)| *c == Column::Progress).unwrap();
+    for i in 0..=progress {
+        assert!((after[i].1[0] - before[i].1[0]).abs() < 0.5, "{:?}'s left edge: {:?} then {:?}", after[i].0, before[i].1, after[i].1);
+    }
+    assert!((after[progress].1[2] - before[progress].1[2] - 40.0).abs() < 0.5, "Progress is 40 wider");
+    for i in 0..progress {
+        assert!((after[i].1[2] - before[i].1[2]).abs() < 0.5, "{:?} keeps its width", after[i].0);
+    }
+}
+
+/// Name keeps the width it had when another column is dragged, wider or narrower.
+#[test]
+fn name_keeps_its_width_while_another_column_is_dragged() {
+    let mut rt = app(listed());
+    resize(&mut rt, 1400.0, 540.0);
+    let name = width_of(&rt, Column::Name);
+    resize_column(&mut rt, Column::Size, 60.0);
+    assert!((width_of(&rt, Column::Name) - name).abs() < 0.5, "wider Size");
+    resize_column(&mut rt, Column::Progress, -30.0);
+    assert!((width_of(&rt, Column::Name) - name).abs() < 0.5, "narrower Progress");
+}
+
+/// The dragged edge is under the pointer at every step, whatever the columns do: the room a
+/// narrower Name frees stays empty until the next column fits whole, then that column appears.
+#[test]
+fn a_drag_follows_the_pointer_and_a_column_appears_when_it_fits() {
+    let mut rt = app(listed());
+    resize(&mut rt, 800.0, 540.0);
+    let (x, y) = rt.find("grips/name/resize").unwrap();
+    let start = right_of(&rt, Column::Name);
+    let (mut count, mut gap, mut appeared) = (shown(&rt).len(), false, false);
+    assert!(count < Column::ALL.len());
+    rt.pointer_down(x, y);
+    for step in 1..=60 {
+        let dx = -2.0 * step as f32;
+        rt.pointer_move(x + dx, y);
+        rt.frame(FRAME);
+        let edge = right_of(&rt, Column::Name);
+        assert!((edge - (start + dx)).abs() < 0.5, "step {step}: the edge is at {edge}, the pointer moved {dx} from {start}");
+        let (last, end) = ends(&rt);
+        assert!(last <= end + 0.5, "step {step}: columns reach {last}, the list {end}");
+        let n = shown(&rt).len();
+        if n > count {
+            assert!(gap, "a column appears only after the room was empty");
+            appeared = true;
+        } else if end - last > 0.5 {
+            gap = true;
+        }
+        assert!(n >= count, "no column goes while Name shrinks");
+        count = n;
+    }
+    rt.pointer_up(x - 120.0, y);
+    settle(&mut rt);
+    assert!(appeared, "a column came");
+}
+
+/// Growing a column pushes the last one out once it no longer fits, and the others stay where
+/// they were.
+#[test]
+fn growing_a_column_pushes_the_last_out() {
+    let mut rt = app(listed());
+    resize(&mut rt, 900.0, 540.0);
+    let before = shown(&rt);
+    resize_column(&mut rt, Column::Name, -400.0);
+    let roomy = shown(&rt);
+    assert!(roomy.len() > before.len(), "Name narrower brings columns: {before:?} then {roomy:?}");
+    let progress = header(&rt).into_iter().find(|(c, _)| *c == Column::Progress).unwrap().1;
+    resize_column(&mut rt, Column::Progress, 250.0);
+    assert!(shown(&rt).len() < roomy.len(), "the last column hides");
+    let now = header(&rt).into_iter().find(|(c, _)| *c == Column::Progress).unwrap().1;
+    assert!((now[0] - progress[0]).abs() < 0.5, "Progress's left edge stays");
+    let (last, end) = ends(&rt);
+    assert!(last <= end + 0.5);
+}
+
+/// A window resize: Name, unsized, takes the change; sized, it keeps its width and the room at
+/// the right end grows and shrinks, columns appearing and hiding there.
+#[test]
+fn a_window_resize_goes_to_name_unless_it_was_sized() {
+    let mut rt = app(listed());
+    resize(&mut rt, 1000.0, 540.0);
+    let name = width_of(&rt, Column::Name);
+    resize(&mut rt, 1100.0, 540.0);
+    assert!((width_of(&rt, Column::Name) - name - 100.0).abs() < 0.5, "Name takes the change");
+
+    resize_column(&mut rt, Column::Name, -40.0);
+    let sized = width_of(&rt, Column::Name);
+    let count = shown(&rt).len();
+    resize(&mut rt, 1300.0, 540.0);
+    assert!((width_of(&rt, Column::Name) - sized).abs() < 0.5, "Name keeps its width");
+    assert!(shown(&rt).len() >= count);
+    resize(&mut rt, 760.0, 540.0);
+    assert!((width_of(&rt, Column::Name) - sized).abs() < 0.5, "Name keeps its width");
+    assert!(shown(&rt).len() < count, "columns hide at the right end");
+    let (last, end) = ends(&rt);
+    assert!(last <= end + 0.5);
+}
+
 /// A window too narrow for every column: Name dragged narrower gives the room back, so a hidden
-/// column comes back, and Name still takes what's left (the list's right end is never empty).
+/// column comes back once it fits.
 #[test]
 fn shrinking_name_brings_back_a_hidden_column() {
     let mut rt = app(listed());
@@ -947,9 +1067,8 @@ fn shrinking_name_brings_back_a_hidden_column() {
     resize_column(&mut rt, Column::Name, -(name - 130.0));
     let after = shown(&rt);
     assert!(after.len() > before.len(), "a column comes back: {before:?} then {after:?}");
-    let list = rect(&rt, "table");
-    let last = header(&rt).last().map(|(_, r)| r[0] + r[2]).unwrap();
-    assert!((last - (list[0] + list[2])).abs() < 1.0, "the columns reach the list's right end: {last} of {list:?}");
+    let (last, end) = ends(&rt);
+    assert!(last <= end + 0.5, "the columns stay in the list: {last} of {end}");
 }
 
 /// After Name and two more columns are resized, the grips lie exactly over the header's cells, and

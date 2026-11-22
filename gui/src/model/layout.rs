@@ -5,11 +5,13 @@
 //!
 //! **Columns** are in the person's order (a drag on a header moves one). As the window narrows they
 //! hide from the right end, one at a time, until the rest fit; the list always keeps at least one.
-//! Name is a column like any other: it can be moved and hidden, and while it shows it takes the
-//! width the others leave, at least [`NAME_MIN`], or the width its edge was dragged to (a drag on
-//! Name's edge sets the least it keeps, so a narrower Name brings columns back). Status is as wide as its longest current word. A
-//! column either fits whole or isn't drawn: no column is ever cut, and the list never scrolls
-//! sideways (only the one column left may be cut, in a window too narrow for it).
+//! Name is a column like any other: it can be moved and hidden. Until a width is dragged it takes
+//! the width the others leave, at least [`NAME_MIN`]; once its edge is dragged, or another column's
+//! (which fixes Name where it was), its width is a width like the others', and the room the
+//! columns leave stays empty at the list's right end. Status is as wide as its longest current word. A column either fits whole or isn't drawn: no column is ever cut, and the list
+//! never scrolls sideways (only the one column left may be cut, in a window too narrow for it). The
+//! room at the right end is empty until the next hidden column fits whole; no width changes to make
+//! room but the one being dragged.
 //!
 //! **The pane** is as tall as its header, its tabs and its content, up to [`PANE_SHARE`] of the
 //! room, or the room the list's rows leave when that's more (or the height the divider was dragged
@@ -128,14 +130,15 @@ impl ColumnOrder {
 /// The least Name gets before a column gives way to it, until its edge is dragged.
 pub const NAME_MIN: f32 = 200.0;
 
-/// What the list shows, in order: each column with its width, Name's `None` (it takes the rest).
+/// What the list shows, in order: each column with its width, Name's `None` while it takes the rest.
 pub type Fitted = Vec<(Column, Option<f32>)>;
 
 /// The columns that fit `width` points of list, of those in `order` not `hidden`, each whole: they
-/// hide from the right end until the rest fit, Name at its least or more, the first always
-/// kept. `widths` gives each column's width (a dragged one's, Status's its longest current word),
-/// Name's the least it gets (its dragged width, else [`NAME_MIN`]); Name still takes what's left.
-pub fn fit(width: f32, order: &ColumnOrder, hidden: &BTreeSet<Column>, widths: impl Fn(Column) -> f32) -> Fitted {
+/// hide from the right end until the rest fit, the first always kept (cut to the list, if it alone
+/// is wider). `widths` gives each column's width (a dragged one's, Status's its longest current
+/// word), Name's, while `name_flex` (it wasn't sized), the least it gets, [`NAME_MIN`]: it then
+/// takes what's left, else it's a width like the others'. Room left over stays empty.
+pub fn fit(width: f32, order: &ColumnOrder, hidden: &BTreeSet<Column>, name_flex: bool, widths: impl Fn(Column) -> f32) -> Fitted {
     let mut shown: Vec<Column> = order.columns().iter().copied().filter(|c| !hidden.contains(c)).collect();
     if shown.is_empty() {
         shown.push(order.columns()[0]);
@@ -144,7 +147,11 @@ pub fn fit(width: f32, order: &ColumnOrder, hidden: &BTreeSet<Column>, widths: i
     while shown.len() > 1 && need(&shown) > width {
         shown.pop();
     }
-    shown.into_iter().map(|c| (c, (c != Column::Name).then(|| widths(c)))).collect()
+    let sole = shown.len() == 1;
+    shown
+        .into_iter()
+        .map(|c| (c, (!(c == Column::Name && name_flex)).then(|| if sole { widths(c).min(width) } else { widths(c) })))
+        .collect()
 }
 
 /// Where a column dragged along the header lands: `spans` are the columns shown with their widths,
@@ -309,8 +316,8 @@ impl From<PaneHeight> for f32 {
 }
 
 /// The widths the person dragged columns to, in points: each above zero and finite, of a column
-/// that resizes (not Status). Name's is the least it keeps. `gui.json` keeps them as an object by
-/// column id; one that holds anything else is invalid, and reset.
+/// that resizes (not Status). `gui.json` keeps them as an object by column id; one that holds
+/// anything else is invalid, and reset.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "BTreeMap<Column, f32>", into = "BTreeMap<Column, f32>")]
 pub struct ColumnWidths(BTreeMap<Column, f32>);
@@ -339,6 +346,15 @@ pub struct Kept {
     pub tab: PaneTab,
 }
 
+/// A column's edge being dragged: the width it's dragged to so far, and, while Name was taking
+/// the rest, the width it was fixed at as another column's drag began.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Resizing {
+    pub column: Column,
+    pub width: f32,
+    name: Option<f32>,
+}
+
 /// A column being dragged along the header: the order before the drag, put back if it's cancelled.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Moving {
@@ -358,9 +374,8 @@ pub struct WindowPrefs {
     pub moving: Option<Moving>,
     /// The last press on a header moved its column: it doesn't sort too.
     pub moved: bool,
-    /// The column whose edge is being dragged, and the width it's dragged to so far: kept when let
-    /// go.
-    pub resizing: Option<(Column, f32)>,
+    /// The column whose edge is being dragged: kept when let go.
+    pub resizing: Option<Resizing>,
     keep: Option<Rc<dyn Fn(&'static str, serde_json::Value)>>,
 }
 
@@ -405,24 +420,36 @@ impl WindowPrefs {
         self.kept(HIDDEN_COLUMNS, serde_json::to_value(hidden).expect("JSON"));
     }
 
-    /// The width `column`'s edge was dragged to, if it was: while it's being dragged, where the
-    /// pointer is. Name's is its least.
+    /// The width `column` was sized to, if it was: while its edge is being dragged, where the
+    /// pointer is; Name's, while another's is, what it was fixed at.
     pub fn width(&self, column: Column) -> Option<f32> {
         match self.resizing {
-            Some((c, w)) if c == column => Some(w),
+            Some(r) if r.column == column => Some(r.width),
+            Some(Resizing { name: Some(w), .. }) if column == Column::Name => Some(w),
             _ => self.kept.widths.0.get(&column).copied(),
         }
     }
 
-    /// The edge of `column` is dragged to `width`.
-    pub fn resize_to(&mut self, column: Column, width: f32) {
-        self.resizing = Some((column, width));
+    /// The edge of `column` is dragged to `width`. `name` is Name's drawn width if it takes the
+    /// rest: it's fixed there, so it doesn't shrink as another column grows.
+    pub fn resize_to(&mut self, column: Column, width: f32, name: Option<f32>) {
+        let before = self.resizing.filter(|r| r.column == column).and_then(|r| r.name);
+        let name = (column != Column::Name && self.kept.widths.0.get(&Column::Name).is_none()).then(|| name.or(before)).flatten();
+        self.resizing = Some(Resizing { column, width, name });
     }
 
-    /// The drag of the edge let go: the width is kept, or, `cancelled`, forgotten.
+    /// The drag of the edge let go: the widths are kept, or, `cancelled`, forgotten.
     pub fn end_resize(&mut self, cancelled: bool) {
-        let Some((column, width)) = self.resizing.take() else { return };
-        if !cancelled && self.kept.widths.0.insert(column, width) != Some(width) {
+        let Some(r) = self.resizing.take() else { return };
+        if cancelled {
+            return;
+        }
+        let before = self.kept.widths.clone();
+        self.kept.widths.0.insert(r.column, r.width);
+        if let Some(name) = r.name {
+            self.kept.widths.0.insert(Column::Name, name);
+        }
+        if self.kept.widths != before {
             self.kept_widths();
         }
     }
@@ -523,7 +550,7 @@ mod tests {
         #[test]
         fn columns_hide_from_the_right_end(width in 100.0f32..2400.0, order in order(), hidden in hidden(), status in 60.0f32..200.0, name in 120.0f32..600.0) {
             let widths = width_of(status, name);
-            let fitted = fit(width, &order, &hidden, &widths);
+            let fitted = fit(width, &order, &hidden, true, &widths);
             let shown: Vec<Column> = fitted.iter().map(|(c, _)| *c).collect();
             let mut wanted: Vec<Column> = order.columns().iter().copied().filter(|c| !hidden.contains(c)).collect();
             if wanted.is_empty() {
@@ -548,7 +575,7 @@ mod tests {
         #[test]
         fn a_narrower_name_keeps_every_column(width in 100.0f32..2400.0, order in order(), hidden in hidden(), a in 120.0f32..600.0, b in 120.0f32..600.0) {
             let (narrow, wide) = (a.min(b), a.max(b));
-            let cols = |name| fit(width, &order, &hidden, width_of(100.0, name)).into_iter().map(|(c, _)| c).collect::<BTreeSet<_>>();
+            let cols = |name| fit(width, &order, &hidden, true, width_of(100.0, name)).into_iter().map(|(c, _)| c).collect::<BTreeSet<_>>();
             prop_assert!(cols(wide).is_subset(&cols(narrow)));
         }
 
@@ -557,7 +584,7 @@ mod tests {
         fn a_wider_list_shows_more(a in 100.0f32..2400.0, b in 100.0f32..2400.0, order in order(), hidden in hidden(), status in 60.0f32..200.0, name in 120.0f32..600.0) {
             let (narrow, wide) = (a.min(b), a.max(b));
             let widths = width_of(status, name);
-            let cols = |w| fit(w, &order, &hidden, &widths).into_iter().map(|(c, _)| c).collect::<BTreeSet<_>>();
+            let cols = |w| fit(w, &order, &hidden, true, &widths).into_iter().map(|(c, _)| c).collect::<BTreeSet<_>>();
             prop_assert!(cols(narrow).is_subset(&cols(wide)));
         }
 
@@ -647,6 +674,33 @@ mod tests {
         assert_eq!(long.height, room * PANE_SHARE, "a long list keeps the rest");
     }
 
+    /// A sized Name is a width like the others': nothing takes the rest, so the room left over stays empty.
+    #[test]
+    fn a_sized_name_leaves_room_empty() {
+        let order = ColumnOrder::default();
+        let fitted = fit(900.0, &order, &BTreeSet::new(), false, |c| if c == Column::Status { 90.0 } else { c.width() });
+        assert!(fitted.iter().all(|(_, w)| w.is_some()), "every width fixed: {fitted:?}");
+        let total: f32 = fitted.iter().filter_map(|(_, w)| *w).sum();
+        assert!(total < 900.0, "room is left");
+    }
+
+    /// Dragging another column fixes Name where it was drawn; let go, both widths are kept, and
+    /// cancelled, neither.
+    #[test]
+    fn dragging_a_column_fixes_a_name_that_took_the_rest() {
+        let mut prefs = WindowPrefs::default();
+        prefs.resize_to(Column::Progress, 190.0, Some(333.0));
+        prefs.resize_to(Column::Progress, 200.0, None);
+        assert_eq!((prefs.width(Column::Progress), prefs.width(Column::Name)), (Some(200.0), Some(333.0)));
+        prefs.end_resize(true);
+        assert_eq!((prefs.width(Column::Progress), prefs.width(Column::Name)), (None, None));
+        prefs.resize_to(Column::Progress, 200.0, Some(333.0));
+        prefs.end_resize(false);
+        assert_eq!((prefs.width(Column::Progress), prefs.width(Column::Name)), (Some(200.0), Some(333.0)));
+        prefs.resize_to(Column::Size, 90.0, Some(10.0));
+        assert_eq!(prefs.width(Column::Name), Some(333.0), "a sized Name stays as it was");
+    }
+
     #[test]
     fn any_column_hides_but_never_the_last() {
         let mut prefs = WindowPrefs::default();
@@ -658,7 +712,7 @@ mod tests {
         }
         prefs.toggle(Column::Eta, &[Column::Eta]);
         assert!(!prefs.hidden().contains(&Column::Eta), "the last one stays");
-        let fitted = fit(960.0, prefs.order(), prefs.hidden(), Column::width);
+        let fitted = fit(960.0, prefs.order(), prefs.hidden(), true, Column::width);
         assert_eq!(fitted, vec![(Column::Eta, Some(72.0))]);
         prefs.toggle(Column::Name, &[Column::Eta]);
         assert!(!prefs.hidden().contains(&Column::Name), "shown again");
@@ -668,7 +722,7 @@ mod tests {
     #[test]
     fn the_last_column_showing_can_t_be_hidden() {
         let mut prefs = WindowPrefs::default();
-        let shown = fit(150.0, prefs.order(), prefs.hidden(), Column::width).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
+        let shown = fit(150.0, prefs.order(), prefs.hidden(), true, Column::width).into_iter().map(|(c, _)| c).collect::<Vec<_>>();
         assert_eq!(shown, [Column::Name], "the first kept, however narrow");
         prefs.toggle(Column::Name, &shown);
         assert!(prefs.hidden().is_empty());

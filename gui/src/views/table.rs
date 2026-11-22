@@ -21,20 +21,26 @@ use crate::ui::{Table, TableColumn, Tone, Ui};
 const SPACE_ICON: f32 = 18.0;
 
 /// The columns that fit `width` points: each at the width it was dragged to, else its own; Status
-/// as wide as its longest current word.
+/// as wide as its longest current word, Name taking the rest until it was sized.
 pub fn fitted(s: &Phantom, ui: &Ui, width: f32) -> Fitted {
-    let status = s
-        .torrents
+    layout::fit(width - layout::TOGGLE, s.prefs.order(), s.prefs.hidden(), s.prefs.width(Column::Name).is_none(), |c| dragged(s, ui, c))
+}
+
+/// How wide Status is as its longest current word.
+fn longest_status(s: &Phantom, ui: &Ui) -> f32 {
+    s.torrents
         .iter()
         .map(|t| ui.cell_width(display::status(&t.status)) + if space::short_on_space(s, t.id).is_some() { SPACE_ICON } else { 0.0 })
         .fold(ui.header_width(Column::Status.title()), f32::max)
-        .ceil();
-    layout::fit(width - layout::TOGGLE, s.prefs.order(), s.prefs.hidden(), |c| if c == Column::Status { status } else { dragged(s, c) })
+        .ceil()
 }
 
-/// A column's width: the one its edge was dragged to (within its bounds), else its own. Name's is
-/// the least it keeps; it takes what the others leave.
-fn dragged(s: &Phantom, c: Column) -> f32 {
+/// A column's width: the one its edge was dragged to (within its bounds), else its own (Status's
+/// longest word, whatever). Name's, unsized, is the least it takes before columns hide.
+fn dragged(s: &Phantom, ui: &Ui, c: Column) -> f32 {
+    if c == Column::Status {
+        return longest_status(s, ui);
+    }
     s.prefs.width(c).map_or(c.width(), |w| declared(c).clamp(w))
 }
 
@@ -70,7 +76,7 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
     table = table.column(TableColumn::new(TOGGLE_ID, "").width(layout::TOGGLE).min(layout::TOGGLE).max(layout::TOGGLE).resizable(false));
     for (c, width) in fitted {
         table = table.column(match width {
-            None => declared(*c).flex(1.0).min(dragged(s, *c)),
+            None => declared(*c).flex(1.0).min(dragged(s, ui, *c)),
             Some(w) => declared(*c).width(*w),
         });
     }
@@ -175,18 +181,26 @@ const DRAG_SLOP: f32 = 4.0;
 /// out as the table lays its cells out (Name taking the rest, no less than its least). A click on
 /// a grip sorts by it, as the header's own cell would; a drag moves the column along the header,
 /// the others making way as it passes them, kept when let go, put back on Escape. A drag on a
-/// handle resizes the column (Name: the least it keeps, so a narrower Name brings columns back),
-/// kept when let go; a double-click puts it back (Name: to taking the rest).
+/// handle (not Status's: as wide as its longest word) moves that edge under the pointer, the
+/// columns left of it staying and those right of it shifting; room that frees at the right end
+/// stays empty until a hidden column fits whole. Kept when let go; a double-click puts it back
+/// (Name: to taking the rest).
 fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
     let fixed: f32 = fitted.iter().filter_map(|(_, w)| *w).sum();
-    let spans: Vec<(Column, f32)> = fitted.iter().map(|(c, w)| (*c, w.unwrap_or((width - fixed).max(dragged(s, *c))))).collect();
+    let spans: Vec<(Column, f32)> = fitted.iter().map(|(c, w)| (*c, w.unwrap_or((width - fixed).max(dragged(s, ui, *c))))).collect();
+    // Name's drawn width while it takes the rest: another column's drag fixes it there.
+    let name = fitted
+        .iter()
+        .find(|(c, w)| *c == Column::Name && w.is_none())
+        .and_then(|_| spans.iter().find(|(c, _)| *c == Column::Name))
+        .map(|(_, w)| *w);
     let shown: Vec<Column> = spans.iter().map(|(c, _)| *c).collect();
     let mut grips = row().key("grips").pin(Some(0.0), Some(0.0), Some(0.0), None).h(layout::TABLE_HEADER).child(el().w(layout::TOGGLE));
     let mut start = layout::TOGGLE;
     for (c, w) in fitted.iter().copied() {
         let cell = match w {
             Some(w) => row().w(w),
-            None => row().w(0.0).grow(1.0).shrink().min_w(dragged(s, c)),
+            None => row().w(0.0).grow(1.0).shrink().min_w(dragged(s, ui, c)),
         };
         let active = s.prefs.moving.as_ref().is_some_and(|m| m.column == c);
         let (all, shown, left) = (spans.clone(), shown.clone(), start + GRIP_INSET);
@@ -207,8 +221,11 @@ fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
         );
         let drawn = spans.iter().find(|(s, _)| *s == c).map_or(0.0, |(_, w)| *w);
         let mut cell = cell.key(c.id()).h_full().px(GRIP_INSET).child(grip);
+        // Status is as wide as its longest word: no edge to drag.
         if c != Column::Status {
-            cell = cell.child(resize_handle(c, drawn, width));
+            let bounds = declared(c);
+            let bounds = (bounds.clamp(0.0), bounds.clamp(f32::MAX));
+            cell = cell.child(resize_handle(c, drawn, width - (start - layout::TOGGLE), bounds, name));
         }
         grips = grips.child(cell);
         start += spans.iter().find(|(s, _)| *s == c).map_or(0.0, |(_, w)| *w);
@@ -218,9 +235,11 @@ fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
 
 /// The drag target on a column's right edge, in the room the table's own handle took (the grips
 /// leave it free): the column is at `drawn` points as the drag starts, and goes where the pointer
-/// does, within its bounds and the list's `width`. Pressed and let go without moving, it changes
+/// does, within its `bounds` and the `room` the list has from its left edge (a column never drags
+/// itself out of the list). `name` is Name's drawn width if it takes the rest, which another
+/// column's drag fixes. Pressed and let go without moving, it changes
 /// nothing, so a double-click is no resize.
-fn resize_handle(c: Column, drawn: f32, width: f32) -> El {
+fn resize_handle(c: Column, drawn: f32, room: f32, (least, most): (f32, f32), name: Option<f32>) -> El {
     el().key("resize")
         .role("separator")
         .label(format!("Resize {}", c.title()))
@@ -230,7 +249,7 @@ fn resize_handle(c: Column, drawn: f32, width: f32) -> El {
         .on_drag(move |s: &mut Phantom, d: &mut Drag, _: &mut Tx| match d.phase {
             Phase::Down => d.data = drawn,
             _ if d.cancelled() => s.prefs.end_resize(true),
-            Phase::Move if d.dx != 0.0 => s.prefs.resize_to(c, declared(c).clamp((d.data + d.dx).min(width))),
+            Phase::Move if d.dx != 0.0 => s.prefs.resize_to(c, (d.data + d.dx).min(room).max(least).min(most.max(least)), name),
             Phase::Move => {}
             Phase::Up => s.prefs.end_resize(false),
         })
