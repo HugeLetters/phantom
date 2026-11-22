@@ -265,9 +265,10 @@ The status bar says "Found", with its name and where it is in the list (and Reve
 `phantom move` and `phantom rename` print it. Not found (files of it still where it was, a file
 there longer than its own, or none of its files there), it's a Move or a Rename as ever: a Move
 asks about the files there as a clash, a Rename finds the name taken. A found Rename is one step
-of Undo, which points it back at its old name, moving nothing, Missing files again; a found Move
-isn't undone, as a Move isn't. What's found is taken as the torrent's: the check sets each file it
-gets to its own length, and one wanted running downloads over what isn't its own.
+of Undo, which points it back at its old name, moving nothing, Missing files again (or found there,
+if the person put it back); a found Move isn't undone, as a Move isn't. What's found is taken as
+the torrent's: the check sets each file it gets to its own length, and one wanted running
+downloads over what isn't its own.
 _Avoid_: locate, relink, reconcile (in what people see)
 
 **Rename…**:

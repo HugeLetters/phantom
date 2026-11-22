@@ -180,6 +180,15 @@ impl Plan {
         self.items.iter().filter(|i| !i.kept && i.staged.is_none()).map(|i| i.index).collect()
     }
 
+    /// The plan of a torrent [`found_in`] where it is now (#358) moves nothing and removes nothing:
+    /// none of its files was at its old paths as it was found, and one put back there since (in the
+    /// instant before the plan looked) stays where it is, the person's.
+    pub fn moves_nothing(&mut self) {
+        for item in &mut self.items {
+            item.source = None;
+        }
+    }
+
     /// Records what [`stage`] staged of each file.
     pub fn staged_as(&mut self, staged: &[(usize, Ino)]) {
         for item in &mut self.items {

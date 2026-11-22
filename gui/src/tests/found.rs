@@ -74,6 +74,30 @@ fn rename_in_the_header_finds_a_folder_renamed_in_finder() {
     assert_eq!((t.display_name(), t.status.clone()), ("Album", Status::MissingFiles), "pointed back, nothing moved");
 }
 
+/// Found by a Rename, then its folder renamed back to "Album" in Finder: Missing files again, and
+/// ⌘Z points it back at "Album", where it's found too: checked there, and seeding again.
+#[test]
+fn undo_of_a_found_rename_finds_it_back_under_its_old_name() {
+    use crate::service::DiskChange;
+    let renamed = format!("{DOWNLOADS}/Album (2024)");
+    let service = seeding_album().moved_by_hand(1, &renamed);
+    let disk = service.disk();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    crate::model::rename(&mut rt.state, 1, proto::FileName::new("Album (2024)").unwrap());
+    settle(&mut rt);
+    wait(&mut rt, 3.0);
+    assert_eq!(status(&rt, 1), Status::Seeding);
+
+    disk.change(DiskChange::MovedByHand { id: 1, to: format!("{DOWNLOADS}/Album").into() });
+    wait(&mut rt, 0.5);
+    assert_eq!(status(&rt, 1), Status::MissingFiles);
+    shortcut(&mut rt, InApp::Undo);
+    wait(&mut rt, 3.0);
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.display_name(), t.status.clone()), ("Album", Status::Seeding), "pointed back, found there");
+}
+
 /// Its folder moved in Finder to /Volumes/Films: Missing files. Move to… that folder finds it: a
 /// brief "Found", with its name and where it is, and it seeds there again. Not undone, as a Move
 /// isn't.

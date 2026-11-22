@@ -280,6 +280,71 @@ async fn undo_of_a_found_rename_points_it_back_and_moves_nothing() {
     engine.stop().await;
 }
 
+/// Nothing is found through a link: the torrent's folder renamed in Finder, Rename… to the name
+/// of a link to that folder, or to a folder whose file of the torrent's is a link to the person's
+/// own copy elsewhere, isn't found, and the name is taken, as ever. What either link leads to is
+/// as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_is_found_through_a_link() {
+    for link in ["folder", "file"] {
+        let dir = temp();
+        let engine = engine(dir.path()).await;
+        let downloads = dir.path().join("downloads");
+        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, true).await.unwrap().id;
+        wait_for(&engine, id, Status::Done { reached: None }).await;
+        let mine = dir.path().join("mine");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::rename(downloads.join("pack"), downloads.join("Album")).unwrap();
+        match link {
+            "folder" => std::os::unix::fs::symlink(downloads.join("Album"), downloads.join("Linked")).unwrap(),
+            _ => {
+                std::fs::create_dir_all(downloads.join("Linked")).unwrap();
+                std::fs::copy(downloads.join("Album/a.bin"), mine.join("a.bin")).unwrap();
+                std::os::unix::fs::symlink(mine.join("a.bin"), downloads.join("Linked/a.bin")).unwrap();
+            }
+        }
+        wait_for(&engine, id, Status::MissingFiles).await;
+        let (album, theirs) = (stamps(&downloads.join("Album")), stamps(&mine));
+
+        let why = refusal(engine.command(id, rename("Linked")).await);
+        assert_eq!(why, (id, TorrentRefusal::NameTaken { path: AbsolutePath::new(downloads.join("Linked")).unwrap() }), "{link}");
+        assert_eq!((stamps(&downloads.join("Album")), stamps(&mine)), (album, theirs), "{link}: nothing changed");
+        let t = find(&engine, id).await;
+        assert_eq!((t.status, t.location), (Status::MissingFiles, at(downloads.join("pack"))), "{link}");
+        engine.stop().await;
+    }
+}
+
+/// ⌘Z on a found Rename once the person has put its folder back under its old name in Finder:
+/// it's found there too, pointed back and checked in full, nothing moved.
+#[tokio::test(flavor = "multi_thread")]
+async fn undo_of_a_found_rename_finds_it_back_under_its_old_name() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    std::fs::rename(downloads.join("pack"), downloads.join("Album")).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    engine.command(id, rename("Album")).await.unwrap();
+    moved(&engine, id).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    std::fs::rename(downloads.join("Album"), downloads.join("pack")).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    let found = inodes(&downloads.join("pack"));
+
+    let undone = engine.undo().await.unwrap();
+    assert_eq!(undone.undo.action, UndoAction::Rename);
+    moved(&engine, id).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    let t = find(&engine, id).await;
+    assert_eq!((t.name.as_deref(), t.location), (Some("pack"), at(downloads.join("pack"))));
+    assert_eq!(t.content.unwrap().progress_bytes, 3 * FULL);
+    assert_eq!(inodes(&downloads.join("pack")), found, "the same files, where the person put them");
+    assert!(!downloads.join("Album").exists(), "nothing made at the name it had");
+    engine.stop().await;
+}
+
 /// A crash once a found Rename's record names its new name, before it's over: the next start
 /// finishes it there, and its undo still points it back, moving nothing, as it was written ahead.
 #[tokio::test(flavor = "multi_thread")]

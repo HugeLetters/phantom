@@ -48,13 +48,19 @@ impl MemoryService {
     }
 
     /// The undo of a Rename that found torrent `id`: it's called `was` again, moving nothing, never
-    /// over anything at that name; its files stay where they are, so it's Missing files again.
+    /// over anything at that name; its files stay where they are, so it's Missing files again. Put
+    /// back under `was` by hand, it's found there.
     pub(super) fn point_back(&mut self, id: TorrentId, was: &str) -> Result<Option<String>, TorrentRefusal> {
         let destination = self.destinations.get(&id).cloned().unwrap_or_else(super::downloads);
         let t = self.torrents.iter().find(|t| t.id == id).ok_or(TorrentRefusal::NotInList)?;
         let at = self.location(t).ok_or(TorrentRefusal::NoInfoYet)?.to_path_buf();
-        self.name_free(id, &destination, was, false)?;
+        let found = self.found_at(id, &destination.join(was));
+        self.name_free(id, &destination, was, found)?;
         self.take_name(id, was);
+        if found {
+            self.take_found(id);
+            return Ok(None);
+        }
         self.left_by_hand(id, at);
         self.size_check(id);
         self.refresh(id);

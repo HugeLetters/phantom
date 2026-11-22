@@ -237,7 +237,8 @@ impl Actor {
     /// Starts renaming torrent `id` to `name` (#331), decided on it as it is now: whether it
     /// moves. Nothing is ever merged into what's at the new name: anything there refuses it, but
     /// the torrent's own files renamed there by hand, which it's found at (#358). `points_back`:
-    /// the undo of a Rename that found it, which gives it back its old name moving nothing.
+    /// the undo of a Rename that found it, which gives it back its old name moving nothing (and
+    /// finds it there, if the person put it back so).
     async fn begin_rename(&mut self, id: TorrentId, name: String, points_back: bool) -> Result<bool, Failure> {
         let refused = |why| Failure::torrent(id, why);
         if !self.torrents.contains_key(&id) {
@@ -251,11 +252,19 @@ impl Actor {
             return Ok(false);
         }
         let to = record.destination.clone();
-        let found = !points_back && moving::found_in(&to, &to, Some(&name), &sized(record)).is_some();
-        self.name_free(id, &to, &name, found)?;
-        let (plan, found) = match points_back {
-            true => (moving::pointing(&to, &to, Some(&name), &record.info_hash, &inside(record)), false),
-            false => self.plan_in(id, &to, Some(&name), None)?,
+        // Decided once: the plan takes what's found as it was found. Pointing back finds it too,
+        // once the person put it back under its old name.
+        let found =
+            moving::found_in(&to, &to, Some(&name), &sized(record)).map(|found| Answered { choice: proto::Clash::UseExisting, found });
+        self.name_free(id, &to, &name, found.is_some())?;
+        let (plan, found) = match (points_back, found) {
+            (true, None) => (moving::pointing(&to, &to, Some(&name), &record.info_hash, &inside(record)), false),
+            (_, None) => self.plan_in(id, &to, Some(&name), None)?,
+            (_, Some(found)) => {
+                let (mut plan, _) = self.plan_in(id, &to, Some(&name), Some(&found))?;
+                plan.moves_nothing();
+                (plan, true)
+            }
         };
         self.begin(id, to, Some(name), plan, found).await
     }
@@ -366,7 +375,7 @@ impl Actor {
         let renames = moving::same_volume(&record.destination, to);
         #[cfg(test)]
         let renames = renames && !self.move_hold.copies;
-        let plan = moving::plan(&record.destination, to, name, &record.info_hash, &files, clash, renames).map_err(|r| match r {
+        let mut plan = moving::plan(&record.destination, to, name, &record.info_hash, &files, clash, renames).map_err(|r| match r {
             Refused::Clash(files) => refused(TorrentRefusal::Clash { files }),
             Refused::Changed(path) => match AbsolutePath::new(path) {
                 Ok(path) => refused(TorrentRefusal::ClashChanged { path }),
@@ -377,6 +386,9 @@ impl Actor {
                 Err(path) => anyhow::anyhow!("not an absolute path: {}", path.display()).into(),
             },
         })?;
+        if found.is_some() {
+            plan.moves_nothing();
+        }
         Ok((plan, found.is_some()))
     }
 
