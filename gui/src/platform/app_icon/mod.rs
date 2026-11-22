@@ -35,10 +35,20 @@ pub fn read_image(id: &str) -> Result<Icon, String> {
     let path = id.strip_prefix(FILE).ok_or_else(|| format!("{id} isn't an image file"))?;
     let file = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
     let bytes = std::fs::read(path).map_err(|e| format!("can't read {file}: {e}"))?;
-    if !decodes(&bytes) {
-        return Err(format!("{file} isn't an image"));
-    }
+    let bytes = scaled(bytes).ok_or_else(|| format!("{file} isn't an image"))?;
     Ok(Icon { id: id.to_owned(), name: image_name(id), bytes })
+}
+
+/// The longest side of an added image as it's kept, in pixels: enough for the Dock, the bundle's
+/// icon and the tiles, so a photo's full size is never kept, nor decoded again.
+pub const ICON_SIZE: u32 = 1024;
+
+/// `bytes` decoded once and scaled to [`ICON_SIZE`] (a PNG); `None` if they aren't an image.
+fn scaled(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    #[cfg(target_os = "macos")]
+    return appkit::scaled_png(&bytes, ICON_SIZE);
+    #[cfg(not(target_os = "macos"))]
+    return (!bytes.is_empty()).then_some(bytes);
 }
 
 /// What an added image is called before it's read, and after: its file's name without the
@@ -46,14 +56,6 @@ pub fn read_image(id: &str) -> Result<Icon, String> {
 pub fn image_name(id: &str) -> String {
     let path = id.strip_prefix(FILE).unwrap_or(id);
     Path::new(path).file_stem().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned())
-}
-
-/// Whether `bytes` are an image the system can decode (a file's extension says nothing).
-fn decodes(bytes: &[u8]) -> bool {
-    #[cfg(target_os = "macos")]
-    return appkit::image(bytes).is_some();
-    #[cfg(not(target_os = "macos"))]
-    return !bytes.is_empty();
 }
 
 /// What the id of an image file added as an icon starts with, its path after it.

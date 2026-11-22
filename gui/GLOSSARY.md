@@ -74,7 +74,7 @@ The icon Phantom shows in the Dock, Finder and launchers. It is not part of a Lo
 follows the active Theme Look, or it's one icon always, or a light icon and a dark icon that swap with
 the Appearance; any icon from any theme can be picked for either half (its ☀ or ☾ chip), and so can
 an image a person adds, or either half can follow the theme alone (Follow theme's ☀ or ☾). Following
-the theme is the default; a half whose image is gone (removed, or moved on disk) follows it. An added image, of any size, must decode as an image (not just have an image extension); otherwise it's refused with a line under the tiles and never becomes a tile. Added images are read off the main thread: until one is read, a half naming it shows the theme's icon and its tile is a placeholder. Follow theme's tile shows the theme's icon for the window's Appearance. A chip
+the theme is the default; a half whose image is gone (removed, or moved on disk) follows it. An added image, of any size, must decode as an image (not just have an image extension); otherwise it's refused with a line under the tiles and never becomes a tile. Added images are read off the main thread and kept scaled to 1024 px on the long side: until one is read, a half naming it shows the theme's icon and its tile is a placeholder. Follow theme's tile shows the theme's icon for the window's Appearance. A chip
 is in use as the Look Presets' are: ◐ while both halves are that icon, else ☀ under the Light
 half's and ☾ under the Dark half's.
 

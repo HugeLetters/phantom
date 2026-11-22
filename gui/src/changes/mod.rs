@@ -45,6 +45,9 @@ pub struct Changes {
     seen: BTreeMap<proto::SettingName, (Option<String>, String)>,
     /// While a sheet over Settings that edits things is open: its steps ([`session`]).
     session: Option<Session>,
+    /// The sessions of sheets that closed, whose folded step isn't known yet ([`sheet_closing`]),
+    /// oldest first.
+    closing: std::collections::VecDeque<Option<Session>>,
 }
 
 /// What an app setting was before a change.
@@ -138,7 +141,14 @@ impl Default for Changes {
         // From now in nanoseconds, so an id is never one an earlier run of the app gave a change
         // the service still lists.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, seen: BTreeMap::new(), session: None }
+        Self {
+            state: machine::State::default(),
+            was: BTreeMap::new(),
+            next: now,
+            seen: BTreeMap::new(),
+            session: None,
+            closing: Default::default(),
+        }
     }
 }
 
@@ -286,12 +296,34 @@ pub fn sheet_opened(s: &mut Phantom, sheet: Sheet) {
     s.changes.session = Some(Session::new(sheet));
 }
 
-/// The sheet closed: its steps leave the list. If the visit changed anything, `into` is the one
-/// step they become: what it's a change of, and what it was before the sheet opened (the editor's
-/// Cancel, none).
-pub fn sheet_closed(s: &mut Phantom, into: Option<(AppSetting, Was)>) {
-    let c = &mut s.changes;
-    let ids = c.session.take().map(Session::into_ids).unwrap_or_default();
+/// The sheet's session ends at once, its steps gone and none folded: its Look Preset is gone.
+pub fn sheet_dropped(s: &mut Phantom) {
+    let session = s.changes.session.take();
+    fold(&mut s.changes, session, None);
+}
+
+/// A sheet closed (Done, Cancel, Escape, ⌘W, the window closing): `finish` runs in Settings once
+/// what was pressed before it has (a ⌘Z just before it takes its step first, and shows), settles
+/// what's left of the visit and says the one step it folds into, if any: what it's a change of,
+/// and what it was before the sheet opened ([`fold_closed`]).
+pub fn sheet_closing(s: &mut Phantom, finish: Box<dyn FnOnce(&mut settings::SettingsWindow) -> Option<(AppSetting, Was)>>) {
+    let session = s.changes.session.take();
+    s.changes.closing.push_back(session);
+    s.settings.post(move |w, _| {
+        let into = finish(w);
+        w.main.post(move |s, _| fold_closed(s, into));
+    });
+}
+
+/// What the oldest sheet that closed folds into: its steps leave the list, and `into`, if any,
+/// is the one step they become.
+fn fold_closed(s: &mut Phantom, into: Option<(AppSetting, Was)>) {
+    let session = s.changes.closing.pop_front().flatten();
+    fold(&mut s.changes, session, into);
+}
+
+fn fold(c: &mut Changes, session: Option<Session>, into: Option<(AppSetting, Was)>) {
+    let ids = session.map(Session::into_ids).unwrap_or_default();
     let into = into.map(|(of, was)| {
         let id = c.id();
         c.was.insert(id, was);

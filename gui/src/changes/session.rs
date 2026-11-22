@@ -11,7 +11,7 @@
 //!   Cancel gives none: it puts everything back as it was when the sheet opened.
 //!
 //! What a sheet makes of a step, and what it folds into, is its own: it says which settings are
-//! its ([`Sheet::owns`]) and what the folded step undoes to ([`super::Changes::sheet_closed`]).
+//! its ([`Sheet::owns`]) and what the folded step undoes to ([`super::sheet_closing`]).
 
 use super::machine::{self, AppSetting};
 

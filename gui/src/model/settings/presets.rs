@@ -161,11 +161,15 @@ pub fn cancel(s: &mut SettingsWindow) {
     let Some(edit) = sheet.edit.take() else { return };
     sheet.had_focus.retain(|row| !matches!(row, Row::Colour(..)));
     sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
-    if Presets::of(&s.looks.borrow(), &s.saved) != edit.opened {
-        super::restore(s, edit.opened);
-    }
-    s.main.post(|s, _| crate::changes::sheet_closed(s, None));
     preview(s);
+    // Put back once a ⌘Z pressed just before has taken its step, which would otherwise come last.
+    let opened = edit.opened;
+    super::end_sheet(s, move |s| {
+        if Presets::of(&s.looks.borrow(), &s.saved) != opened {
+            super::restore(s, opened);
+        }
+        None
+    });
 }
 
 /// The sheet closes (Done, ⌘W, the window closing): the field being edited in it applied first,
@@ -192,10 +196,12 @@ pub fn close(s: &mut SettingsWindow) {
     if let Some(sheet) = &mut s.sheet {
         sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
     }
-    let into = (Presets::of(&s.looks.borrow(), &s.saved) != edit.opened)
-        .then(|| (crate::changes::machine::AppSetting::Edit, Was::Edit(edit.opened, edit.target)));
-    s.main.post(move |s, _| crate::changes::sheet_closed(s, into));
     preview(s);
+    // What's left of the visit once a ⌘Z pressed just before has taken its step.
+    super::end_sheet(s, move |s| {
+        (Presets::of(&s.looks.borrow(), &s.saved) != edit.opened)
+            .then(|| (crate::changes::machine::AppSetting::Edit, Was::Edit(edit.opened, edit.target)))
+    });
 }
 
 /// Both windows show the saved preset the sheet's open on, or, without one (closed, or on the
