@@ -30,6 +30,7 @@ impl Ui {
         let k = &self.k;
         let c = &k.c;
         let close = on_close.clone();
+        let close_on_return = on_close.clone();
         let dismiss = IconButton::new(k.glyph.close)
             .variant(IconButtonVariant::Ghost)
             .control_size(ControlSize::Regular)
@@ -37,6 +38,14 @@ impl Ui {
             .build(k)
             .key("close")
             .on_press(close)
+            // With the focus, Return presses it, rather than the dialog's own default.
+            .on_key(move |s: &mut S, ev: &KeyEvent, _: &mut Tx| {
+                let enter = matches!(ev.key, rune::Key::Enter) && ev.mods == rune::Mods::default();
+                if enter {
+                    close_on_return(s);
+                }
+                enter
+            })
             .size(20.0, 20.0)
             .mt(-2.0)
             .mr(-2.0);

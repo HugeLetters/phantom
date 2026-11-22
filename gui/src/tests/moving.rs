@@ -503,6 +503,33 @@ fn return_presses_the_focused_button_not_use_existing() {
     assert!(moves_sent(&probe).is_empty(), "Cancel: nothing is moved, nothing Trashed");
 }
 
+/// The dialog opens with Use existing focused; Tab round to the × and Return cancels: nothing is
+/// answered, nothing Trashed.
+#[test]
+fn return_on_the_close_button_cancels() {
+    let service = three().holding("/Films");
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    let at =
+        |rt: &Runtime<Phantom>, key: &str| rt.elements().iter().any(|e| e.focused && !e.exiting && e.path.contains(&format!("/{key}")));
+    assert!(at(&rt, "clash-use-existing/"), "opens on Use existing");
+    for _ in 0..8 {
+        if at(&rt, "header/close") {
+            break;
+        }
+        rt.key(rune::KeyEvent { key: Key::Tab, mods: rune::Mods::default() });
+        settle(&mut rt);
+    }
+    assert!(at(&rt, "header/close"), "× is focused");
+    enter(&mut rt);
+    wait(&mut rt, 0.2);
+    assert!(rt.state.clash.is_none(), "the dialog closes");
+    assert!(moves_sent(&probe).is_empty(), "nothing answered");
+}
+
 /// A folder of Move to ▸ is the one that was clicked, though the default folder changed since the
 /// menu was drawn (a settings snapshot with the menu open): the torrents go there.
 #[test]

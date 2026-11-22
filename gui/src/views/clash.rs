@@ -64,7 +64,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
     };
     let rename_button = |primary: bool| {
         let button = ui.button("clash-rename", rename_to).on_press(rename);
-        let button = if primary { button.primary() } else { button };
+        let button = if primary { button.primary().first_focus(true) } else { button };
         explained("clash-rename", presses(button.build(), |s, _| rename(s)), rename_help)
     };
     let room = window.is_none_or(|(_, h)| h >= ROOMY);
@@ -91,7 +91,8 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
                 .button("clash-use-existing", use_existing)
                 .primary()
                 .on_press(|s: &mut Phantom| choose(s, Some(proto::Clash::UseExisting)));
-            let use_existing = presses(use_existing.build(), |s, _| choose(s, Some(proto::Clash::UseExisting)));
+            // The dialog opens with the focus here, so Return on open presses it.
+            let use_existing = presses(use_existing.first_focus(true).build(), |s, _| choose(s, Some(proto::Clash::UseExisting)));
             let use_existing = explained("clash-use-existing", use_existing, use_help);
             let body = col().key("clash-body").w_full().child(paths);
             let foot = foot(vec![cancel(), rename_button(false), replace, use_existing]);
