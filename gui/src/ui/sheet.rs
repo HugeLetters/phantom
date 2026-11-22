@@ -414,24 +414,29 @@ impl Ui {
         row().key(key.to_owned()).w_full().equal_columns(2).child(half(left, pages[0], "left", 0)).child(half(right, pages[1], "right", 1))
     }
 
-    /// The editor's rows in one card, split down the middle ([`Ui::halves_row`]): a hairline
-    /// between each, in each half's look.
+    /// The editor's rows in one card, split down the middle ([`Ui::halves_row`]): between each, one
+    /// hairline across both halves (keyed `halves-rule-<n>`, its line `…-line`), the two looks'
+    /// strong borders mixed half and half: a neutral mid tone, it reads on a light page and a dark
+    /// one. The two halves' pages run under it, so the seam is unbroken.
     pub fn halves_card(&self, lines: Vec<El>, looks: [&Ui; 2]) -> El {
         let k = &self.k;
         let mut card = col().key("halves-card").w_full().radius(k.radius.md).clip_rounded(k.radius.md).border(1.0, k.c.border_weak);
-        let rule = |ui: &Ui, cell: usize| {
-            row()
-                .grow(1.0)
-                .h(1.0)
-                .fill(ui.tokens().c.bg_base)
-                .px(8.0)
-                .grid_cell(cell)
-                .child(el().w_full().h(1.0).fill(ui.tokens().c.border_weak).a11y_hidden())
-        };
+        let [light, dark] = looks.map(|l| l.tokens().c.clone());
+        let ink = light.border_base.mix(dark.border_base, 0.5);
+        let page = |c: rune::Color, cell: usize| el().grow(1.0).h(1.0).fill(c).grid_cell(cell).a11y_hidden();
         for (i, line) in lines.into_iter().enumerate() {
             if i > 0 {
-                let [light, dark] = looks;
-                card = card.child(row().w_full().h(1.0).equal_columns(2).child(rule(light, 0)).child(rule(dark, 1)));
+                let line_over = el().key(format!("halves-rule-{i}-line")).w_full().h(1.0).fill(ink).a11y_hidden();
+                card = card.child(
+                    row()
+                        .key(format!("halves-rule-{i}"))
+                        .w_full()
+                        .h(1.0)
+                        .equal_columns(2)
+                        .child(page(light.bg_base, 0))
+                        .child(page(dark.bg_base, 1))
+                        .child(row().absolute(0.0, 0.0).w_full().h(1.0).px(8.0).child(line_over)),
+                );
             }
             card = card.child(line);
         }
@@ -522,7 +527,7 @@ impl Ui {
             Some(image) => picture.pixels(image.pixels()),
             None => picture.fill(k.c.layer_04),
         };
-        let remove = remove.map(|remove| el().absolute(TILE_W - 30.0, 2.0).group_opacity(0.0, 1.0).child(remove));
+        let remove = remove.map(|remove| el().absolute(TILE_W - 30.0, 0.0).group_opacity(0.0, 1.0).child(remove));
         col()
             .key(key)
             .role("group")
@@ -530,15 +535,14 @@ impl Ui {
             .help(help.to_owned())
             .w(TILE_W)
             .h(TILE_H)
-            .padding(6.0)
-            .gap(4.0)
+            .padding(TILE_PAD)
+            .gap(TILE_GAP)
             .items_center()
             .radius(k.radius.md)
             .fill(k.alpha(k.c.text_base, 0.04))
             .hover_group()
             .child(picture)
-            .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden())
-            .child(el().grow(1.0))
+            .child(self.tile_name(label))
             .child(row().gap(CHIP_GAP).children(chips))
             .children(remove)
     }
@@ -566,9 +570,17 @@ impl Ui {
         self.look_chip(key, chip, false, Some(Box::new(on_press)))
     }
 
+    /// A tile's name: one line, shortened in the middle to fit it (the whole of it is the tile's hover).
+    fn tile_name(&self, label: &str) -> El {
+        let k = &self.k;
+        let room = TILE_W - 2.0 * TILE_PAD;
+        let shown = crate::views::details::shorten_middle(label, |t| rune::text::measure(t, &[], k.ty.text_xsmall, None).0 <= room);
+        text(shown).font(k.ty.text_xsmall).color(k.c.text_muted).h(NAME_H).a11y_hidden()
+    }
+
     /// A designed pair's tile in the App icon's sheet: its two icons split along the diagonal from
     /// bottom-left to top-right (the light one top-left, the dark one bottom-right, as ◐ is), its
-    /// name under them, its hover `help`; a press calls `on_press`, outlined while it's in use
+    /// name under them (no chips, so it's shorter than an icon's tile), its hover `help`; a press calls `on_press`, outlined while it's in use
     /// (keyed `in-use`), when a press does nothing.
     pub fn pair_tile<S: 'static>(
         &self,
@@ -619,16 +631,16 @@ impl Ui {
             .label(label.to_owned())
             .help(help.to_owned())
             .w(TILE_W)
-            .h(TILE_H)
-            .padding(6.0)
-            .gap(4.0)
+            .h(PAIR_H)
+            .padding(TILE_PAD)
+            .gap(TILE_GAP)
             .items_center()
             .radius(k.radius.md)
             .fill(k.alpha(k.c.text_base, 0.04))
             .focusable(true)
             .focus_ring(2.0, 1.0, k.c.border_focus)
             .child(both)
-            .child(text(label.to_owned()).font(k.ty.text_xsmall).color(k.c.text_muted).wrap().max_lines(2).a11y_hidden())
+            .child(self.tile_name(label))
             .children(ring);
         if !in_use {
             tile = tile.hover(k.c.hover).press(pressed_over(k.c.hover, k.c.pressed)).on_press(on_press);
@@ -645,8 +657,8 @@ impl Ui {
             .label("Add image…".to_owned())
             .w(TILE_W)
             .h(TILE_H)
-            .padding(6.0)
-            .gap(6.0)
+            .padding(TILE_PAD)
+            .gap(TILE_GAP)
             .center()
             .radius(k.radius.md)
             .border(1.0, k.c.border_strong)
@@ -670,7 +682,7 @@ impl Ui {
     pub fn icon_preview(&self, sides: &[(Option<&rune::Image>, Option<bool>)], faces: [(rune::Color, rune::Color); 2]) -> El {
         let k = &self.k;
         let drawings = sides.iter().map(|(image, half)| {
-            let tile = el().size(24.0, 24.0).radius(24.0 * 0.22);
+            let tile = el().key("icon").absolute(0.0, 0.0).size(PREVIEW, PREVIEW).radius(PREVIEW * 0.22);
             let tile = match image {
                 Some(image) => tile.pixels(image.pixels()),
                 None => tile.fill(k.c.layer_04),
@@ -680,14 +692,23 @@ impl Ui {
                 Some(true) => "dark",
                 Some(false) => "light",
             };
+            // The mark overlaps the icon's bottom-right corner, so the preview is as tall as the icon.
             let mark = half.map(|dark| {
                 let (page, ink) = faces[usize::from(dark)];
                 let glyph = icon(self.icon(if dark { Icon::Dark } else { Icon::Light }), 9.0).key("glyph").color(ink);
-                el().key("mark").size(14.0, 14.0).radius(k.radius.sm).fill(page).border(1.0, k.c.border_base).center().child(glyph)
+                el().key("mark")
+                    .absolute(PREVIEW - 8.0, PREVIEW - 8.0)
+                    .size(14.0, 14.0)
+                    .radius(k.radius.sm)
+                    .fill(page)
+                    .border(1.0, k.c.border_base)
+                    .center()
+                    .child(glyph)
             });
-            col().key(format!("app-icon-preview-{which}")).gap(2.0).items_center().child(tile).children(mark)
+            let width = if half.is_some() { PREVIEW + 6.0 } else { PREVIEW };
+            el().key(format!("app-icon-preview-{which}")).size(width, PREVIEW).child(tile).children(mark)
         });
-        row().gap(6.0).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
+        row().gap(4.0).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
     }
 
     /// Tiles in rows, as many to a row as fit.
@@ -703,17 +724,27 @@ pub enum Halves {
     Split(Option<El>, Option<El>),
 }
 
+/// How big an App icon row's preview is.
+const PREVIEW: f32 = 24.0;
+
 /// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
 const HALF_LABEL: f32 = 64.0;
 const HALF_TOGGLE: f32 = 46.0;
 
-/// How big an App icon's tile is, every one alike, designed pairs' too, and its drawing.
-const TILE_W: f32 = 112.0;
-const TILE_H: f32 = 132.0;
-const PICTURE: f32 = 48.0;
+/// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's
+/// (and "+ Add image…") as tall as its drawing, name and chips need; a designed pair's, with no
+/// chips, as tall as its drawing and name need. The padding, and the gap between the parts.
+const TILE_W: f32 = 96.0;
+const PICTURE: f32 = 40.0;
+const TILE_PAD: f32 = 4.0;
+const TILE_GAP: f32 = 3.0;
+const NAME_H: f32 = 13.0;
+const PAIR_H: f32 = 2.0 * TILE_PAD + PICTURE + TILE_GAP + NAME_H;
+const TILE_H: f32 = PAIR_H + TILE_GAP + CHIP;
 
-/// The gap between an App icon's chips: their in-use outlines, 3 pt wide and 2 pt out, never meet.
-const CHIP_GAP: f32 = 2.0 * (IN_USE + IN_USE_GAP) + 2.0;
+/// The gap between an App icon's chips: their in-use outlines, 3 pt wide and 2 pt out, never meet;
+/// three chips and two gaps fill a tile's width less its padding.
+const CHIP_GAP: f32 = (TILE_W - 2.0 * TILE_PAD - 3.0 * CHIP) / 2.0;
 
 /// The kinds of image file the App icon's sheet takes as an icon.
 pub const IMAGES: [&str; 6] = ["png", "jpg", "jpeg", "icns", "tiff", "heic"];

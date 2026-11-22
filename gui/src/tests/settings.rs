@@ -3465,7 +3465,7 @@ fn seven_pairs() -> Manifest {
     Manifest::parse(&json, |_| Ok(bytes.clone())).expect("a manifest")
 }
 
-/// The App icon sheet's Pairs are tiles of the Icons' size on the Icons' grid: pair `i` has the
+/// The App icon sheet's Pairs are tiles of the Icons' width, but shorter (no chips), on the Icons' grid: pair `i` has the
 /// column of icon `i`, and a seventh wraps to another row, as the number of pairs isn't fixed
 /// (#87).
 #[test]
@@ -3481,7 +3481,8 @@ fn pair_tiles_are_on_the_icons_grid() {
     assert!(columns >= 2 && columns < 7, "the icons wrap too, in {columns} columns");
     let pairs: Vec<[f32; 4]> = (0..7).map(|i| rect(&format!("icon-pair-{i}"))).collect();
     for (i, pair) in pairs.iter().enumerate() {
-        assert_eq!(pair[2..], icons[0][2..], "pair {i} is the size of an icon's tile");
+        assert_eq!(pair[2], icons[0][2], "pair {i} is as wide as an icon's tile");
+        assert!(pair[3] < icons[0][3], "pair {i} is shorter: no chips, no empty room for them");
         assert_eq!(pair[0], icons[i % columns][0], "pair {i} in the column of icon {}", i % columns);
         assert_eq!(pair[1], pairs[i - i % columns][1], "pair {i} on its row");
     }
@@ -3511,4 +3512,94 @@ fn a_pair_in_use_marks_both_chips_below() {
         got.sort();
         assert_eq!(got, want, "pair {i} in use: its two chips");
     }
+}
+
+/// Same theme, a hairline between the editor's rows is one line across both halves, in one colour,
+/// whether the rows are joined or split (#87).
+#[test]
+fn a_rows_hairline_runs_unbroken_across_both_halves() {
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+    for split in [false, true] {
+        if split {
+            press(&mut d, "edit-theme-split");
+        }
+        let card = rect(&d, "halves-card");
+        let seam = rect(&d, "edit-tone-right")[0];
+        let mut colours = Vec::new();
+        for i in 1..=2 {
+            let key = format!("halves-rule-{i}-line");
+            let lines: Vec<_> = d.settings.elements().into_iter().filter(|e| e.key.as_deref() == Some(&key) && !e.exiting).collect();
+            assert_eq!(lines.len(), 1, "rule {i}: one hairline, not one per half");
+            let line = lines[0].rect;
+            assert!(line[0] < seam - 8.0 && line[0] + line[2] > seam + 8.0, "rule {i} crosses the seam: {line:?}, seam {seam}");
+            assert!(line[0] - card[0] <= 12.0 && (card[0] + card[2]) - (line[0] + line[2]) <= 12.0, "and runs the card's width: {line:?}");
+            colours.push(lines[0].fill);
+        }
+        assert_eq!(colours[0], colours[1], "one colour for every rule");
+    }
+}
+
+/// The tab's App icon row: the previews (an icon, its ☀ or ☾ mark at its corner) are centred on
+/// Edit…'s line, and the row stays as tall as the others (#87).
+#[test]
+fn the_app_icon_rows_previews_are_centred_with_edit() {
+    let mut d = appearance_tab();
+    let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+    let middle = |r: [f32; 4]| r[1] + r[3] / 2.0;
+    let other = rect(&d, "look_preset")[3];
+    for pair in [false, true] {
+        if pair {
+            press(&mut d, "app-icon-edit");
+            press(&mut d, "icon-pair-0");
+            press(&mut d, "icons-done");
+        }
+        let edit = rect(&d, "app-icon-edit");
+        let previews: Vec<[f32; 4]> = ["both", "light", "dark"]
+            .iter()
+            .filter_map(|h| super::generated::rect_of(&d.settings, &format!("app-icon-preview-{h}")))
+            .collect();
+        assert_eq!(previews.len(), if pair { 2 } else { 1 });
+        for p in previews {
+            assert!((middle(p) - middle(edit)).abs() <= 0.5, "pair {pair}: preview {p:?} centred on Edit… {edit:?}");
+            assert!(p[3] <= other, "pair {pair}: no taller than another row ({other})");
+        }
+        for h in ["both", "light", "dark"] {
+            if let Some(icon) = super::generated::rect_of(&d.settings, &format!("app-icon-preview-{h}/icon")) {
+                assert!((middle(icon) - middle(edit)).abs() <= 0.5, "pair {pair}: the {h} icon {icon:?} centred on Edit… {edit:?}");
+            }
+        }
+    }
+}
+
+/// What the App icon row's caption says: a designed pair's name; an icon's, when both halves have
+/// it; else both, the Light's first, each shortened in the middle when long (#87).
+#[test]
+fn the_app_icon_rows_caption_names_what_the_halves_show() {
+    let caption = |choice: Option<Icons>| {
+        let mut d = appearance_tab();
+        d.settings.state.app_icon = AppIcon::new(Some(manifest()), choice, Looks::default().app_icons(), |_| {});
+        d.settle();
+        texts_in(&d.settings, "app_icon-note").concat()
+    };
+    let pair = |dark: &str, light: &str| Some(Icons::Pair { dark: dark.into(), light: light.into() });
+    assert_eq!(caption(None), "Follow theme");
+    assert_eq!(caption(pair("memento-mori-dark-hour", "memento-mori")), "Memento Mori", "a designed pair: its name");
+    assert_eq!(caption(Some(Icons::One { icon: "phantom".into() })), "Phantom", "one icon");
+    assert_eq!(caption(pair("phantom", "phantom")), "Phantom", "the same icon in both halves");
+    assert_eq!(caption(pair(FOLLOW, FOLLOW)), "Follow theme", "Follow theme is a name like any");
+    assert_eq!(caption(pair("phantom", "full-moon")), "Full Moon · Phantom", "unrelated: Light first");
+    assert_eq!(caption(pair(FOLLOW, "full-moon")), "Full Moon · Follow theme");
+    let bytes = std::fs::read(manifest_dir().join("full-moon.icns")).expect("a shipped icon");
+    let json = r#"{"default": "a", "icons": [{"id": "a", "name": "An icon with a name far too long to show", "file": "a.icns"},
+        {"id": "b", "name": "Full Moon", "file": "b.icns"}], "pairs": []}"#;
+    let long = Manifest::parse(json, |_| Ok(bytes.clone())).expect("a manifest");
+    let mut d = appearance_tab();
+    d.settings.state.app_icon = AppIcon::new(Some(long), pair("a", "b"), Looks::default().app_icons(), |_| {});
+    d.settle();
+    let both = texts_in(&d.settings, "app_icon-note").concat();
+    let (light, dark) = both.split_once(" · ").expect("both names");
+    assert_eq!(light, "Full Moon");
+    assert!(dark.contains('…') && dark.chars().count() <= 24, "a long one shortened in the middle: {dark}");
 }

@@ -1204,8 +1204,12 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
     looks_changed(s);
 }
 
-/// What the App icon `choice` is called: "Follow theme", a pair's or an icon's name, or a custom
-/// pair's two (a half following the theme, "Follow theme").
+/// How many characters of an icon's name [`icon_name`] shows when it names two.
+const NAME_CHARS: usize = 24;
+
+/// What the App icon `choice` is called: a designed pair's name; an icon's, when both halves show
+/// it; else both, "Light · Dark" (the Light's first), each shortened in the middle when long.
+/// "Follow theme" is a name like any other.
 pub fn icon_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
     let manifest = icon.manifest.as_ref();
     let name = |id: &str| match id {
@@ -1216,7 +1220,11 @@ pub fn icon_name(icon: &AppIcon, choice: Option<&Icons>) -> String {
         None => "Follow theme".into(),
         Some(icons) if let Some(pair) = manifest.and_then(|m| m.pairs().iter().find(|p| p.icons() == *icons)) => pair.name.clone(),
         Some(Icons::One { icon }) => name(icon),
-        Some(Icons::Pair { dark, light }) => format!("{} / {}", name(dark), name(light)),
+        Some(Icons::Pair { dark, light }) if dark == light => name(light),
+        Some(Icons::Pair { dark, light }) => {
+            let short = |id: &str| crate::views::details::shorten_middle(&name(id), |t| t.chars().count() <= NAME_CHARS);
+            format!("{} · {}", short(light), short(dark))
+        }
     }
 }
 

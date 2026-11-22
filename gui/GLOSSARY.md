@@ -78,7 +78,7 @@ half's and ☾ under the Dark half's.
 
 **Designed pair**:
 A dark icon and a light icon made to go together, with a short name of its own ("Memento Mori"):
-its tile in the App icon's sheet's Pairs (as big as an icon's tile, on the same grid), its two icons
+its tile in the App icon's sheet's Pairs (as wide as an icon's tile but shorter, with no chips, on the same grid), its two icons
 split on the diagonal, picks both, and is in use while both halves are its icons, when the ☀ chip
 under its Light icon and the ☾ chip under its Dark one are in use too; any two icons can also be picked one per half.
 _Avoid_: icon set, icon variant

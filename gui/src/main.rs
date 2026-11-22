@@ -1081,6 +1081,11 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 s.app_icon.choice = s.app_icon.manifest.as_ref().and_then(|m| m.pairs().get(1)).map(|p| p.icons());
             }),
+            // Two icons that aren't a designed pair: the row's caption names both.
+            ("settings-icon-row-mixed", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                s.app_icon.choice = Some(platform::app_icon::Icons::Pair { dark: "phantom".into(), light: "full-moon".into() });
+            }),
         ],
         ..AppSpec::new("Settings", SETTINGS_SIZE, SettingsWindow::detached, views::settings::view)
     }
