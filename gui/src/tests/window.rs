@@ -1055,6 +1055,133 @@ fn a_window_resize_goes_to_name_unless_it_was_sized() {
     assert!(last <= end + 0.5);
 }
 
+/// Whether each grip lies over its header cell, and the columns end inside the list.
+fn assert_grips_over_cells(rt: &Runtime<Phantom>, at: &str) {
+    for (c, cell) in header(rt) {
+        let grip = rect(rt, &format!("grips/{}", c.id()));
+        assert!((grip[0] - cell[0]).abs() < 0.5 && (grip[2] - cell[2]).abs() < 0.5, "{at}: {c:?}: grip {grip:?} over its cell {cell:?}");
+    }
+    let (last, end) = ends(rt);
+    assert!(last <= end + 0.5, "{at}: the columns reach {last}, the list {end}");
+}
+
+/// Every edge, in a narrow and a wide window, wider and narrower: the edge is under the pointer
+/// until it reaches its bounds or the list's end, where it stops (the column never drags itself
+/// out of the list); the grips stay over the cells at every step, and Escape puts it all back.
+#[test]
+fn every_edge_follows_the_pointer_until_it_stops_and_escape_puts_it_back() {
+    for c in [Column::Name, Column::Progress, Column::Size, Column::Down, Column::Up, Column::Peers, Column::Eta] {
+        for (w, sign) in [(700.0, 1.0), (700.0, -1.0), (1400.0, 1.0), (1400.0, -1.0)] {
+            let mut rt = app(listed());
+            resize(&mut rt, w, 540.0);
+            if !shown(&rt).contains(&c) {
+                continue;
+            }
+            let start = right_of(&rt, c);
+            let (x, y) = rt.find(&format!("grips/{}/resize", c.id())).unwrap();
+            rt.pointer_down(x, y);
+            let mut stopped = false;
+            for step in 1..=40 {
+                let dx = sign * 7.0 * step as f32;
+                rt.pointer_move(x + dx, y);
+                rt.frame(FRAME);
+                let at = format!("{c:?} at {w}, {dx}");
+                assert!(shown(&rt).contains(&c), "{at}: it dragged itself out");
+                let under = (right_of(&rt, c) - (start + dx)).abs() < 0.5;
+                assert!(!(stopped && under), "{at}: under the pointer again after it stopped");
+                stopped |= !under;
+                assert_grips_over_cells(&rt, &at);
+            }
+            rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+            rt.pointer_up(x, y);
+            settle(&mut rt);
+            assert!((right_of(&rt, c) - start).abs() < 0.5, "{c:?} at {w}: Escape puts the edge back");
+            assert_eq!(rt.state.prefs.width(Column::Name), None, "{c:?} at {w}: and Name to taking the rest");
+        }
+    }
+}
+
+/// A drag that comes back to where it began leaves the edge there, not where it last moved from.
+#[test]
+fn a_drag_back_to_where_it_began_puts_the_edge_back() {
+    let mut rt = app(listed());
+    resize(&mut rt, 1400.0, 540.0);
+    let own = width_of(&rt, Column::Size);
+    let (x, y) = rt.find("grips/size/resize").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 20.0, y);
+    rt.frame(FRAME);
+    rt.pointer_move(x, y);
+    rt.frame(FRAME);
+    assert!((width_of(&rt, Column::Size) - own).abs() < 0.5, "back under the pointer: {own} then {}", width_of(&rt, Column::Size));
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert!((width_of(&rt, Column::Size) - own).abs() < 0.5, "and kept there");
+}
+
+/// `gui.json` widths far wider or narrower than any list: the first column is cut to the list,
+/// the rest hide, the grips lie over the cells, and its edge still drags.
+#[test]
+fn a_kept_width_wider_than_the_window_is_cut_to_it() {
+    let progress_first = ColumnOrder::try_from(vec![
+        Column::Progress,
+        Column::Name,
+        Column::Status,
+        Column::Size,
+        Column::Down,
+        Column::Up,
+        Column::Peers,
+        Column::Eta,
+    ])
+    .unwrap();
+    for order in [ColumnOrder::default(), progress_first] {
+        let widths = ColumnWidths::try_from(
+            [(Column::Name, 1.0e30), (Column::Size, 1.0e-30)].into_iter().collect::<std::collections::BTreeMap<_, _>>(),
+        )
+        .unwrap();
+        let mut rt = app(listed());
+        rt.state.prefs = WindowPrefs::unkept(Kept { order: order.clone(), widths, ..Kept::default() });
+        resize(&mut rt, 1000.0, 540.0);
+        assert_grips_over_cells(&rt, &format!("{order:?}"));
+        let first = shown(&rt)[0];
+        let edge = right_of(&rt, first);
+        // Name, cut to the list, can only narrow; Progress, at its own width, widens.
+        let dx = if first == Column::Name { -50.0 } else { 50.0 };
+        resize_column(&mut rt, first, dx);
+        assert!((right_of(&rt, first) - (edge + dx)).abs() < 0.5, "{first:?}'s edge drags");
+        assert_grips_over_cells(&rt, &format!("{order:?}, dragged"));
+    }
+}
+
+/// Name the only column wanted, sized or not: its edge follows the pointer and the grips stay
+/// over it.
+#[test]
+fn names_edge_drags_when_it_is_the_only_column() {
+    for sized in [false, true] {
+        let widths: std::collections::BTreeMap<Column, f32> =
+            if sized { [(Column::Name, 500.0)].into_iter().collect() } else { Default::default() };
+        let widths = ColumnWidths::try_from(widths).unwrap();
+        let hidden = Column::ALL.iter().copied().filter(|c| *c != Column::Name).collect();
+        let mut rt = app(listed());
+        rt.state.prefs = WindowPrefs::unkept(Kept { widths, hidden, ..Kept::default() });
+        resize(&mut rt, 1000.0, 540.0);
+        assert_eq!(shown(&rt), [Column::Name]);
+        let start = right_of(&rt, Column::Name);
+        let (x, y) = rt.find("grips/name/resize").unwrap();
+        rt.pointer_down(x, y);
+        for step in 1..=20 {
+            let dx = -10.0 * step as f32;
+            rt.pointer_move(x + dx, y);
+            rt.frame(FRAME);
+            assert!((right_of(&rt, Column::Name) - (start + dx)).abs() < 0.5, "sized {sized}, {dx}: under the pointer");
+            assert_grips_over_cells(&rt, &format!("sized {sized}, {dx}"));
+        }
+        rt.pointer_up(x - 200.0, y);
+        settle(&mut rt);
+        assert_grips_over_cells(&rt, &format!("sized {sized}, let go"));
+    }
+}
+
 /// A window too narrow for every column: Name dragged narrower gives the room back, so a hidden
 /// column comes back once it fits.
 #[test]
@@ -1105,7 +1232,7 @@ fn a_double_click_on_names_edge_puts_it_back() {
     resize(&mut rt, 800.0, 540.0);
     let before = shown(&rt);
     resize_column(&mut rt, Column::Name, -150.0);
-    assert!(shown(&rt).len() > before.len(), "Name's least is now smaller");
+    assert!(shown(&rt).len() > before.len(), "a narrower Name brings columns back");
     double_click_at(&mut rt, "grips/name/resize");
     assert_eq!(shown(&rt), before, "back to taking the rest");
     assert!(rt.state.prefs.width(Column::Name).is_none());
@@ -1150,20 +1277,23 @@ fn dragged_widths_are_kept_and_restored() {
     assert_eq!(file::read_at::<ColumnWidths>(&kept.path, COLUMN_WIDTHS), None, "nothing kept before");
     resize_column(&mut rt, Column::Size, 50.0);
     resize_column(&mut rt, Column::Name, -30.0);
-    let (size, name) = (kept.read().widths.clone(), width_of(&rt, Column::Size));
-    assert!(size != ColumnWidths::default(), "kept");
+    let (kept_widths, size) = (kept.read().widths.clone(), width_of(&rt, Column::Size));
+    assert!(kept_widths != ColumnWidths::default(), "kept");
 
     let mut again = app(listed());
     again.state.prefs = kept.prefs(kept.read());
     resize(&mut again, 1400.0, 540.0);
-    assert!((width_of(&again, Column::Size) - name).abs() < 0.5, "Size as it was");
-    assert_eq!(again.state.prefs.width(Column::Name), rt.state.prefs.width(Column::Name), "Name's least too");
+    assert!((width_of(&again, Column::Size) - size).abs() < 0.5, "Size as it was");
+    assert_eq!(again.state.prefs.width(Column::Name), rt.state.prefs.width(Column::Name), "Name's width too");
 
     for bad in [
         serde_json::json!({"size": -3.0}),
         serde_json::json!({"nonsense": 90.0}),
         serde_json::json!({"status": 90.0}),
         serde_json::json!("wide"),
+        // NaN is written as null; 1e39 is no f32 (infinite).
+        serde_json::json!({"size": null}),
+        serde_json::json!({"size": 1e39}),
     ] {
         file::keep_at(&kept.path, COLUMN_WIDTHS, Some(&bad)).unwrap();
         assert_eq!(file::read_at::<ColumnWidths>(&kept.path, COLUMN_WIDTHS), None, "{bad} ignored");

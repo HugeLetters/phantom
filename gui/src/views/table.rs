@@ -228,7 +228,7 @@ fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
             cell = cell.child(resize_handle(c, drawn, width - (start - layout::TOGGLE), bounds, name));
         }
         grips = grips.child(cell);
-        start += spans.iter().find(|(s, _)| *s == c).map_or(0.0, |(_, w)| *w);
+        start += drawn;
     }
     grips
 }
@@ -249,7 +249,10 @@ fn resize_handle(c: Column, drawn: f32, room: f32, (least, most): (f32, f32), na
         .on_drag(move |s: &mut Phantom, d: &mut Drag, _: &mut Tx| match d.phase {
             Phase::Down => d.data = drawn,
             _ if d.cancelled() => s.prefs.end_resize(true),
-            Phase::Move if d.dx != 0.0 => s.prefs.resize_to(c, (d.data + d.dx).min(room).max(least).min(most.max(least)), name),
+            // Once it moved, every move counts, back to where it began too.
+            Phase::Move if d.dx != 0.0 || s.prefs.resizing.is_some_and(|r| r.column == c) => {
+                s.prefs.resize_to(c, (d.data + d.dx).min(room).max(least).min(most.max(least)), name)
+            }
             Phase::Move => {}
             Phase::Up => s.prefs.end_resize(false),
         })
