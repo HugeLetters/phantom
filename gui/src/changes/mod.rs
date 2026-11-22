@@ -7,7 +7,7 @@
 //! it was before, kept here in memory; a service setting's it asks the service to undo, which keeps
 //! its own changes and never the app's; a torrent action's it asks the service to undo, which keeps
 //! its undo stack. A setting's undo opens Settings at its tab, focuses its control, and tells what it
-//! went back to ("Port is back to 6881"); a refused one says "Couldn't be undone: <why>" and is gone.
+//! went back to ("Port is back to 6881"); a refused one says "Couldn't undo the change" and is gone.
 //! A torrent action's undo brings it back in the list, behind Settings if it's open, and tells
 //! what came back. The list is the main window's; ⌘Z in Settings is posted to it, and what an undo
 //! shows in Settings is posted there ([`crate::windows`]). Edit ▸ Undo names the change it would take ([`menu_title`]). No redo; quitting
@@ -406,10 +406,16 @@ fn undid(s: &mut Phantom, asked: u64, undone: Result<SettingUndone, Failure>) {
             s.bar.tell(Notice::setting_undone(short, &undone, &now));
         }
         Err(failure) => {
+            // The setting it was of, as the list names it, before the entry goes.
+            let of = s.changes.state.list.iter().find_map(|c| match c {
+                machine::Change::Listed { seq, name, .. } if *seq == asked => Some(display::setting_short(name.key()).to_owned()),
+                _ => None,
+            });
             let _ = s.changes.decide(Event::Observed(Observed::Refused { asked }));
             // Nothing there: another client undid it first, and the list follows.
             if !matches!(failure, Failure::Refused(Refusal::NothingToUndo)) {
-                s.bar.tell(Notice::error(display::setting_not_undone()).with_text(display::sentence(&format!("{failure:#}"))));
+                let why = display::sentence(&format!("{failure:#}"));
+                s.bar.tell(Notice::error(display::undo_failed()).with_listing(display::Listing::new(&of.unwrap_or_default(), &why)));
             }
         }
     }

@@ -8,7 +8,7 @@ use rune_kit::{Placement, popover, scrim};
 use std::ops::Add;
 
 use super::{Icon, Tone, Ui};
-use crate::notice::Listing;
+use crate::notice::{Line, Listing};
 
 /// The popover's padding; part of it inside the scrolling body, so a focused control's ring isn't
 /// cut off at its edges; how far its edges fade while there's more under them; what its pager
@@ -75,19 +75,33 @@ impl Ui {
         text(line.into()).font(self.k.ty.text_small_medium).color(self.tone_color(tone)).wrap()
     }
 
-    /// What a notice's list says under its line: each name in normal text, its own reason muted
-    /// under it, then why, muted. A long one wraps, once the popover is as wide as it gets.
+    /// What a notice's list says under its line: each group (a name with its reason and paths) set
+    /// apart from the next. A name is normal text, a reason muted; a path or a link has a line of
+    /// its own, cut in the middle when it doesn't fit, whole on hover. A long name wraps, once the
+    /// popover is as wide as it gets.
     pub fn notice_listing(&self, listing: &Listing) -> El {
         let k = &self.k;
-        let line = |s: &str, color| text(s.to_owned()).font(k.ty.text_small).color(color).wrap();
-        // A name with a reason of its own is set apart from the next.
-        let apart = listing.names.iter().any(|(_, why)| !why.is_empty());
-        let names = listing
-            .names
-            .iter()
-            .map(|(name, why)| col().child(line(name, k.c.text_base)).children((!why.is_empty()).then(|| line(why, k.c.text_muted))));
-        let why = (!listing.why.is_empty()).then(|| line(&listing.why, k.c.text_muted).key("notice-why"));
-        col().key("notice-listing").gap(if apart { 6.0 } else { 2.0 }).children(names).children(why)
+        let line = |l: &Line| match l {
+            Line::Name(t) => text(t.clone()).font(k.ty.text_small).color(k.c.text_base).wrap(),
+            Line::Muted(t) => text(t.clone()).font(k.ty.text_small).color(k.c.text_muted).wrap(),
+            Line::Path(t) => self.listing_path(t),
+        };
+        let groups = listing.groups.iter().map(|group| col().w_full().gap(2.0).children(group.iter().map(line)));
+        col().key("notice-listing").w_full().gap(if listing.is_apart() { 6.0 } else { 2.0 }).children(groups)
+    }
+
+    /// A path or a link in a list: one line, cut in the middle, whole on hover.
+    fn listing_path(&self, path: &str) -> El {
+        let k = &self.k;
+        text(path.to_owned())
+            .key("notice-path")
+            .font(k.ty.text_small)
+            .color(k.c.text_base)
+            .truncate_middle()
+            .w_full()
+            .shrink()
+            .min_w(0.0)
+            .help_when_truncated(path.to_owned())
     }
 
     /// How wide the popover is for a notice: as its widest line needs, unwrapped, the mark, ×,
@@ -98,7 +112,11 @@ impl Ui {
         // Mark and its gap; × and its gap; the panel's padding and border.
         let (mark, cross, frame) = (16.0 + 8.0, 8.0 + 24.0, 2.0 * PANEL_PADDING + 2.0);
         let title = mark + advance(line, k.ty.text_small_medium) + cross;
-        let texts = listing.into_iter().flat_map(Listing::texts).map(|t| mark + advance(t, k.ty.text_small));
+        // A path is cut to fit, so it asks for no more than the popover's width.
+        let texts = listing.into_iter().flat_map(Listing::lines).map(|l| match l {
+            Line::Path(_) => MAX_WIDTH,
+            other => mark + advance(other.text(), k.ty.text_small),
+        });
         let row: f32 = buttons
             .iter()
             .map(|(label, hint)| {

@@ -150,6 +150,12 @@ static ERROR: Drawing = Drawing {
     body: r#"<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M2.586 16.726A2 2 0 0 1 2 15.312V8.688a2 2 0 0 1 .586-1.414l4.688-4.688A2 2 0 0 1 8.688 2h6.624a2 2 0 0 1 1.414.586l4.688 4.688A2 2 0 0 1 22 8.688v6.624a2 2 0 0 1-.586 1.414l-4.688 4.688a2 2 0 0 1-1.414.586H8.688a2 2 0 0 1-1.414-.586z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="m15 9-6 6M9 9l6 6"/>"#,
 };
 
+static INFO: Drawing = Drawing {
+    name: "phantom-info",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 16v-4M12 8h.01"/>"#,
+};
+
 static CLOSE: Drawing = Drawing {
     name: "phantom-close",
     view: 24.0,
@@ -193,6 +199,7 @@ pub fn icon(icon: Icon) -> &'static Drawing {
         Icon::Undo => &UNDO,
         Icon::Search => &SEARCH,
         Icon::Done => &DONE,
+        Icon::Info => &INFO,
         Icon::Error => &ERROR,
         Icon::Close => &CLOSE,
         Icon::Previous => &PREVIOUS,

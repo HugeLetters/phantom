@@ -97,19 +97,28 @@ The notice list is only for what has no such place.
 A notice's **line** (in the status bar) holds only words Phantom writes, short and known in advance:
 "Added the torrent", "Can't open the file", "Download limit undone" (a setting's name is Phantom's).
 Anything from outside goes in the **list** behind it: file paths, file names, torrent names (and
-names a user gave a Look Preset), errors from macOS or a peer, "back from X to Y", the settings a
-reset reset ("Settings reset"). The bar shows the newest notice's line in its own colour (a receipt
+names a user gave a Look Preset), errors from macOS or a peer, a change as "old → new" ("10 MB/s →
+2 MB/s"; the setting's name stays in the line), the settings a reset reset ("Settings reset"). A
+**path or a link** has a line of its own in the list, shortened in the middle (whole on hover),
+never inside a sentence; a failed magnet add shows the link's name (`dn=`) if it has one, else the
+link so. A **reason** is short words under the name that never repeat the line ("The new
+destination's disk is full", not "Not moved: …"), with the path under it ("Something is already
+at"). A notice tells what happened, never why Phantom works so: a Remove says no word of its files
+(a Delete says "Its files are in the Trash"). A notice whose path is on disk has **Reveal in
+Finder** (the torrent list kept aside, a part not saved, files a refused Delete's undo left in
+place); a failed Open of a file that isn't there has **Show folder** while its folder is. The bar shows the newest notice's line in its own colour (a receipt
 is never amber), the Undo of the newest action's notice (the small button the connection's are), then
 the **pill**, an oval with the count of every notice tinted by the worst severity among them (a
 count, not a place: no "1/7"; it shows from two notices), then ›. A click
 on the bar always opens the list, at the newest, even for a lone notice; only × (or Dismiss all)
 dismisses. The list shows one notice at a time: with several, a top row (‹ 2 of 3 › and Dismiss
-all) over a hairline, with none for a lone notice; then the notice, its mark (✓, ⚠, ⛔), its line
+all) over a hairline, with none for a lone notice; then the notice, its mark (✓ done, ⓘ nothing was done ("Already in the list"), ⚠, ⛔), its line
 and × on its own line, the names, why, and its buttons, the first the default. Its Undo is in the
 bar too, and "Undo ⌘Z" in the list.
 The connection's words beside it are short and fixed too ("Connecting…", "Service unavailable",
-"Phantom was updated"), with no ›; while the connection is wrong a button follows them (Show log;
-Restart, which starts the app again once this one has quit).
+"Phantom was updated"), with no ›, red while the dot is, as an error notice's line is; while the
+connection is wrong a button follows them (Show log; Restart, which starts the app again once this
+one has quit).
 _Avoid_: alert, message (the thing is a notice; its button says Dismiss all), live notice
 
 **Timed notice**:
@@ -124,7 +133,8 @@ notice's length is its `Lasts`.
 _Avoid_: toast, transient notice, auto-dismiss
 
 **Error notice**:
-A notice of severity Error: where errors with no better place show: the adds made outside the window
+A notice of severity Error, "Couldn't undo the change" (or "Couldn't undo the Delete", with the
+names in the list) among them, for a setting as for a torrent: where errors with no better place show: the adds made outside the window
 (files dropped on it or opened from Finder, a magnet clicked in a browser), Add file…, the folder
 picker and failed commands. In the status bar in the error colour, the pill red, explained in the
 popover a click opens (an error never opens it by itself), and dismissed with ×; a batch of adds stays one notice ("Couldn't add 2 of

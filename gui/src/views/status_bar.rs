@@ -22,7 +22,13 @@ pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
         Connection::Lost { .. } | Connection::Outdated => Tone::Error,
         Connection::Connecting | Connection::Replacing { .. } | Connection::Spawning { .. } => Tone::Muted,
     };
-    let mut words = ui.caption(client::display::connection(&s.connection)).key("connection");
+    // The words are red while the dot is, as an error notice's line is.
+    let words = ui.caption(client::display::connection(&s.connection));
+    let mut words = match tone {
+        Tone::Error => ui.error_caption(client::display::connection(&s.connection)),
+        _ => words,
+    }
+    .key("connection");
     if let Some(why) = client::display::connection_why(&s.connection) {
         words = words.help(why);
     }
@@ -83,7 +89,8 @@ fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &
     let (head, body, width) = match s.bar.shown() {
         Some((entry, at, total)) => {
             let n = &entry.notice;
-            let buttons: Vec<_> = n.actions.iter().map(|a| (a.title.clone(), a.hint.as_ref().and_then(|hint| hint(s)))).collect();
+            let buttons: Vec<_> =
+                n.actions.iter().filter(|a| offered(s, a)).map(|a| (a.title.clone(), a.hint.as_ref().and_then(|hint| hint(s)))).collect();
             let width = ui.notice_width(&n.short, n.more.as_ref(), &buttons);
             let (head, body) = popover_of(s, ui, entry, at, total);
             (head, body, width)
@@ -156,9 +163,10 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
     // as the next notice shows.
     let title = ui.notice_title(notice.short.clone(), tone).key("notice-line").pr(CROSS_ROOM);
     let text = col().gap(4.0).grow(1.0).min_w(0.0).child(title).children(notice.more.as_ref().map(|listing| ui.notice_listing(listing)));
-    let (mark, mark_tone) = mark_of(notice.severity);
+    let (mark, mark_tone) = mark_of(notice);
     let card = row().gap(8.0).items_start().w_full().child(ui.notice_mark(mark, mark_tone).mt(2.0)).child(text);
-    let (buttons, why_off) = buttons(s, ui, &notice.actions);
+    let actions: Vec<NoticeAction> = notice.actions.iter().filter(|a| offered(s, a)).cloned().collect();
+    let (buttons, why_off) = buttons(s, ui, &actions);
     let shown = col().key(format!("notice/{id}")).w_full().gap(10.0).child(card).children(buttons).children(why_off);
     let body = col().key("notice-shown").w_full().child(shown).child(dismiss().pin(None, Some(-2.0), Some(-2.0), None));
     (head, body)
@@ -209,9 +217,16 @@ pub fn tone_of(severity: Severity) -> Tone {
     }
 }
 
-/// A notice's mark and its colour: ✓ done, ⚠ a warning, ⛔ an error.
-fn mark_of(severity: Severity) -> (Icon, Tone) {
-    match severity {
+/// A button that's on the notice now: one with a condition (Reveal in Finder, while its path is on
+/// disk) only while it holds.
+fn offered(s: &Phantom, action: &NoticeAction) -> bool {
+    action.shown.as_ref().is_none_or(|shown| shown(s))
+}
+
+/// A notice's mark and its colour: ✓ done, ⓘ nothing was done, ⚠ a warning, ⛔ an error.
+pub(crate) fn mark_of(notice: &crate::notice::Notice) -> (Icon, Tone) {
+    match notice.severity {
+        Severity::Info if notice.nothing => (Icon::Info, Tone::Muted),
         Severity::Info => (Icon::Done, Tone::Good),
         Severity::Warning => (Icon::Warning, Tone::Warning),
         Severity::Error => (Icon::Error, Tone::Error),

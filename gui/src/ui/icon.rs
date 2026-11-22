@@ -51,6 +51,8 @@ pub enum Icon {
     Search,
     /// A check in a circle: a notice of something done (a receipt, an action's notice).
     Done,
+    /// A circle with an i: a receipt of something that didn't happen.
+    Info,
     /// A stop sign with a cross: an error notice.
     Error,
     /// ×: dismiss.
@@ -88,6 +90,7 @@ every!(Icon {
     Icon::Undo => [Icon::Undo],
     Icon::Search => [Icon::Search],
     Icon::Done => [Icon::Done],
+    Icon::Info => [Icon::Info],
     Icon::Error => [Icon::Error],
     Icon::Close => [Icon::Close],
     Icon::Previous => [Icon::Previous],

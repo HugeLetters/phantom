@@ -15,7 +15,7 @@ use rune_kit::{SortDir, TableState};
 
 use crate::bar::Bar;
 use crate::menu::{Event, Menu, Open as MenuOpen};
-use crate::notice::{Listing, Notice};
+use crate::notice::{Listing, Notice, NoticeAction};
 use crate::pane::{self, DetailsPane};
 use crate::platform::{Finder, Shown};
 use crate::service::{AddError, AddRequest, Connection, Done, Live, Service};
@@ -143,7 +143,7 @@ pub struct FailedAdds {
 impl FailedAdds {
     /// The entry as a [`Notice`]: "Couldn't add 2 of 5", and each failure as its view.
     pub fn notice(&self) -> Notice {
-        let list = Listing::of_failures(self.failed.iter().map(|f| (f.what.clone(), f.why.clone())));
+        let list = Listing::of_entries(self.failed.iter().map(|f| (f.what.as_str(), &f.why)));
         Notice { more: Some(list), ..Notice::error(display::adds_failed(self.failed.len(), self.total)) }
     }
 }
@@ -152,7 +152,7 @@ impl FailedAdds {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddFailure {
     pub what: String,
-    pub why: String,
+    pub why: display::Reason,
 }
 
 impl AddFailure {
@@ -280,7 +280,7 @@ impl Batch {
                 Err(AddError::NoDestination(request)) => requests.push(request),
                 Err(AddError::Failed(e)) => {
                     self.total += 1;
-                    self.failed.push(AddFailure { what: label.clone(), why: display::add_failure(&e) });
+                    self.failed.push(AddFailure { what: label.clone(), why: display::add_failure(&e).into() });
                 }
             }
         }
@@ -460,11 +460,12 @@ fn same(a: &[TorrentId], b: &[TorrentId]) -> bool {
 
 /// What to tell the user about an add. A torrent that was already in the list gets selected and
 /// scrolled to, instead of a second row.
-fn show_added(table: &mut TableState, added: &Added, tx: &mut Tx) -> Notice {
+pub(crate) fn show_added(table: &mut TableState, added: &Added, tx: &mut Tx) -> Notice {
     if added.already_existed {
         table.reveal(added.id.to_string(), tx);
     }
     let notice = Notice::new(display::added_line(added)).brief();
+    let notice = if added.already_existed { notice.nothing_done() } else { notice };
     // A torrent without a name yet has nothing to list.
     match &added.name {
         Some(name) => notice.with_names(name.clone()),
@@ -600,12 +601,13 @@ pub fn trash_selected_files(s: &mut Phantom) {
         return;
     }
     let (id, selected) = (torrent.id, files.iter().map(|f| f.index).collect::<Vec<_>>());
-    // What the notice's list names: the torrent, and the file when there's one (how many moved is
-    // the service's to say).
+    // What the notice's list names: the torrent, then each file (how many moved is the service's to say).
     let mut names = vec![torrent.display_name().to_owned()];
-    if let [one] = &files[..] {
-        names.push(one.path.file_name().map_or_else(|| one.path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned()));
-    }
+    names.extend(
+        files
+            .iter()
+            .map(|f| f.path.file_name().map_or_else(|| f.path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())),
+    );
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
     let pending = crate::changes::acted(s, after, vec![id]);
     command_then(&mut *s.service, Some(after), &[id], TorrentCommand::TrashFiles { files: selected }, move |s, _| {
@@ -771,7 +773,7 @@ pub fn ask_undo(s: &mut Phantom, seq: u64, took: Box<dyn FnOnce(&mut Phantom, Op
             }
             Err(e) => refused_asked(s, vec![seq], e),
         }
-        for notice in undo_notices(&answer) {
+        for notice in undo_notices(&answer, &s.undos) {
             s.bar.tell(notice);
         }
         took(s, entry, tx);
@@ -817,30 +819,43 @@ pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &clien
 
 /// A torrent of a selection's undo that didn't come back (#235): one added again since says so, short
 /// (nothing was touched); another, "Couldn't undo Delete of X", and why (more, in the popover).
-fn not_back_notice(not: &proto::NotBack) -> Notice {
+pub(crate) fn not_back_notice(not: &proto::NotBack) -> Notice {
     match display::not_back_line(not) {
-        (short, name) if matches!(not.why, proto::CantUndo::InList) => Notice::new(short).brief().with_names(name),
-        (short, why) => Notice::warning(short).with_names_and_why(&why),
+        (short, list) if matches!(not.why, proto::CantUndo::InList) => Notice::new(short).brief().nothing_done().with_listing(list),
+        (short, list) => cant_undo(short, list, &not.why, &not.stranded),
     }
+}
+
+/// An undo that couldn't be done: an error, as every "Couldn't undo" is, with Reveal in Finder for
+/// the files it left in place, else for what's in its way, while that's on disk.
+fn cant_undo(short: String, list: crate::notice::Listing, why: &proto::CantUndo, stranded: &[proto::AbsolutePath]) -> Notice {
+    let path = match stranded.first() {
+        Some(path) => Some(std::path::PathBuf::from(path.display().to_string())),
+        None => display::cant_undo_reason(why).paths.first().map(std::path::PathBuf::from),
+    };
+    Notice::error(short).with_listing(list).with_actions(path.iter().map(|p| NoticeAction::reveal(p)).collect())
 }
 
 /// What the status bar tells of an undo's answer: what came back (what of a selection didn't, the
 /// snapshot before it told), or why none could (more, in the popover); nothing when there was
 /// nothing to undo.
-pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>) -> Vec<Notice> {
-    let refused = |(short, why): (String, String)| Notice::warning(short).with_names_and_why(&why);
+pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>, undos: &Undos) -> Vec<Notice> {
+    let did = |undo: &proto::Undoable| undos.did(undo.seq);
     match undone {
         // What didn't come back the snapshot told already, as it comes first (`Leave::Undone`).
-        Ok(undone) => vec![Notice::new(display::undone_line(&undone.undo)).brief().with_names(display::undone_more(&undone.undo))],
+        Ok(undone) => vec![
+            Notice::new(display::undone_line(&undone.undo)).brief().with_listing(display::undone_listing(&undone.undo, did(&undone.undo))),
+        ],
         Err(client::Failure::Refused(proto::Refusal::NothingToUndo)) => Vec::new(),
         // Added again by hand: nothing to bring back, and nothing touched.
         Err(client::Failure::Refused(proto::Refusal::Undo { why: proto::CantUndo::InList, undo, .. })) => {
-            vec![Notice::new(display::already_in_list()).brief().with_names(display::undone_more(undo))]
+            vec![Notice::new(display::already_in_list()).brief().nothing_done().with_listing(display::undone_listing(undo, None))]
         }
         Err(client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
-            vec![refused(display::cant_undo_line(undo, why, stranded))]
+            let (short, list) = display::cant_undo_line(undo, why, stranded);
+            vec![cant_undo(short, list, why, stranded)]
         }
-        Err(e) => vec![Notice::warning(display::undo_failed()).with_text(display::sentence(&format!("{e:#}")))],
+        Err(e) => vec![Notice::error(display::undo_failed()).with_text(display::sentence(&format!("{e:#}")))],
     }
 }
 
@@ -887,7 +902,7 @@ fn command_then(
                 .collect();
             let total = total - (all_failed - failed.len());
             let title = display::commands_failed(action, failed.len(), total);
-            let list = Listing::of_failures(failed.iter().map(|f| (f.what.clone(), f.why.clone())));
+            let list = Listing::of_entries(failed.iter().map(|f| (f.what.as_str(), &f.why)));
             // Tells of the entries its failures left, if each left one: else a notice that went with
             // one's undo would take another's failure with it.
             let entries = |id: TorrentId| -> Vec<u64> {
@@ -929,7 +944,7 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
             Err(why) => {
                 if let Some(why) = why {
                     batch.total += requests.len();
-                    batch.failed.extend(requests.iter().map(|r| AddFailure { what: what(r), why: display::sentence(&why) }));
+                    batch.failed.extend(requests.iter().map(|r| AddFailure { what: what(r), why: display::sentence(&why).into() }));
                 }
                 batch.finish(s);
             }
@@ -989,12 +1004,20 @@ pub fn rename(s: &mut Phantom, id: TorrentId, name: proto::FileName) {
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
     // The newest change from now: ⌘Z takes it even before a snapshot lists it (#255).
     let pending = crate::changes::acted(s, after, vec![id]);
-    let named = name.to_string();
+    let (was, now) = (s.torrents.iter().find(|t| t.id == id).map(|t| t.display_name().to_owned()), name.to_string());
     command_then(&mut *s.service, Some(after), &[id], TorrentCommand::Rename { name }, move |s, went| {
         let entry = s.undo.iter().find(|u| u.seq > after && u.torrents.iter().any(|t| went.contains(&t.id))).map(|u| u.seq);
         crate::changes::made(s, pending, entry);
         if let (true, Some(seq)) = (went.contains(&id), entry) {
-            tell_happened(s, Happened { seq }, proto::UndoAction::Rename, &[named]);
+            // "old → new"; its undo lists them the other way round.
+            let listed = match &was {
+                Some(was) => {
+                    s.undos.remember(seq, vec![was.clone(), now.clone()]);
+                    display::changed(was, &now)
+                }
+                None => now,
+            };
+            tell_happened(s, Happened { seq }, proto::UndoAction::Rename, &[listed]);
         }
     });
 }
@@ -1051,8 +1074,11 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         proto::UndoAction::Remove | proto::UndoAction::Delete | proto::UndoAction::Rename => names.len(),
     };
     undo.undo = true;
-    let notice =
-        Notice::new(display::happened(action, names.len())).long().with_names_and_why(&display::happened_more(action, count, names));
+    // Its undo names the files too.
+    if matches!(action, proto::UndoAction::TrashFiles { .. }) {
+        s.undos.remember(happened.seq, names.to_vec());
+    }
+    let notice = Notice::new(display::happened(action, names.len())).long().with_listing(display::happened_listing(action, count, names));
     s.bar.tell(Notice { of: vec![happened.seq], ..notice.with_actions(vec![undo]) });
 }
 

@@ -250,7 +250,7 @@ pub fn restart(s: &mut Phantom, tx: &mut Tx) {
             s.relaunching = true;
             tx.quit();
         }
-        Err(why) => s.bar.tell(Notice::error(display::cant_restart()).with_names_and_why(&display::sentence(&why))),
+        Err(why) => s.bar.tell(Notice::error(display::cant_restart()).with_text(display::sentence(&why))),
     }
 }
 
@@ -331,11 +331,13 @@ pub fn show(s: &mut Phantom, path: &Path, how: Show) {
 /// Tells why `path` couldn't be shown: Phantom's few words in the bar, the path and the reason in
 /// the list.
 fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError) {
-    let (short, reason) = match e {
-        ShowError::NotOnDisk => (display::cant_show(how.action()), display::not_on_disk().to_owned()),
-        ShowError::NoFinder(reason) => (display::cant_start_finder(), reason),
+    let (short, reason, folder) = match e {
+        // The file's folder, if that is there: Show folder.
+        ShowError::NotOnDisk => (display::cant_show(how.action()), display::not_on_disk().to_owned(), path.parent()),
+        ShowError::NoFinder(reason) => (display::cant_start_finder(), reason, None),
     };
-    s.bar.tell(Notice::error(short).with_names_and_why(&display::show_failed_more(path, &reason)));
+    let notice = Notice::error(short).with_listing(display::show_failed_listing(path, &reason));
+    s.bar.tell(notice.with_actions(folder.map(crate::notice::NoticeAction::folder).into_iter().collect()));
 }
 
 /// A command key's Open or Reveal for torrent `id` (⌘O, ⌘↓, ⇧⌘O): done only if its location is on

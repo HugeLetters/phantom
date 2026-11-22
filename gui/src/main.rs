@@ -857,7 +857,7 @@ fn spec() -> AppSpec<Phantom> {
                     why: proto::CantUndo::NotInTrash { path },
                     stranded: Vec::new(),
                 });
-                for notice in model::undo_notices(&Err(refused)) {
+                for notice in model::undo_notices(&Err(refused), &s.undos) {
                     s.bar.tell(notice);
                 }
             }),
@@ -1197,7 +1197,11 @@ fn main() {
                     app.bar.tell(notice);
                 }
             }
-            Err(e) => app.bar.tell(Notice::error(display::cant_read_gui_json()).with_text(display::sentence(&e.to_string()))),
+            Err(e) => {
+                let file = proto::data_dir().join("gui.json");
+                let notice = Notice::error(display::cant_read_gui_json()).with_listing(display::gui_json_listing(&file, &e.to_string()));
+                app.bar.tell(notice.with_actions(vec![notice::NoticeAction::reveal(&file)]));
+            }
         }
         app
     })

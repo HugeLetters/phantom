@@ -103,7 +103,7 @@ pub struct Asking {
 #[derive(Debug, Clone, PartialEq)]
 struct Unmoved {
     name: String,
-    why: String,
+    why: display::Reason,
 }
 
 /// The selected torrents, in the list's order.
@@ -152,7 +152,7 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
                 Some(t) if t.actions.does(Action::Move) => order.push(*id),
                 Some(t) => skipped.push(Unmoved {
                     name: t.display_name().to_owned(),
-                    why: display::why_off(&[t.actions.get(Action::Move)]).unwrap_or_default(),
+                    why: display::why_off(&[t.actions.get(Action::Move)]).unwrap_or_default().into(),
                 }),
                 // Not listed yet (a scene before its first snapshot): the service says whether it moves.
                 None => order.push(*id),
@@ -346,7 +346,7 @@ fn send(s: &mut Phantom, asking: Asking) {
     let mut moves = Vec::new();
     for id in order {
         match chosen.get(&id) {
-            Some((Choice::Skip, _)) => skipped.push(Unmoved { name: name(s, id), why: display::not_moved(&NotMoved::Cancelled) }),
+            Some((Choice::Skip, _)) => skipped.push(Unmoved { name: name(s, id), why: display::not_moved(&NotMoved::Cancelled).into() }),
             Some((Choice::Use(choice), found)) => {
                 moves.push(MoveOf { id, clash: Some(proto::Answered { choice: *choice, found: found.clone() }), name: None })
             }
@@ -395,7 +395,7 @@ fn one(s: &mut Phantom, id: TorrentId, failed: Vec<(TorrentId, Failure)>) {
 /// more ("Its new folder changed while it waited: …").
 fn unmoved_by(s: &Phantom, id: TorrentId, failure: &Failure) -> Unmoved {
     match failure {
-        _ if cancelled(failure) => Unmoved { name: name(s, id), why: display::not_moved(&NotMoved::Cancelled) },
+        _ if cancelled(failure) => Unmoved { name: name(s, id), why: display::not_moved(&NotMoved::Cancelled).into() },
         Failure::Refused(Refusal::Torrent { why, .. }) => Unmoved { name: name(s, id), why: display::refused_why(why) },
         _ => {
             let (what, why) = display::command_failure(&name(s, id), failure);
@@ -415,7 +415,7 @@ fn tell_selection(s: &mut Phantom, selected: usize, moved: usize, unmoved: Vec<U
     if unmoved.is_empty() {
         return;
     }
-    let list = Listing::of_failures(unmoved.into_iter().map(|u| (u.name, u.why)));
+    let list = Listing::of_entries(unmoved.iter().map(|u| (u.name.as_str(), &u.why)));
     s.bar.tell(Notice { more: Some(list), ..Notice::warning(display::moved_of(moved, selected)) });
 }
 
@@ -425,13 +425,13 @@ fn name(s: &Phantom, id: TorrentId) -> String {
 
 /// A Move of torrent `id` that couldn't be asked: `why`.
 fn tell(s: &mut Phantom, id: TorrentId, why: &str) {
-    told(s, AddFailure { what: name(s, id), why: display::sentence(why) });
+    told(s, AddFailure { what: name(s, id), why: display::sentence(why).into() });
 }
 
 /// A Move that failed, as any failed command is told: "Couldn't move the torrent", the torrent and
 /// why under it.
 fn told(s: &mut Phantom, failed: AddFailure) {
     let title = display::commands_failed(Action::Move, 1, 1);
-    let list = Listing::of_failures([(failed.what, failed.why)]);
+    let list = Listing::of_entries([(failed.what.as_str(), &failed.why)]);
     s.bar.tell(Notice { more: Some(list), ..Notice::error(title) });
 }

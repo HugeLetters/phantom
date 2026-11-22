@@ -801,6 +801,7 @@ fn a_torrent_list_set_aside_is_told_in_a_warning_with_its_path_in_the_list() {
     let list = super::generated::texts_under(&rt, &format!("notice/{id}")).join("\n");
     assert!(list.contains(KEPT), "{list}");
     assert!(list.contains("kept aside") && list.contains("empty list"), "{list}");
+    assert!(list.ends_with("Reveal in Finder"), "the kept file can be shown: {list}");
 
     let mut rt = app(MemoryService::new());
     settle(&mut rt);
@@ -826,8 +827,11 @@ fn a_part_not_saved_is_told_in_a_warning_with_its_file_and_reason_in_the_list() 
     let id = rt.state.bar.entries()[0].id;
     super::generated::show_notice(&mut rt, id);
     let list = super::generated::texts_under(&rt, &format!("notice/{id}")).join("\n");
-    assert!(list.contains(PART) && list.contains("No space left on device"), "{list}");
-    assert!(list.contains("re-download"), "{list}");
+    assert_eq!(
+        list.lines().skip(1).collect::<Vec<_>>(),
+        [PART, "No space left on device", "Reveal in Finder"],
+        "the file, why, and a button: {list}"
+    );
 
     let mut rt = app(MemoryService::new());
     settle(&mut rt);
@@ -878,7 +882,7 @@ fn a_move_whose_new_folder_changed_while_it_waited_is_listed_with_why() {
     assert_eq!(super::notice(&rt), Some("Moved 1 of 2"));
     let id = rt.state.bar.entries().last().expect("told").id;
     let list = list_of(&mut rt, id);
-    assert!(list.contains(LONG) && list.contains("Its new folder changed while it waited: /Films/"), "{list:?}");
+    assert!(list.contains(LONG) && list.contains("Its new folder changed while it waited\n/Films/"), "the path on its own line: {list:?}");
 }
 
 /// The connection's words get a button while it's wrong (#87): Show log, which reveals the
@@ -943,7 +947,7 @@ fn a_restart_that_cannot_start_says_so_and_can_be_tried_again() {
     let notice = &rt.state.bar.entries()[0].notice;
     assert_eq!(notice.short, client::display::cant_restart());
     assert_eq!(notice.severity, Severity::Error);
-    let why = notice.more.as_ref().map(|m| m.why.as_str()).unwrap_or_default();
+    let why = notice.more.as_ref().map(|m| m.plain()).unwrap_or_default();
     assert!(why.contains("No such file"), "{why:?}");
     let relaunched = crate::platform::Relaunched::default();
     rt.state.relauncher = Box::new(relaunched.clone());
@@ -989,4 +993,285 @@ fn the_cross_and_dismiss_all_dismiss_the_right_thing() {
     tap(&mut rt, "notice-dismiss-all");
     settle(&mut rt);
     assert_eq!(rt.state.bar.entries().len(), 0, "Dismiss all clears them");
+}
+
+// ---- The notices review (#87): the rules each notice follows.
+
+use crate::model::{AddFailure, FailedAdds};
+use crate::platform::Shown as Disk;
+
+/// Whether a text of a list says a path or a link inside its words.
+fn has_path(text: &str) -> bool {
+    text.contains('/') || text.contains("magnet:")
+}
+
+/// Rule 1 and 3: a path or a link has a line of its own, never inside a sentence; a reason is short
+/// words under the name and says nothing the line says.
+#[test]
+fn a_path_is_a_line_of_its_own_and_a_reasons_words_hold_none() {
+    use client::display::Line;
+    use proto::{AbsolutePath, CantUndo, Named, NotBack, UndoAction};
+    let path = |p: &str| AbsolutePath::new(p).unwrap();
+    let sintel = Named { id: 2, name: "Sintel".into() };
+    let not = |why, stranded| NotBack { torrent: sintel.clone(), action: UndoAction::Delete, why, stranded };
+    let notices = [
+        crate::model::not_back_notice(&not(CantUndo::PathTaken { path: path("/d/Sintel") }, vec![])),
+        crate::model::not_back_notice(&not(CantUndo::NotInTrash { path: path("/Users/me/.Trash/Sintel") }, vec![])),
+        crate::model::not_back_notice(&not(
+            CantUndo::PutBackFailed { path: path("/d/Sintel"), detail: "Operation not permitted".into() },
+            vec![path("/d/Big Buck Bunny")],
+        )),
+        Notice::records_set_aside(std::path::Path::new("/Users/me/Library/Application Support/Phantom/records.invalid.db")),
+        Notice::part_not_saved(&proto::PartNotSaved { file: PART.into(), reason: "No space left on device (os error 28)".into() }),
+        Notice::error("Can't open the file")
+            .with_listing(client::display::show_failed_listing(std::path::Path::new(PART), "it isn't on disk")),
+        Notice::error("Couldn't rename the torrent").with_listing(crate::notice::Listing::of_entries([(
+            "Album",
+            &client::display::refused_why(&proto::TorrentRefusal::NameTaken { path: path("/d/Album 2") }),
+        )])),
+    ];
+    for notice in notices {
+        let list = notice.more.as_ref().unwrap_or_else(|| panic!("{:?} has a list", notice.short));
+        assert!(list.lines().any(|l| matches!(l, Line::Path(_))), "{:?} has a path line: {}", notice.short, list.plain());
+        for line in list.lines().filter(|l| !matches!(l, Line::Path(_))) {
+            assert!(!has_path(line.text()), "{:?}: a path inside {:?}", notice.short, line.text());
+        }
+        assert!(!has_path(&notice.short), "{:?}", notice.short);
+    }
+}
+
+/// Rule 1: a failed magnet add shows the link's `dn=` name if it has one, else the link, cut in the
+/// middle on a line of its own, whole on hover.
+#[test]
+fn a_failed_magnet_add_shows_its_name_or_the_link_shortened_in_the_middle() {
+    let hash = "00000000000000000000000000000000000000ff";
+    let named = format!("magnet:?xt=urn:btih:{hash}&dn=Nobody");
+    let bare =
+        format!("magnet:?xt=urn:btih:{hash}&tr=udp%3A%2F%2Ftracker.example.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fopen.example.net%3A1337");
+    let failed = |what: &str| AddFailure { what: what.to_owned(), why: "No peers have this torrent".into() };
+    let mut rt = app(MemoryService::new());
+    rt.set_viewport((640.0, 400.0), 2.0);
+    rt.update(|s, _| {
+        s.bar.tell(FailedAdds { total: 1, failed: vec![failed(&named)] }.notice());
+        s.bar.tell(FailedAdds { total: 1, failed: vec![failed(&bare)] }.notice());
+    });
+    settle(&mut rt);
+    let (first, second) = (rt.state.bar.entries()[0].id, rt.state.bar.entries()[1].id);
+    let list = list_of(&mut rt, first);
+    assert_eq!(list.lines().collect::<Vec<_>>(), ["Couldn't add the torrent", "Nobody", "No peers have this torrent"], "{list}");
+    super::generated::show_notice(&mut rt, second);
+    for _ in 0..3 {
+        settle(&mut rt);
+    }
+    let shown = super::generated::texts_under(&rt, &format!("notice/{second}"));
+    assert!(shown.iter().any(|t| t == &bare), "the link is a line of its own: {shown:?}");
+    let drawn = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("notice-path")).expect("the link's line");
+    assert_eq!(drawn.help.as_deref(), Some(bare.as_str()), "cut where it doesn't fit, so whole on hover");
+    assert!(drawn.rect[3] < 24.0 && drawn.rect[2] <= 480.0, "on one line, within the popover: {:?}", drawn.rect);
+}
+
+/// Rule 2: a Remove lists the torrent and nothing of why its files stay; a Delete keeps its one note.
+#[test]
+fn a_remove_lists_no_note_and_a_delete_keeps_its_files_note() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Album"), torrent(1, "Film")]));
+    for (command, step, expected) in [
+        (OnTorrents::Remove, "Remove", "Removed\nAlbum\nUndo\n⌘Z"),
+        (OnTorrents::Delete, "Delete", "Deleted\nFilm\nIts files are in the Trash.\nUndo\n⌘Z"),
+    ] {
+        tap(&mut rt, &format!("rows/{}", if step == "Remove" { 0 } else { 1 }));
+        let from = rt.state.bar.entries().len();
+        rt.key(shortcuts::keys(command)[0].event());
+        for _ in 0..30 {
+            settle(&mut rt);
+        }
+        let id = rt.state.bar.entries()[from].id;
+        assert_eq!(list_of(&mut rt, id), expected, "{step}");
+    }
+}
+
+/// Rule 4: a notice whose path is on disk offers Reveal in Finder (the torrent list kept aside, a part
+/// not saved, files a refused Delete's undo left); one whose path isn't, doesn't. A failed Open of a
+/// file that isn't there offers its folder.
+#[test]
+fn a_notice_whose_path_is_on_disk_offers_reveal_in_finder() {
+    use proto::{AbsolutePath, CantUndo, Named, NotBack, UndoAction};
+    let stranded = std::path::PathBuf::from("/d/Big Buck Bunny");
+    let tell = |rt: &mut Runtime<Phantom>| {
+        let not = NotBack {
+            torrent: Named { id: 2, name: "Sintel".into() },
+            action: UndoAction::Delete,
+            why: CantUndo::PutBackFailed { path: AbsolutePath::new("/d/Sintel").unwrap(), detail: "Operation not permitted".into() },
+            stranded: vec![AbsolutePath::new("/d/Big Buck Bunny").unwrap()],
+        };
+        rt.update(|s, _| {
+            s.bar.tell(crate::model::not_back_notice(&not));
+            s.bar.tell(Notice::records_set_aside(std::path::Path::new(KEPT)));
+            s.bar.tell(Notice::part_not_saved(&proto::PartNotSaved { file: PART.into(), reason: "No space left on device".into() }));
+        });
+        settle(rt);
+        rt.state.bar.entries().iter().map(|e| e.id).collect::<Vec<_>>()
+    };
+    let mut rt = app(MemoryService::new());
+    let ids = tell(&mut rt);
+    for id in &ids {
+        assert!(list_of(&mut rt, *id).ends_with("Reveal in Finder"), "Reveal in Finder while it's there");
+    }
+    // What the first reveals is the stranded file, not the one that failed.
+    let shown = Disk::default();
+    rt.state.finder = Box::new(shown.clone());
+    super::generated::show_notice(&mut rt, ids[0]);
+    tap(&mut rt, "notice-action");
+    assert_eq!(shown.all(), vec![(stranded.clone(), crate::platform::Show::Reveal)]);
+    // Gone from the disk: no button.
+    let disk = Disk::default();
+    for path in [stranded.as_path(), std::path::Path::new(KEPT), std::path::Path::new(PART)] {
+        disk.lose(path);
+    }
+    rt.update(|s, _| s.finder = Box::new(disk));
+    settle(&mut rt);
+    for id in &ids {
+        assert!(!list_of(&mut rt, *id).contains("Reveal in Finder"), "no button for what isn't on disk");
+    }
+}
+
+/// Rule 4: a failed Open of a file that isn't on disk offers its folder.
+#[test]
+fn a_failed_open_offers_the_files_folder_while_that_is_there() {
+    struct NoFile(Disk);
+    impl crate::platform::Finder for NoFile {
+        fn show(&mut self, p: &std::path::Path, how: crate::platform::Show) -> Result<(), crate::platform::ShowError> {
+            match p == std::path::Path::new(PART) {
+                true => Err(crate::platform::ShowError::NotOnDisk),
+                false => self.0.show(p, how),
+            }
+        }
+        fn exists(&self, p: &std::path::Path) -> bool {
+            self.0.exists(p)
+        }
+    }
+    let mut rt = app(MemoryService::new());
+    let shown = Disk::default();
+    rt.state.finder = Box::new(NoFile(shown.clone()));
+    rt.update(|s, _| crate::platform::show(s, std::path::Path::new(PART), crate::platform::Show::Open));
+    settle(&mut rt);
+    let id = rt.state.bar.entries()[0].id;
+    assert_eq!(list_of(&mut rt, id).lines().collect::<Vec<_>>(), ["Can't open the file", PART, "It isn't on disk", "Show folder"]);
+    super::generated::show_notice(&mut rt, id);
+    tap(&mut rt, "notice-action");
+    assert_eq!(
+        shown.all(),
+        vec![("/Users/me/Downloads/Pack".into(), crate::platform::Show::Reveal)],
+        "the folder is revealed, never opened"
+    );
+}
+
+/// Rule 5: a "Couldn't undo" is an error whatever it was of, in one wording.
+#[test]
+fn couldnt_undo_is_an_error_for_torrents_and_settings_alike() {
+    use proto::{CantUndo, Named, NotBack, UndoAction};
+    let outside =
+        crate::model::undo_notices(&Err(client::Failure::Error(anyhow::anyhow!("connection reset by peer"))), &Default::default());
+    let torrent = crate::model::not_back_notice(&NotBack {
+        torrent: Named { id: 2, name: "Sintel".into() },
+        action: UndoAction::Delete,
+        why: CantUndo::NotKept,
+        stranded: vec![],
+    });
+    let (_, list) = client::display::cant_undo_line(
+        &proto::Undoable { seq: 1, action: UndoAction::Remove, torrents: vec![Named { id: 2, name: "Sintel".into() }] },
+        &CantUndo::NotInList,
+        &[],
+    );
+    let refused = crate::model::undo_notices(
+        &Err(client::Failure::Refused(proto::Refusal::Undo {
+            undo: proto::Undoable { seq: 1, action: UndoAction::Remove, torrents: vec![Named { id: 2, name: "Sintel".into() }] },
+            why: CantUndo::NotInList,
+            stranded: vec![],
+        })),
+        &Default::default(),
+    );
+    for notice in [&outside[0], &torrent, &refused[0]] {
+        assert_eq!(notice.severity, Severity::Error, "{:?}", notice.short);
+        assert!(notice.short.starts_with("Couldn't undo"), "{:?}", notice.short);
+    }
+    assert_eq!(outside[0].short, "Couldn't undo the change", "the setting's wording is the same one");
+    assert!(list.plain().starts_with("Sintel"), "names in the list");
+}
+
+/// Rule 6: a Rename lists "old → new", its undo the same way round; a Move to Trash's undo lists the
+/// files that came back.
+#[test]
+fn a_rename_and_its_undo_list_old_arrow_new() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "Album")]));
+    settle(&mut rt);
+    rt.update(|s, _| crate::model::rename(s, 0, proto::FileName::new("Album 2").unwrap()));
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    let renamed = rt.state.bar.entries().last().expect("told").id;
+    assert_eq!(list_of(&mut rt, renamed), "Renamed\nAlbum → Album 2\nUndo\n⌘Z");
+    rt.update(|_, tx| tx.blur());
+    rt.key(shortcuts::keys(InApp::Undo)[0].event());
+    for _ in 0..30 {
+        settle(&mut rt);
+    }
+    let back = rt.state.bar.entries().last().expect("told").id;
+    assert_eq!(rt.state.bar.entries().last().map(|e| e.notice.short.as_str()), Some("Renamed back"));
+    assert_eq!(list_of(&mut rt, back), "Renamed back\nAlbum 2 → Album");
+}
+
+/// Rule 7: a receipt of something that didn't happen wears a neutral ⓘ, not the green ✓.
+#[test]
+fn already_in_the_list_wears_a_neutral_mark_not_a_check() {
+    use crate::ui::{Icon, Tone};
+    let mark = crate::views::status_bar::mark_of;
+    assert_eq!(mark(&Notice::new("Added the torrent").brief()), (Icon::Done, Tone::Good));
+    let again = proto::NotBack {
+        torrent: proto::Named { id: 2, name: "Sintel".into() },
+        action: proto::UndoAction::Remove,
+        why: proto::CantUndo::InList,
+        stranded: vec![],
+    };
+    assert_eq!(mark(&crate::model::not_back_notice(&again)), (Icon::Info, Tone::Muted), "an undo that found it back");
+    let added = proto::Added { id: 1, name: Some("Album".into()), already_existed: true };
+    let mut rt = app(MemoryService::new());
+    let mut told = None;
+    rt.update(|s, tx| told = Some(crate::model::show_added(&mut s.table, &added, tx)));
+    assert_eq!(mark(&told.expect("told")), (Icon::Info, Tone::Muted), "an add of one already there");
+}
+
+/// Rule 8: no name the user chose is in the bar's line: a Look Preset's change undone says so in
+/// fixed words, the preset is the list's.
+#[test]
+fn a_look_preset_undo_names_no_preset_in_the_bar() {
+    let notice = Notice::new(client::display::look_preset_undone()).brief().with_names("Delete Evening");
+    assert_eq!(notice.short, "Look Preset change undone");
+    assert!(!notice.short.contains("Evening"));
+    assert_eq!(notice.more.as_ref().map(|m| m.plain()), Some("Delete Evening".to_owned()));
+}
+
+/// Rule 9: the connection's words are red while its dot is, as an error notice's line is; muted while
+/// it's only working.
+#[test]
+fn the_connections_words_are_red_when_its_dot_is() {
+    use crate::service::Connection;
+    use client::machine::Why;
+    let mut rt = app(MemoryService::new());
+    settle(&mut rt);
+    let words = |rt: &Runtime<Phantom>| drawn_color(rt, "connection").expect("the words");
+    let muted = {
+        rt.update(|s, _| s.connection = Connection::Connecting);
+        settle(&mut rt);
+        words(&rt)
+    };
+    for (state, said) in [
+        (Connection::Lost { why: Why::DidNotStart, retry_at: std::time::Instant::now() }, "Service unavailable"),
+        (Connection::Outdated, "Phantom was updated"),
+    ] {
+        rt.update(|s, _| s.connection = state);
+        settle(&mut rt);
+        assert_eq!(drawn_text(&rt, "connection").as_deref(), Some(said));
+        assert_eq!(words(&rt), colour(2), "{said} in the error colour");
+        assert_ne!(words(&rt), muted);
+    }
 }
