@@ -32,6 +32,7 @@
 //! | Event \ the change it's about | App | Sent | Listed |
 //! |---|---|---|---|
 //! | Changed / Sent | added newest | added newest | |
+//! | Edited { id, of } (a step in the open editor) | added newest, held out of the last 20 | | |
 //! | Press, the newest not taken | taken (Undo it) | taken: waits until listed | taken (Ask) |
 //! | Asked | | | asked |
 //! | AppUndone | gone | | |
@@ -191,6 +192,9 @@ pub enum Of {
 pub struct State {
     /// Oldest first.
     pub list: Vec<Change>,
+    /// The app changes in `list` made in the open editor ([`Command::Edited`]): they don't count
+    /// toward the last [`KEPT`].
+    pub held: Vec<u64>,
     /// The largest `seq` the service has listed: a change listed again after it left (it was
     /// refused while the stream still had it) isn't added back.
     pub seen: u64,
@@ -235,6 +239,9 @@ pub enum Event {
 pub enum Command {
     /// An app setting changed, as the app's change `id`.
     Changed { id: u64, of: AppSetting },
+    /// A step in the open Look Preset's editor: as `Changed`, but kept out of the last [`KEPT`]
+    /// until the editor closes ([`Command::Fold`]), so it pushes no older change off the list.
+    Edited { id: u64, of: AppSetting },
     /// A service setting's change was sent, `by` the app's id for it.
     Sent { by: u64, name: SettingName },
     /// ⌘Z in Settings.
@@ -297,6 +304,10 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Nothing> {
     let mut next = state.clone();
     match event {
         C(Command::Changed { id, of }) => next.push(Change::App { id: *id, of: *of, press: Press::No }),
+        C(Command::Edited { id, of }) => {
+            next.held.push(*id);
+            next.push(Change::App { id: *id, of: *of, press: Press::No });
+        }
         C(Command::Sent { by, name }) => next.push(Change::Sent { by: *by, name: *name, press: Press::No }),
         C(Command::Press) => {
             let at = next.list.iter().rposition(|c| c.press() == Press::No).ok_or(Nothing)?;
@@ -316,6 +327,7 @@ pub fn decide(state: &State, event: &Event) -> Result<State, Nothing> {
             next.list[at] = next.list[at].with(Press::Taken);
         }
         C(Command::Fold { ids, into }) => {
+            next.held.clear();
             next.list.retain(|c| !matches!(c, Change::App { id, .. } if ids.contains(id)));
             if let Some((id, of)) = into {
                 next.push(Change::App { id: *id, of: *of, press: Press::No });
@@ -460,8 +472,9 @@ impl State {
     /// `change`, the newest; past the last [`KEPT`] settings changes, the oldest of them goes.
     fn push(&mut self, change: Change) {
         self.list.push(change);
-        if self.list.iter().filter(|c| c.is_setting()).count() > KEPT
-            && let Some(oldest) = self.list.iter().position(Change::is_setting)
+        let counts = |c: &Change| c.is_setting() && !self.held.iter().any(|id| matches!(c, Change::App { id: i, .. } if i == id));
+        if self.list.iter().filter(|c| counts(c)).count() > KEPT
+            && let Some(oldest) = self.list.iter().position(|c| counts(c))
         {
             self.list.remove(oldest);
         }

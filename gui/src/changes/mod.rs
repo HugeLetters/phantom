@@ -195,9 +195,14 @@ pub fn app_changed(s: &mut Phantom, of: AppSetting, was: Was) {
     let c = &mut s.changes;
     let id = c.id();
     c.was.insert(id, was);
-    let _ = c.decide(Event::Command(Command::Changed { id, of }));
-    if let (Some(ids), AppSetting::Theme { .. }) = (&mut c.editor, of) {
-        ids.push(id);
+    match (&mut c.editor, of) {
+        (Some(ids), AppSetting::Theme { .. }) => {
+            ids.push(id);
+            let _ = c.decide(Event::Command(Command::Edited { id, of }));
+        }
+        _ => {
+            let _ = c.decide(Event::Command(Command::Changed { id, of }));
+        }
     }
     // Past the last 20, an app change's `was` goes with it.
     c.was.retain(|id, _| c.state.list.iter().any(|ch| matches!(ch, machine::Change::App { id: i, .. } if i == id)));

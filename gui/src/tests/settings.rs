@@ -3297,6 +3297,33 @@ fn done_is_one_undo_step_and_cancel_puts_the_preset_back() {
     }
 }
 
+/// The editor's own steps don't count against the 20 changes ⌘Z can take back while it's open:
+/// an App icon picked before it, then 23 steps in it, and Done: one ⌘Z for the Edit, the next the
+/// icon (#87).
+#[test]
+fn a_long_edit_keeps_the_older_changes() {
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    press(&mut d, "icon-pair-0");
+    press(&mut d, "icons-done");
+    let picked = d.settings.state.app_icon.choice.clone();
+    assert!(picked.is_some(), "a pair picked");
+    press(&mut d, "preset-1-edit");
+    press(&mut d, "edit-tone-join");
+    for i in 0..22 {
+        press(&mut d, &format!("edit-tone-both/#0/segment{}", (i + 1) % 2));
+    }
+    press(&mut d, "edit-done");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Edit of Night", "one step for the sheet");
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(night_tone(&d), [Some(Value::Choice("light")), Some(Value::Choice("dark"))], "the Edit back");
+    assert_ne!(crate::changes::menu_title(&d.main.state), "Undo", "the icon change is still there");
+    d.key(cmd('z'));
+    d.settle();
+    assert_ne!(d.settings.state.app_icon.choice, picked, "the second ⌘Z undoes the icon");
+}
+
 /// The Theme row splits; a theme chosen for the Dark half makes each column its own list, its
 /// Theme pop-up then its own theme's settings (Tone only under ☀, Sample's three only under ☾),
 /// with no Join or Split anywhere. The same theme chosen again brings the shared rows back, each split where
@@ -3418,6 +3445,54 @@ fn an_image_is_added_and_removed() {
     assert_eq!(d.settings.state.app_icon.added, [file_id(1)], "removed");
     assert_eq!(choice(&d), Some(Icons::Pair { dark: FOLLOW.into(), light: "dark-hour".into() }), "the Dark half follows the theme");
     assert!(d.settings.find("icon-image-1").is_none() && d.settings.find("icon-image-0").is_some(), "its tile gone");
+}
+
+/// A file that isn't an image (whatever its extension says), or is over 4 MB, is refused with a line
+/// under the tiles, and never becomes a tile (#87).
+#[test]
+fn a_file_that_is_no_image_or_too_big_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let fake = dir.path().join("fake.png");
+    std::fs::write(&fake, "this is text").unwrap();
+    let big = dir.path().join("big.icns");
+    let mut bytes = std::fs::read(&images()[0]).unwrap();
+    bytes.resize(4_000_001, 0);
+    std::fs::write(&big, bytes).unwrap();
+    let mut d = appearance_tab();
+    press(&mut d, "app-icon-edit");
+    for (file, line) in [(&fake, "fake.png isn't an image"), (&big, "big.icns is over 4 MB")] {
+        press(&mut d, "icon-add");
+        d.settings.resolve_file_dialog(Some(file.clone())).expect("a file dialog");
+        d.settle();
+        assert!(d.settings.state.app_icon.added.is_empty(), "{line}: no tile");
+        assert!(d.settings.find("image-refused").is_some(), "{line}: a line under the tiles");
+        let shown = text(&d.settings, "image-refused");
+        assert!(shown.to_lowercase().contains(&line.to_lowercase()), "{line}: {shown:?}");
+    }
+    drop_on(&mut d, "app_icon_tiles", fake);
+    assert!(d.settings.state.app_icon.added.is_empty(), "a drop is refused too");
+}
+
+/// A shipped icon's id among the added images is no added image: no tile of its own, no ×; a
+/// real image beside it stays (#87).
+#[test]
+fn a_shipped_icons_id_is_not_an_added_image() {
+    let icon = AppIcon::new(Some(manifest()), None, Icons::One { icon: "phantom".into() }, |_| {}).with_added(vec![
+        "phantom".into(),
+        file_id(0),
+        "phantom".into(),
+        format!("{}", crate::platform::app_icon::FILE),
+    ]);
+    assert_eq!(icon.added, [file_id(0)]);
+}
+
+/// Follow theme's tile shows the icon the theme gives each Appearance, not the default's (#87).
+#[test]
+fn the_follow_theme_tile_shows_the_themes_icon() {
+    let theme = Icons::Pair { dark: "dark-hour".into(), light: "full-moon".into() };
+    let icon = AppIcon::new(Some(manifest()), None, theme, |_| {});
+    assert_eq!(icon.theme_icon(true).as_deref(), Some("dark-hour"));
+    assert_eq!(icon.theme_icon(false).as_deref(), Some("full-moon"));
 }
 
 /// An image kept as a half's icon that's gone (moved, or deleted) when the app starts: that half

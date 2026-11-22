@@ -26,6 +26,18 @@ use serde::{Deserialize, Serialize};
 /// The key of the choice in `gui.json`.
 pub const SETTING: &str = "app_icon";
 
+/// The largest image file that can be added as an icon, in bytes: a bigger one would slow every
+/// launch, as the images are read and decoded then.
+pub const MAX_IMAGE: u64 = 4_000_000;
+
+/// Whether `bytes` are an image the system can decode (a file's extension says nothing).
+fn decodes(bytes: &[u8]) -> bool {
+    #[cfg(target_os = "macos")]
+    return appkit::image(bytes).is_some();
+    #[cfg(not(target_os = "macos"))]
+    return !bytes.is_empty();
+}
+
 /// What the id of an image file added as an icon starts with, its path after it.
 pub const FILE: &str = "file:";
 
@@ -176,7 +188,15 @@ impl Manifest {
         for dark in [true, false] {
             let id = icons.side(dark);
             let Some(path) = id.strip_prefix(FILE).filter(|_| self.icon(id).is_none()) else { continue };
-            let bytes = std::fs::read(path).map_err(|e| format!("can't read {path}: {e}"))?;
+            let file = Path::new(path).file_name().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
+            let size = std::fs::metadata(path).map_err(|e| format!("can't read {file}: {e}"))?.len();
+            if size > MAX_IMAGE {
+                return Err(format!("{file} is over {} MB", MAX_IMAGE / 1_000_000));
+            }
+            let bytes = std::fs::read(path).map_err(|e| format!("can't read {file}: {e}"))?;
+            if !decodes(&bytes) {
+                return Err(format!("{file} isn't an image"));
+            }
             let name = Path::new(path).file_stem().map_or_else(|| path.to_owned(), |n| n.to_string_lossy().into_owned());
             self.files.push(Icon { id: id.to_owned(), name, bytes });
             added.push(id.to_owned());

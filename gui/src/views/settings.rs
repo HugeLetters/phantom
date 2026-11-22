@@ -92,7 +92,7 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
         }
     });
     let mut overlays = edit_sheet(s, sheet, ui);
-    overlays.extend(icon_sheet(&s.app_icon, sheet, ui));
+    overlays.extend(icon_sheet(&s.app_icon, sheet, ui, appearance));
     ui.root(page, overlays)
 }
 
@@ -618,7 +618,7 @@ fn chip_faces() -> [(rune::Color, rune::Color); 2] {
 /// under it ([`chip_choice`](crate::model::settings::chip_choice), [`chip_in_use`]), ☀ drawn light and ☾ dark; then "+ Add image…". An
 /// added image's tile has an × on hover. An image file dropped on the sheet is added too. Done
 /// closes it.
-fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
+fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appearance) -> Vec<El> {
     if !sheet.icons {
         return Vec::new();
     }
@@ -661,7 +661,7 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
     let mut tiles = vec![tile(
         "icon-follow".into(),
         None,
-        icon.image(&manifest.default().id),
+        icon.image(&icon.theme_icon(appearance == Appearance::Dark).unwrap_or_else(|| manifest.default().id.clone())),
         "Follow theme",
         "The icon of the look each Appearance shows",
         None,

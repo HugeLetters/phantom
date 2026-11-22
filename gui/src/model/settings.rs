@@ -719,7 +719,8 @@ impl AppIcon {
 
     /// With the images added as icons `added` (those that can be read), as `gui.json` keeps them.
     pub fn with_added(mut self, added: Vec<String>) -> Self {
-        for id in added {
+        // Only image files: a shipped icon's id here is no image added.
+        for id in added.into_iter().filter(|id| id.starts_with(crate::platform::app_icon::FILE)) {
             if self.adopt(&Icons::One { icon: id.clone() }).is_ok() && !self.added.contains(&id) {
                 self.added.push(id);
             }
@@ -760,6 +761,13 @@ impl AppIcon {
 
     pub fn image(&self, id: &str) -> Option<&rune::Image> {
         self.images.iter().find(|(i, _)| i == id).map(|(_, image)| image)
+    }
+
+    /// The id of the icon Follow theme shows in the Appearance `dark` says: the theme's, else the
+    /// default's.
+    pub fn theme_icon(&self, dark: bool) -> Option<String> {
+        let manifest = self.manifest.as_ref()?;
+        Some(crate::platform::app_icon::resolve(None, manifest, &self.theme, dark).id.clone())
     }
 
     /// The icon each Appearance shows now: `[dark, light]`.

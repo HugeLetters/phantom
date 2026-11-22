@@ -46,7 +46,7 @@ fn entries(seqs: &[u64]) -> Vec<Entry> {
 
 /// The stack as the snapshot at `(1, 5)` listed it.
 fn state(list: Vec<Change>, seen: u64) -> State {
-    State { list, seen, at: 5, listing: 5, left: Vec::new(), stack: Stack { at: (1, 5), left: Vec::new() } }
+    State { list, held: Vec::new(), seen, at: 5, listing: 5, left: Vec::new(), stack: Stack { at: (1, 5), left: Vec::new() } }
 }
 
 // Changes 1 and 2 (app ids or service seqs), sent by 10; the service lists seqs 1 to 3 (and made 4,
@@ -67,6 +67,7 @@ every!(State {
         State { at: 6, listing: 2, ..state(vec![sent(10, Press::No), sent(11, Press::Taken)], 0) },
         State { left: vec![3], ..state(vec![listed(1, Press::Asked)], 0) },
         state((0..KEPT as u64).map(|id| app(id, Press::No)).collect(), 0),
+        State { held: vec![1, 2], ..state(vec![app(1, Press::No), app(2, Press::No)], 0) },
         state(vec![action(1, Press::No)], 0),
         state(vec![action(1, Press::No), app(2, Press::No), action(2, Press::No)], 0),
         state(vec![listed(1, Press::No), action(1, Press::Taken)], 1),
@@ -85,6 +86,7 @@ every!(State {
 
 every!(Command {
     Command::Changed { .. } => [Command::Changed { id: 5, of: ICON }],
+    Command::Edited { .. } => [Command::Edited { id: 5, of: ICON }],
     Command::Sent { .. } => [Command::Sent { by: 11, name: PORT }],
     Command::Press => [Command::Press],
     Command::Asked { .. } => [Command::Asked { seq: 1 }, Command::Asked { seq: 2 }],
@@ -196,6 +198,16 @@ fn rows() -> Vec<R> {
             then: |s, e, r| {
                 let C(Command::Changed { id, of }) = e else { unreachable!() };
                 pushed(s, r, Change::App { id: *id, of: *of, press: Press::No })
+            },
+        },
+        Row {
+            says: "a step in the editor is the newest, and doesn't count toward the last 20: no older change goes for it",
+            when: |_, e| matches!(e, C(Command::Edited { .. })),
+            then: |s, e, r| {
+                let C(Command::Edited { id, of }) = e else { unreachable!() };
+                let mut list = s.list.clone();
+                list.push(Change::App { id: *id, of: *of, press: Press::No });
+                r.as_ref().is_ok_and(|n| n.list == list && n.held.last() == Some(id) && n.stack == s.stack)
             },
         },
         Row {
@@ -472,7 +484,7 @@ fn always() -> Vec<R> {
     vec![Row::always("at most 20 settings changes, each service change once, each torrent action once", |_, _, r| {
         r.as_ref().map_or(true, |n| {
             let once = |ids: Vec<u64>| ids.iter().all(|s| ids.iter().filter(|t| *t == s).count() == 1);
-            let settings = n.list.iter().filter(|c| c.is_setting()).count();
+            let settings = n.list.iter().filter(|c| c.is_setting() && !matches!(c, Change::App { id, .. } if n.held.contains(id))).count();
             settings <= KEPT
                 && once(n.list.iter().filter_map(Change::seq).collect())
                 && once(n.list.iter().filter_map(Change::entry).collect())
