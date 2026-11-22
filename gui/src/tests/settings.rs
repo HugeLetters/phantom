@@ -2603,6 +2603,28 @@ fn open_with_shortcut(d: &mut Desk) {
     d.settle();
 }
 
+/// The tabs have room above them: the window's top edge is at least `TABS_PAD` from them, they're
+/// centred in the title bar's band on every tab, and the traffic lights are placed level with their
+/// middle.
+#[test]
+fn the_tabs_have_room_above_them_and_the_lights_are_level_with_them() {
+    use crate::ui::TRAFFIC_LIGHTS;
+    // The lights are centred in the band, so it's twice their top, plus a light.
+    let band = 2.0 * TRAFFIC_LIGHTS.1 + rune::Chrome::TRAFFIC_LIGHT;
+    let mut d = opened(MemoryService::new());
+    for tab in Tab::ALL {
+        crate::model::settings::show_tab(&mut d.settings.state, tab);
+        d.settle();
+        let tabs = super::generated::rect_of(&d.settings, "settings-tabs").expect("the tabs");
+        let header = super::generated::rect_of(&d.settings, "header").expect("the header");
+        assert_eq!((header[1], header[3]), (0.0, band), "the band at the window's top");
+        assert!(tabs[1] >= 8.0, "room above the {tab:?} tab: {tabs:?}");
+        assert!((tabs[1] - (header[3] - tabs[1] - tabs[3])).abs() < 0.5, "centred in the band: {tabs:?}");
+        let lights_middle = TRAFFIC_LIGHTS.1 + rune::Chrome::TRAFFIC_LIGHT / 2.0;
+        assert!((lights_middle - (tabs[1] + tabs[3] / 2.0)).abs() < 0.5, "the lights level with the tabs: {tabs:?}");
+    }
+}
+
 /// ⌘W, Escape and the close button close Settings and nothing else; the main window, behind,
 /// keeps its focus where it was. ⌘W with the main window in front closes it, Settings staying in
 /// front; the Dock brings it back (#257).

@@ -1,13 +1,23 @@
 //! A window's page of settings, and what goes on one: tabs, a card of rows, a row with its label, a
 //! switch, and an icon to pick.
-//! `ui.window_page("settings", "Settings", cx.titlebar_inset(), tabs, Some(body), close)`.
+//! `ui.window_page("settings", "Settings", tabs, Some(body), close)`.
 
 use rune::{El, ScrollSpec, col, el, icon, row, text};
 use rune_kit::{ControlSize, SegmentedControl, Select, Switch};
 
-/// How tall the title bar's band is, the tabs in it level with the window's buttons, the body
-/// under it.
-const HEADER: f32 = 40.0;
+/// How tall the tabs are.
+const TABS: f32 = 28.0;
+
+/// The room above and below the tabs in the title bar's band, so they never touch the window's edge.
+pub const TABS_PAD: f32 = 10.0;
+
+/// How tall the title bar's band is: the tabs, centred, with [`TABS_PAD`] above and below. The
+/// body is under it.
+pub const HEADER: f32 = TABS + 2.0 * TABS_PAD;
+
+/// The traffic lights' top-left, so they sit level with the tabs' middle: the band's middle less
+/// half a light.
+pub const TRAFFIC_LIGHTS: (f32, f32) = (7.0, (HEADER - rune::Chrome::TRAFFIC_LIGHT) / 2.0);
 
 /// How much of the window a sheet over it leaves free, above and below: it fits its content up
 /// to the window less this, then scrolls.
@@ -55,20 +65,12 @@ impl Ui {
     /// `body` is `None` (the window is closed). `title` names the page for a screen reader; it
     /// isn't drawn. The page is modal, keyed `<key>-sheet`: once its body is new or nothing in it
     /// has the focus, the first control in its Tab order takes it, and Escape calls `on_close`.
-    pub fn window_page<S: 'static>(
-        &self,
-        key: &str,
-        title: &str,
-        titlebar_inset: f32,
-        top: El,
-        body: Option<El>,
-        on_close: impl Fn(&mut S) + 'static,
-    ) -> El {
+    pub fn window_page<S: 'static>(&self, key: &str, title: &str, top: El, body: Option<El>, on_close: impl Fn(&mut S) + 'static) -> El {
         let k = &self.k;
         let page = col().w_full().h_full().fill(k.c.layer_01);
         let Some(body) = body else { return page };
-        // Level with the traffic lights, which macOS centres 14 pt down a real title bar.
-        let header = col().key("header").w_full().h(HEADER).pt(if titlebar_inset > 0.0 { 0.0 } else { 8.0 }).items_center().child(top);
+        // The tabs centred in the band, level with the traffic lights ([`TRAFFIC_LIGHTS`]).
+        let header = col().key("header").w_full().h(HEADER).center().child(top);
         let body =
             col().key("sheet-body").w_full().grow(1.0).min_h(0.0).px(16.0).pb(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
         page.key(format!("{key}-sheet")).role("dialog").label(title.to_owned()).child(header).child(body).modal(false, on_close)

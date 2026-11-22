@@ -76,7 +76,7 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     let look = s.looks().shown(appearance).clone();
     let ui = &look.ui;
     let Some(sheet) = &s.sheet else {
-        return ui.root(ui.window_page("settings", "Settings", 0.0, el(), None, |_: &mut SettingsWindow| {}), Vec::new());
+        return ui.root(ui.window_page("settings", "Settings", el(), None, |_: &mut SettingsWindow| {}), Vec::new());
     };
     // Read, it's keyed anew, a new modal to Rune, which then focuses the control asked for
     // (`first_focus`): before, the rows that hold it aren't there.
@@ -86,7 +86,7 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     let tabs = ui.tabs("settings-tabs", &labels, selected, |s: &mut SettingsWindow, i| show_tab(s, Tab::ALL[i]));
     // Rune dismisses a modal on Escape before the app sees the key, so the revert is tried here.
     let body = settings(s, sheet, ui, appearance);
-    let page = ui.window_page(key, "Settings", cx.titlebar_inset(), tabs, Some(body), |s: &mut SettingsWindow| {
+    let page = ui.window_page(key, "Settings", tabs, Some(body), |s: &mut SettingsWindow| {
         if !escape(s) {
             close(s)
         }

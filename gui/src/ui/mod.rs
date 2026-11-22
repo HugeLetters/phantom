@@ -36,7 +36,7 @@ pub use menu::Entry;
 pub use palette::PaletteRow;
 #[cfg(test)]
 pub(crate) use sheet::NAME_LINE;
-pub use sheet::{Halves, IMAGES, LookChip};
+pub use sheet::{Halves, IMAGES, LookChip, TRAFFIC_LIGHTS};
 pub use status::Tone;
 pub use table::{Table, TableColumn};
 pub use tabs::BandSide;
