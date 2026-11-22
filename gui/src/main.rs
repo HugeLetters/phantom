@@ -454,10 +454,10 @@ fn saved(headless: bool) -> Saved {
     Saved::new(saved::read(&entries).0, |list: &[saved::SavedPreset]| settings::file::keep(saved::SETTING, Some(&saved::stored(list))))
 }
 
-/// The columns' order and those hidden, the pane's height and its tab, kept in `gui.json` (#33),
+/// The columns' order, those hidden and the widths dragged, the pane's height and its tab, kept in `gui.json` (#33),
 /// each change kept there; headless, none, kept nowhere.
 fn window_prefs(headless: bool) -> model::layout::WindowPrefs {
-    use model::layout::{COLUMN_ORDER, Column, HIDDEN_COLUMNS, Kept, PANE_HEIGHT, PANE_TAB, WindowPrefs};
+    use model::layout::{COLUMN_ORDER, COLUMN_WIDTHS, Column, HIDDEN_COLUMNS, Kept, PANE_HEIGHT, PANE_TAB, WindowPrefs};
     if headless {
         return WindowPrefs::default();
     }
@@ -465,6 +465,7 @@ fn window_prefs(headless: bool) -> model::layout::WindowPrefs {
     let kept = Kept {
         order: settings::file::read(COLUMN_ORDER).unwrap_or_default(),
         hidden: hidden.into_iter().collect(),
+        widths: settings::file::read(COLUMN_WIDTHS).unwrap_or_default(),
         pane_height: settings::file::read::<model::layout::PaneHeight>(PANE_HEIGHT).map(f32::from),
         tab: settings::file::read(PANE_TAB).unwrap_or_default(),
     };

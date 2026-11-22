@@ -11,8 +11,8 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 use super::{FRAME, MIB, app, on_screen, settle, tap, toggle, torrent};
 use crate::model::Phantom;
 use crate::model::layout::{
-    self, COLUMN_ORDER, Column, ColumnOrder, HIDDEN_COLUMNS, Header, INFO_LINE, INFO_PAD, Kept, NAME_MIN, PANE_HEIGHT, PANE_TAB, PaneTab,
-    ROW, TABLE_HEADER, TABS, WindowPrefs,
+    self, COLUMN_ORDER, COLUMN_WIDTHS, Column, ColumnOrder, ColumnWidths, HIDDEN_COLUMNS, Header, INFO_LINE, INFO_PAD, Kept, NAME_MIN,
+    PANE_HEIGHT, PANE_TAB, PaneTab, ROW, TABLE_HEADER, TABS, WindowPrefs,
 };
 use crate::service::{DiskChange, MemoryService};
 use crate::settings::file;
@@ -83,6 +83,7 @@ impl Kept_ {
         Kept {
             order: file::read_at(&self.path, COLUMN_ORDER).unwrap_or_default(),
             hidden: hidden.into_iter().collect(),
+            widths: file::read_at(&self.path, COLUMN_WIDTHS).unwrap_or_default(),
             pane_height: file::read_at(&self.path, PANE_HEIGHT),
             tab: file::read_at(&self.path, PANE_TAB).unwrap_or_default(),
         }
@@ -927,4 +928,198 @@ fn a_toggle_clicked_with_nothing_selected_selects_nothing() {
     assert_eq!(status_of(&rt, 0), Status::Downloading, "it resumed");
     assert_eq!(crate::model::selected_torrents(&rt.state.table), Vec::<u64>::new());
     assert!(rt.find("details").is_none(), "no pane");
+}
+
+/// Presses the resize handle of `column` and drags it by `dx`.
+fn resize_column(rt: &mut Runtime<Phantom>, column: Column, dx: f32) {
+    drag(rt, &format!("grips/{}/resize", column.id()), dx);
+}
+
+/// A window too narrow for every column: Name dragged narrower gives the room back, so a hidden
+/// column comes back, and Name still takes what's left (the list's right end is never empty).
+#[test]
+fn shrinking_name_brings_back_a_hidden_column() {
+    let mut rt = app(listed());
+    resize(&mut rt, 800.0, 540.0);
+    let before = shown(&rt);
+    assert!(before.len() < Column::ALL.len(), "something is hidden at 800: {before:?}");
+    let name = rect(&rt, "grips/name")[2];
+    resize_column(&mut rt, Column::Name, -(name - 130.0));
+    let after = shown(&rt);
+    assert!(after.len() > before.len(), "a column comes back: {before:?} then {after:?}");
+    let list = rect(&rt, "table");
+    let last = header(&rt).last().map(|(_, r)| r[0] + r[2]).unwrap();
+    assert!((last - (list[0] + list[2])).abs() < 1.0, "the columns reach the list's right end: {last} of {list:?}");
+}
+
+/// After Name and two more columns are resized, the grips lie exactly over the header's cells, and
+/// a double-click at each cell's drawn edge (the resize handle there, not covered by a grip) puts
+/// that column back.
+#[test]
+fn every_resize_handle_can_be_grabbed_after_resizing() {
+    let mut rt = app(listed());
+    resize(&mut rt, 1400.0, 540.0);
+    for (c, dx) in [(Column::Name, -60.0), (Column::Progress, 40.0), (Column::Size, -20.0)] {
+        resize_column(&mut rt, c, dx);
+    }
+    for (c, cell) in header(&rt) {
+        let grip = rect(&rt, &format!("grips/{}", c.id()));
+        assert!((grip[0] - cell[0]).abs() < 0.5 && (grip[2] - cell[2]).abs() < 0.5, "{c:?}: grip {grip:?} over its cell {cell:?}");
+    }
+    for c in [Column::Name, Column::Progress, Column::Size] {
+        assert!(rt.state.prefs.width(c).is_some(), "{c:?} was resized");
+        let cell = header(&rt).into_iter().find(|(h, _)| *h == c).unwrap().1;
+        let (x, y) = (cell[0] + cell[2] - 1.0, cell[1] + cell[3] / 2.0);
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+        }
+        settle(&mut rt);
+        assert!(rt.state.prefs.width(c).is_none(), "{c:?}'s edge at {x} gives it back");
+    }
+}
+
+/// A double-click on Name's edge puts Name back to taking the rest.
+#[test]
+fn a_double_click_on_names_edge_puts_it_back() {
+    let mut rt = app(listed());
+    resize(&mut rt, 800.0, 540.0);
+    let before = shown(&rt);
+    resize_column(&mut rt, Column::Name, -150.0);
+    assert!(shown(&rt).len() > before.len(), "Name's least is now smaller");
+    double_click_at(&mut rt, "grips/name/resize");
+    assert_eq!(shown(&rt), before, "back to taking the rest");
+    assert!(rt.state.prefs.width(Column::Name).is_none());
+}
+
+/// A double-click on another column's edge puts it back to its own width.
+#[test]
+fn a_double_click_on_a_columns_edge_puts_it_back() {
+    let mut rt = app(listed());
+    resize(&mut rt, 1400.0, 540.0);
+    let own = header(&rt).into_iter().find(|(c, _)| *c == Column::Size).unwrap().1[2];
+    resize_column(&mut rt, Column::Size, 50.0);
+    let wider = header(&rt).into_iter().find(|(c, _)| *c == Column::Size).unwrap().1[2];
+    assert!((wider - own - 50.0).abs() < 1.0, "Size follows the pointer: {own} then {wider}");
+    double_click_at(&mut rt, "grips/size/resize");
+    let back = header(&rt).into_iter().find(|(c, _)| *c == Column::Size).unwrap().1[2];
+    assert!((back - own).abs() < 0.5, "back to {own}: {back}");
+}
+
+fn double_click_at(rt: &mut Runtime<Phantom>, key: &str) {
+    let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
+    for _ in 0..2 {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    settle(rt);
+}
+
+fn width_of(rt: &Runtime<Phantom>, column: Column) -> f32 {
+    header(rt).into_iter().find(|(c, _)| *c == column).unwrap_or_else(|| panic!("{column:?} not shown")).1[2]
+}
+
+/// The widths dragged are kept in `gui.json` when the drag is let go, and drawn again after a
+/// restart; a width that isn't one (negative, for no column) is ignored, the file read as if it
+/// had none.
+#[test]
+fn dragged_widths_are_kept_and_restored() {
+    let kept = Kept_::new();
+    let mut rt = app(listed());
+    rt.state.prefs = kept.prefs(Kept::default());
+    resize(&mut rt, 1400.0, 540.0);
+    assert_eq!(file::read_at::<ColumnWidths>(&kept.path, COLUMN_WIDTHS), None, "nothing kept before");
+    resize_column(&mut rt, Column::Size, 50.0);
+    resize_column(&mut rt, Column::Name, -30.0);
+    let (size, name) = (kept.read().widths.clone(), width_of(&rt, Column::Size));
+    assert!(size != ColumnWidths::default(), "kept");
+
+    let mut again = app(listed());
+    again.state.prefs = kept.prefs(kept.read());
+    resize(&mut again, 1400.0, 540.0);
+    assert!((width_of(&again, Column::Size) - name).abs() < 0.5, "Size as it was");
+    assert_eq!(again.state.prefs.width(Column::Name), rt.state.prefs.width(Column::Name), "Name's least too");
+
+    for bad in [
+        serde_json::json!({"size": -3.0}),
+        serde_json::json!({"nonsense": 90.0}),
+        serde_json::json!({"status": 90.0}),
+        serde_json::json!("wide"),
+    ] {
+        file::keep_at(&kept.path, COLUMN_WIDTHS, Some(&bad)).unwrap();
+        assert_eq!(file::read_at::<ColumnWidths>(&kept.path, COLUMN_WIDTHS), None, "{bad} ignored");
+    }
+}
+
+/// A drag cancelled with Escape keeps nothing.
+#[test]
+fn a_cancelled_resize_keeps_nothing() {
+    let kept = Kept_::new();
+    let mut rt = app(listed());
+    rt.state.prefs = kept.prefs(Kept::default());
+    resize(&mut rt, 1400.0, 540.0);
+    let own = width_of(&rt, Column::Size);
+    let (x, y) = rt.find("grips/size/resize").unwrap();
+    rt.pointer_down(x, y);
+    for step in 1..=10 {
+        rt.pointer_move(x + step as f32 * 5.0, y);
+        rt.frame(FRAME);
+    }
+    assert!(width_of(&rt, Column::Size) > own + 10.0, "it follows the pointer");
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    rt.pointer_up(x + 50.0, y);
+    settle(&mut rt);
+    assert!((width_of(&rt, Column::Size) - own).abs() < 0.5, "back");
+    assert_eq!(file::read_at::<ColumnWidths>(&kept.path, COLUMN_WIDTHS), None);
+}
+
+/// The columns menu's items, by label, with whether each is ticked; none while it isn't open.
+fn columns_menu(rt: &Runtime<Phantom>) -> Vec<String> {
+    rt.elements()
+        .into_iter()
+        .filter(|e| !e.exiting && e.role == "menuitemcheckbox" && e.path.contains("columns-menu"))
+        .filter_map(|e| e.label.clone())
+        .collect()
+}
+
+fn open_columns_menu(rt: &mut Runtime<Phantom>) {
+    let (x, y) = rt.find("grips/name/grip").expect("the header");
+    rt.secondary_down(x, y);
+    rt.secondary_up(x, y);
+    settle(rt);
+}
+
+fn pick_column(rt: &mut Runtime<Phantom>, label: &str) {
+    let item = rt.elements().into_iter().find(|e| !e.exiting && e.role == "menuitemcheckbox" && e.label.as_deref() == Some(label)).unwrap();
+    let (x, y) = (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(rt);
+}
+
+/// The header's menu stays open while columns are ticked on and off, and closes on Escape or a
+/// press outside it.
+#[test]
+fn the_columns_menu_stays_open_across_picks() {
+    let mut rt = app(listed());
+    resize(&mut rt, 1400.0, 540.0);
+    open_columns_menu(&mut rt);
+    assert_eq!(columns_menu(&rt).len(), 8);
+    pick_column(&mut rt, "Size");
+    assert_eq!(columns_menu(&rt).len(), 8, "open after the first");
+    pick_column(&mut rt, "Peers");
+    assert_eq!(columns_menu(&rt).len(), 8, "open after the second");
+    assert!(!shown(&rt).contains(&Column::Size) && !shown(&rt).contains(&Column::Peers), "both hidden");
+    pick_column(&mut rt, "Size");
+    assert!(shown(&rt).contains(&Column::Size), "and back");
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    settle(&mut rt);
+    assert!(columns_menu(&rt).is_empty(), "Escape closes it");
+
+    open_columns_menu(&mut rt);
+    assert_eq!(columns_menu(&rt).len(), 8);
+    rt.pointer_down(2.0, 2.0);
+    rt.pointer_up(2.0, 2.0);
+    settle(&mut rt);
+    assert!(columns_menu(&rt).is_empty(), "a press outside closes it");
 }
