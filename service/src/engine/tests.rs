@@ -5512,6 +5512,7 @@ async fn send_end(engine: &Engine, id: u64, task: tokio::task::Id, added: anyhow
     engine.inspect(|_| ()).await;
 }
 
+mod found;
 mod letgo;
 mod links;
 mod moving;

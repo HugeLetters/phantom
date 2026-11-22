@@ -591,6 +591,25 @@ pub fn happened_listing(action: UndoAction, count: usize, names: &[String]) -> L
     Listing::new(&names_listed(names), note)
 }
 
+/// What a Move or a Rename that found its torrents where they are now tells (#358), as the bar's
+/// line: "Found", "Found 3 torrents". Their names and where they are are the list's.
+pub fn found(torrents: usize) -> String {
+    match torrents {
+        1 => "Found".into(),
+        many => format!("Found {many} torrents"),
+    }
+}
+
+/// What [`found`] lists: each torrent's name, and where it is now on a line of its own.
+pub fn found_listing(found: &[(String, std::path::PathBuf)]) -> Listing {
+    Listing { groups: found.iter().map(|(name, at)| vec![Line::Name(name.clone()), Line::Path(at.display().to_string())]).collect() }
+}
+
+/// What the CLI prints of a torrent a Move or a Rename found where it is now (#358).
+pub fn found_line(name: &str, at: &std::path::Path) -> String {
+    format!("Found {name} at {}: nothing moved, it's checked there", at.display())
+}
+
 /// The action that undoes it.
 pub fn undo() -> &'static str {
     "Undo"
@@ -1722,6 +1741,15 @@ mod tests {
         assert_eq!(happened_listing(UndoAction::Rename, 1, &[changed("Album", "Album 2")]).plain(), "Album → Album 2");
         assert_eq!(happened_listing(UndoAction::Delete, 1, &one).plain(), "Album\nIts files are in the Trash.");
         assert_eq!(happened_listing(UndoAction::Delete, 2, &one).plain(), "Album\nTheir files are in the Trash.");
+    }
+
+    /// A torrent found where it is now (#358): "Found" in the line; its name in the list, and where
+    /// it is on a line of its own, never in the line.
+    #[test]
+    fn a_torrent_found_lists_its_name_and_where_it_is_on_its_own_line() {
+        assert_eq!((found(1), found(3)), ("Found".to_owned(), "Found 3 torrents".to_owned()));
+        let listed = found_listing(&[("Album".into(), "/Films/Album".into())]);
+        assert_eq!(listed.groups, [vec![Line::Name("Album".into()), Line::Path("/Films/Album".into())]]);
     }
 
     /// A Rename's undo lists "renamed → original", once this app knows what it was renamed from.

@@ -3,7 +3,8 @@
 //! it: by its lifecycle (as a Move), where something is at the new name on the pretend disk
 //! ([`taken_on_disk`](MemoryService::taken_on_disk)), or where another torrent in the list keeps its
 //! files; its own name does nothing. The row shows the new name, and its info's as the original.
-//! ⌘Z on a Rename whose torrent is moving is refused rather than wait.
+//! ⌘Z on a Rename whose torrent is moving is refused rather than wait. One renamed by hand to the
+//! new name is found there (#358, `found.rs`), and its undo points it back.
 
 use std::path::{Path, PathBuf};
 
@@ -30,7 +31,8 @@ impl MemoryService {
     }
 
     /// Renames torrent `id` to `name` now: the name it had, if it had another; none to its own
-    /// name; or why not, as the engine refuses it.
+    /// name; or why not, as the engine refuses it. Its files renamed there by hand, it's found
+    /// there (#358): nothing moves, and they're back at its paths.
     pub(super) fn rename(&mut self, id: TorrentId, name: &str) -> Result<Option<String>, TorrentRefusal> {
         let m = self.machines.get(&id).ok_or(TorrentRefusal::NotInList)?;
         lifecycle::decide(&m.state, &Event::Command(Action::Rename))?;
@@ -39,19 +41,24 @@ impl MemoryService {
             return Ok(None);
         }
         let destination = self.destinations.get(&id).cloned().unwrap_or_else(super::downloads);
-        self.name_free(id, &destination, name)?;
+        let found = self.found_at(id, &destination.join(name));
+        self.name_free(id, &destination, name, found)?;
         self.take_name(id, name);
+        if found {
+            self.take_found(id);
+        }
         Ok(Some(was))
     }
 
     /// Whether torrent `id` can take the name `name` in `folder`, as the engine judges it for a
-    /// Rename and a Move under a new name (#270): nothing on the pretend disk at it, and it isn't
-    /// another listed torrent's place.
-    pub(super) fn name_free(&self, id: TorrentId, folder: &Path, name: &str) -> Result<(), TorrentRefusal> {
+    /// Rename and a Move under a new name (#270): nothing on the pretend disk at it (but its own
+    /// files, `found` there: #358), and it isn't another listed torrent's place.
+    pub(super) fn name_free(&self, id: TorrentId, folder: &Path, name: &str, found: bool) -> Result<(), TorrentRefusal> {
         let at = folder.join(name);
         let path = || AbsolutePath::new(at.clone()).expect("absolute");
         let folded = |p: &Path| p.to_string_lossy().to_lowercase();
-        if self.taken_on_disk.iter().any(|p| folded(p) == folded(&at)) {
+        let by_hand = self.by_hand.values().map(|(p, _)| p);
+        if !found && self.taken_on_disk.iter().chain(by_hand).any(|p| folded(p) == folded(&at)) {
             return Err(TorrentRefusal::NameTaken { path: path() });
         }
         let theirs = self.torrents.iter().filter(|t| t.id != id).find(|t| t.location.as_deref().is_some_and(|l| folded(l) == folded(&at)));

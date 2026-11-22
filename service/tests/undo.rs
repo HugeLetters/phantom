@@ -60,7 +60,7 @@ fn a_remove_is_undone_across_a_restart_of_the_service() {
     let destination = client::absolute(dir.path()).unwrap();
     let ids: Vec<u64> =
         [added.id].into_iter().chain((0..2).map(|n| client.add(magnet(n), true, Some(destination.clone())).unwrap().id)).collect();
-    assert!(client.commands(&ids, proto::TorrentCommand::Remove).unwrap().is_empty(), "each removed");
+    assert!(client.commands(&ids, proto::TorrentCommand::Remove).unwrap().failed.is_empty(), "each removed");
     let snapshot = Client::open().unwrap().snapshot(Vec::new()).unwrap();
     assert!(snapshot.torrents.is_empty());
     assert_eq!(snapshot.undo.len(), 1, "one request, one entry: {:?}", snapshot.undo);

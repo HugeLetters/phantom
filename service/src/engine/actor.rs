@@ -91,17 +91,17 @@ pub(super) enum Message {
         paused: bool,
         reply: oneshot::Sender<Result<Added, Failure>>,
     },
-    /// `command` for each of `ids`: answered with those that failed.
+    /// `command` for each of `ids`: answered with those that failed, and those found (#358).
     Command {
         ids: Vec<TorrentId>,
         command: TorrentCommand,
-        reply: oneshot::Sender<Vec<(TorrentId, Failure)>>,
+        reply: oneshot::Sender<super::Commanded>,
     },
-    /// `moves` into `to`, one step each, in order: answered with those that failed.
+    /// `moves` into `to`, one step each, in order: answered with those that failed, and those found.
     Moves {
         to: AbsolutePath,
         moves: Vec<proto::MoveOf>,
-        reply: oneshot::Sender<Vec<(TorrentId, Failure)>>,
+        reply: oneshot::Sender<super::Commanded>,
     },
     /// Which of `ids` a Move into `to` would find files at (`proto::Request::Clashes`).
     Clashes {

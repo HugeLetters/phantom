@@ -48,7 +48,7 @@ pub(super) async fn engine_counting(dir: &Path, reads: Arc<std::sync::atomic::At
 }
 
 /// [`engine_counting`]'s, each read waiting while `gate` is held.
-async fn engine_reading(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>, gate: Arc<super::super::files::Gate>) -> Engine {
+pub(super) async fn engine_reading(dir: &Path, reads: Arc<std::sync::atomic::AtomicUsize>, gate: Arc<super::super::files::Gate>) -> Engine {
     let guard = super::super::files::Guard::default().counting_reads(reads).with_gate(super::super::files::At::Read, gate);
     engine_guarded(dir, guard, Default::default()).await
 }

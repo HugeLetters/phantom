@@ -260,13 +260,18 @@ impl Engine {
     /// What `proto::Request::Torrents` says it does: those of `ids` that didn't do as asked, with
     /// why.
     pub async fn commands(&self, ids: Vec<TorrentId>, command: TorrentCommand) -> Result<Vec<(TorrentId, Failure)>, Failure> {
+        Ok(self.commanded(ids, command).await?.failed)
+    }
+
+    /// [`Engine::commands`], with the torrents a Move or a Rename found where they are now (#358).
+    pub async fn commanded(&self, ids: Vec<TorrentId>, command: TorrentCommand) -> Result<Commanded, Failure> {
         self.ask(|reply| Message::Command { ids, command, reply }).await
     }
 
     /// What `proto::Request::Moves` says it does: those of `moves` that didn't move, with why.
     #[cfg(test)]
     pub async fn moves(&self, to: AbsolutePath, moves: Vec<proto::MoveOf>) -> Result<Vec<(TorrentId, Failure)>, Failure> {
-        self.send_moves(to, moves).await?.await
+        Ok(self.send_moves(to, moves).await?.await?.failed)
     }
 
     /// [`Engine::moves`], sent: its answer, which holds nothing of this engine, comes once every
@@ -277,7 +282,7 @@ impl Engine {
         &self,
         to: AbsolutePath,
         moves: Vec<proto::MoveOf>,
-    ) -> Result<impl Future<Output = Result<Vec<(TorrentId, Failure)>, Failure>> + Send + 'static, Failure> {
+    ) -> Result<impl Future<Output = Result<Commanded, Failure>> + Send + 'static, Failure> {
         let (reply, answer) = oneshot::channel();
         self.actor.send(Message::Moves { to, moves, reply }).await.map_err(|_| stopping())?;
         Ok(async move { answer.await.map_err(|_| stopping()) })
@@ -294,7 +299,7 @@ impl Engine {
         async move {
             let (reply, answer) = oneshot::channel();
             actor.send(Message::Moves { to, moves, reply }).await.map_err(|_| stopping())?;
-            answer.await.map_err(|_| stopping())
+            Ok(answer.await.map_err(|_| stopping())?.failed)
         }
     }
 
@@ -365,7 +370,7 @@ impl Engine {
         let sent = self.actor.send(Message::Command { ids: vec![id], command, reply }).await;
         async move {
             sent.map_err(|_| stopping())?;
-            first_failure(answer.await.map_err(|_| stopping())?)
+            first_failure(answer.await.map_err(|_| stopping())?.failed)
         }
     }
 
@@ -381,7 +386,7 @@ impl Engine {
         let sent = self.actor.send(Message::Command { ids, command, reply }).await;
         async move {
             sent.map_err(|_| stopping())?;
-            answer.await.map_err(|_| stopping())
+            Ok(answer.await.map_err(|_| stopping())?.failed)
         }
     }
 
@@ -403,7 +408,7 @@ impl Engine {
         async move {
             let (reply, answer) = oneshot::channel();
             actor.send(Message::Command { ids: vec![id], command, reply }).await.map_err(|_| stopping())?;
-            first_failure(answer.await.map_err(|_| stopping())?)
+            first_failure(answer.await.map_err(|_| stopping())?.failed)
         }
     }
 
@@ -655,6 +660,14 @@ impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
         Self::Error(proto::ServiceError::Internal { detail: format!("{error:#}") })
     }
+}
+
+/// How a command of several torrents went: those that didn't do as asked, with why, and those a
+/// Move or a Rename found where they are now, moving nothing (#358).
+#[derive(Debug, Default)]
+pub struct Commanded {
+    pub failed: Vec<(TorrentId, Failure)>,
+    pub found: Vec<TorrentId>,
 }
 
 /// A command for one torrent: its failure, if it failed.

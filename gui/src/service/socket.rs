@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
 use client::machine::{self, Do, Event, Observed, Requests, State, Verdict, Why, World};
-use client::{Client, Failure, Socket, Watcher, display};
+use client::{Client, Commanded, Failure, Socket, Watcher, display};
 use proto::{AbsolutePath, AddSource, Added, Refusal, Setting, Settings, TorrentCommand, TorrentId};
 
 use super::{AddError, AddRequest, Done, Incoming, Live, Service, answer};
@@ -123,6 +123,12 @@ impl SocketService {
     }
 }
 
+/// A command's answer, or, not reaching the service, every one of `all` failed alike.
+fn all_failed(result: Result<Commanded, Failure>, all: &[TorrentId]) -> Commanded {
+    result
+        .unwrap_or_else(|e| Commanded { failed: all.iter().map(|&id| (id, Failure::Error(anyhow!("{e:#}")))).collect(), found: Vec::new() })
+}
+
 impl Service for SocketService {
     /// The first refused for want of a destination answers for the rest too, unsent: they'd be
     /// refused as well. Failing to reach the service fails the add as a whole: one failure.
@@ -145,30 +151,22 @@ impl Service for SocketService {
         self.run(op, Box::new(move |s, ran, tx| done(s, ran.unwrap_or_else(|e| vec![Err(AddError::Failed(e))]), tx)));
     }
 
-    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Vec<(TorrentId, Failure)>>) {
+    fn command(&mut self, ids: &[TorrentId], command: TorrentCommand, done: Done<Commanded>) {
         let (ids, all) = (ids.to_vec(), ids.to_vec());
         // One request for all of them (#235). The snapshot after it has the files' new priorities
         // too, as it watches them.
-        let each = move |c: &mut Client| -> Result<Vec<(TorrentId, Failure)>, Failure> { c.commands(&ids, command) };
+        let each = move |c: &mut Client| -> Result<Commanded, Failure> { c.commands(&ids, command) };
         self.run(
             each,
-            Box::new(move |s: &mut Phantom, result: Result<Vec<(TorrentId, Failure)>, Failure>, tx: &mut Tx| {
-                // Not reaching the service: every one failed alike.
-                let failed = result.unwrap_or_else(|e| all.iter().map(|&id| (id, Failure::Error(anyhow!("{e:#}")))).collect());
-                done(s, failed, tx)
-            }),
+            Box::new(move |s: &mut Phantom, result: Result<Commanded, Failure>, tx: &mut Tx| done(s, all_failed(result, &all), tx)),
         );
     }
 
-    fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>, done: Done<Vec<(TorrentId, Failure)>>) {
+    fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>, done: Done<Commanded>) {
         let all: Vec<TorrentId> = moves.iter().map(|m| m.id).collect();
         self.run(
             move |c| c.moves(to, moves),
-            Box::new(move |s: &mut Phantom, result: Result<Vec<(TorrentId, Failure)>, Failure>, tx: &mut Tx| {
-                // Not reaching the service: every one failed alike.
-                let failed = result.unwrap_or_else(|e| all.iter().map(|&id| (id, Failure::Error(anyhow!("{e:#}")))).collect());
-                done(s, failed, tx)
-            }),
+            Box::new(move |s: &mut Phantom, result: Result<Commanded, Failure>, tx: &mut Tx| done(s, all_failed(result, &all), tx)),
         );
     }
 

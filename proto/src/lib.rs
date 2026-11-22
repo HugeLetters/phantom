@@ -378,8 +378,12 @@ pub enum Response {
     SettingSet(SettingSet),
     /// How a `Torrents` command went: the torrents that didn't do as asked, with why (none: all
     /// did). One taken back by an Undo before it ended is refused with [`Refusal::Undone`].
+    /// `found`: those a Move or a Rename found where they are now, its files moved or renamed by
+    /// hand: it pointed them there and checks them, moving nothing (#358).
     Commanded {
         failed: Vec<TorrentFailed>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        found: Vec<TorrentId>,
     },
     /// Refused, for a reason the client may act on.
     Refused(Refusal),

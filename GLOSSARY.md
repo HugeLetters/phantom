@@ -182,7 +182,8 @@ sent to the Trash first, and the torrent is checked. Of a Remove or Delete: the 
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
 files come back from the Trash to where they were; of a selection's, every torrent in it, each on
 its own. A partial Delete undoes what it moved. Of a Rename: it's renamed back, as a Rename is (never
-over something at its old name, nor while it moves to another folder). The last
+over something at its old name, nor while it moves to another folder); of one that **Found** its
+torrent, it's pointed back at its old name, moving nothing. The last
 20 Removes, Deletes, Moves to Trash and Renames can be undone, last first; Pause, Resume, a priority, Add
 and Check aren't undone, and there's no redo. Refused, with why, when
 it can't be done now (the Trash was emptied, something is where a file goes back, the drive isn't
@@ -251,6 +252,23 @@ one taken over unchanged: that torrent isn't moved, and the notice says "Another
 files there", with the path; only a new name moves it there. What Use existing keeps must still be as the dialog showed once the
 rest is copied, or the Move goes back.
 _Avoid_: relocate, change folder, set location
+
+**Found**:
+A torrent the person moved or renamed in Finder, which Move to… the folder it's in now, or
+Rename… to the name it has now, points at where it is (#358). It's found when none of its files is
+at its path where it was (it's Missing files there), and where it's going its own folder (or its
+one file, for a torrent of one file) is there, every file of it there is a file no longer than its
+own (reached through real folders, no link), at least one is, and it isn't another listed
+torrent's place. Then nothing moves, and nothing is made, written over or removed in either
+place: the torrent is pointed there and checked in full, then runs or stays stopped as before.
+The status bar says "Found", with its name and where it is in the list (and Reveal in Finder);
+`phantom move` and `phantom rename` print it. Not found (files of it still where it was, a file
+there longer than its own, or none of its files there), it's a Move or a Rename as ever: a Move
+asks about the files there as a clash, a Rename finds the name taken. A found Rename is one step
+of Undo, which points it back at its old name, moving nothing, Missing files again; a found Move
+isn't undone, as a Move isn't. What's found is taken as the torrent's: the check sets each file it
+gets to its own length, and one wanted running downloads over what isn't its own.
+_Avoid_: locate, relink, reconcile (in what people see)
 
 **Rename…**:
 Give a torrent a new name on disk where it is (in the row menu and the palette, for one torrent;
