@@ -12,6 +12,9 @@ const KEPT: usize = 1000;
 #[derive(Debug, Default)]
 pub struct Undos {
     left: BTreeMap<u64, Leave>,
+    /// What the notice of each action this app told listed: for a Move to Trash the torrent and
+    /// its files, for a Rename the name it had and the name it got. Its undo lists them too.
+    told: BTreeMap<u64, Vec<String>>,
 }
 
 impl Undos {
@@ -25,6 +28,19 @@ impl Undos {
             self.left.pop_first();
         }
         new
+    }
+
+    /// Keeps what the notice of entry `seq` listed.
+    pub fn remember(&mut self, seq: u64, listed: Vec<String>) {
+        self.told.insert(seq, listed);
+        while self.told.len() > KEPT {
+            self.told.pop_first();
+        }
+    }
+
+    /// What the notice of entry `seq` listed, if this app told it.
+    pub fn did(&self, seq: u64) -> Option<&[String]> {
+        self.told.get(&seq).map(Vec::as_slice)
     }
 
     /// Why entry `seq` left the stack, if the service has said.

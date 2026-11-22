@@ -279,6 +279,17 @@ pub fn not_moved(why: &NotMoved) -> String {
     }
 }
 
+/// [`not_moved`] for a list: no word that repeats the line, a path on a line of its own.
+pub fn not_moved_reason(why: &NotMoved) -> Reason {
+    match why {
+        NotMoved::Unavailable { reason } => unavailable_reason(reason),
+        NotMoved::CopyGone { path } => Reason::at("Gone from the new destination while it was copied", path),
+        NotMoved::NotAFolder { path } => Reason::at("Something is in the way at", path),
+        NotMoved::Taken { path } => Reason::at("Something was put there while it moved", path),
+        other => Reason::new(not_moved(other)),
+    }
+}
+
 fn paths(files: &[AbsolutePath]) -> String {
     files.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(", ")
 }
@@ -365,6 +376,169 @@ pub fn names_listed(names: &[String]) -> String {
     names.join("\n")
 }
 
+/// A line of a notice's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// A name or a text of Phantom's, in the text's own colour; it wraps.
+    Name(String),
+    /// A reason or a label, muted; it wraps.
+    Muted(String),
+    /// A path or a link, on a line of its own: shortened in the middle when it doesn't fit, whole
+    /// on hover. Never inside a sentence.
+    Path(String),
+}
+
+impl Line {
+    /// What the line says.
+    pub fn text(&self) -> &str {
+        match self {
+            Line::Name(t) | Line::Muted(t) | Line::Path(t) => t,
+        }
+    }
+}
+
+/// What a notice's list says under its line, as data: groups of lines, a group (a name and what's
+/// to say of it) set apart from the next.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listing {
+    pub groups: Vec<Vec<Line>>,
+}
+
+impl Listing {
+    /// `names`, a line each, then `why`, muted.
+    pub fn new(names: &str, why: impl Into<String>) -> Self {
+        let mut groups: Vec<Vec<Line>> = names.lines().filter(|n| !n.is_empty()).map(|n| vec![Line::Name(n.to_owned())]).collect();
+        let why = why.into();
+        if !why.is_empty() {
+            groups.push(vec![Line::Muted(why)]);
+        }
+        Self { groups }
+    }
+
+    /// Each of `failures`: what failed, and why under it.
+    pub fn of_failures(failures: impl IntoIterator<Item = (String, String)>) -> Self {
+        let groups = failures
+            .into_iter()
+            .map(|(what, why)| std::iter::once(Line::Name(what)).chain((!why.is_empty()).then_some(Line::Muted(why))).collect())
+            .collect();
+        Self { groups }
+    }
+
+    /// Each of `failures`: what failed (a link, a file or a torrent's name), and its reason under it.
+    pub fn of_entries<'a>(failures: impl IntoIterator<Item = (&'a str, &'a Reason)>) -> Self {
+        Self { groups: failures.into_iter().map(|(what, why)| std::iter::once(add_what(what)).chain(why.lines()).collect()).collect() }
+    }
+
+    /// One group: `first`, then the `reason`'s lines.
+    pub fn failure(first: Line, reason: &Reason) -> Self {
+        Self { groups: vec![std::iter::once(first).chain(reason.lines()).collect()] }
+    }
+
+    /// `self` with one more group at its end.
+    pub fn then(mut self, group: Vec<Line>) -> Self {
+        if !group.is_empty() {
+            self.groups.push(group);
+        }
+        self
+    }
+
+    /// Every line, in order.
+    pub fn lines(&self) -> impl Iterator<Item = &Line> {
+        self.groups.iter().flatten()
+    }
+
+    /// Its lines, one each, as plain text.
+    pub fn plain(&self) -> String {
+        self.lines().map(Line::text).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Every text it shows, for measuring.
+    pub fn texts(&self) -> impl Iterator<Item = &str> {
+        self.lines().map(Line::text).filter(|t| !t.is_empty())
+    }
+
+    /// Whether a group has more than one line: the groups are then set further apart.
+    pub fn is_apart(&self) -> bool {
+        self.groups.iter().any(|g| g.len() > 1)
+    }
+}
+
+/// Why something didn't happen, split for a list: words, then the paths each on a line of its own,
+/// under a `label` when the words don't lead into them ("Still at:").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Reason {
+    pub text: String,
+    pub label: String,
+    pub paths: Vec<String>,
+}
+
+impl Reason {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into(), label: String::new(), paths: Vec::new() }
+    }
+
+    /// `text`, which leads into `path`: "Something is already at".
+    pub fn at(text: impl Into<String>, path: &std::path::Path) -> Self {
+        Self { paths: vec![path.display().to_string()], ..Self::new(text) }
+    }
+
+    /// `self`, with `paths` under `label`.
+    pub fn still(self, label: &str, paths: Vec<String>) -> Self {
+        Self { label: label.into(), paths, ..self }
+    }
+
+    /// The lines it makes: the words and the label muted, the paths each a line.
+    pub fn lines(&self) -> Vec<Line> {
+        let words = [&self.text, &self.label].into_iter().filter(|t| !t.is_empty()).map(|t| Line::Muted(t.clone()));
+        words.chain(self.paths.iter().map(|p| Line::Path(p.clone()))).collect()
+    }
+
+    /// On one line, for where a list isn't (the CLI, a tooltip): "Something is already at: /a/b".
+    pub fn inline(&self) -> String {
+        match (self.paths.is_empty(), self.label.is_empty()) {
+            (true, _) => self.text.clone(),
+            (false, true) => format!("{}: {}", self.text, self.paths.join(", ")),
+            (false, false) => format!("{}. {} {}", self.text, self.label, self.paths.join(", ")),
+        }
+    }
+}
+
+impl From<String> for Reason {
+    fn from(text: String) -> Self {
+        Self::new(text)
+    }
+}
+
+impl From<&str> for Reason {
+    fn from(text: &str) -> Self {
+        Self::new(text)
+    }
+}
+
+/// An old and a new value, in a list: "10 MB/s → 2 MB/s".
+pub fn changed(old: &str, new: &str) -> String {
+    format!("{old} → {new}")
+}
+
+/// `text` without the OS's own code in its tail: "Operation not permitted (os error 1)" is
+/// "Operation not permitted".
+pub fn without_os_code(text: &str) -> &str {
+    match text.rfind(" (os error ") {
+        Some(at) if text.ends_with(')') => &text[..at],
+        _ => text,
+    }
+}
+
+/// What a link or a file named in a failed add's list is: a magnet link with a name says the name;
+/// a link without one is the link, on a line of its own, shortened in the middle; a file is its name.
+pub fn add_what(what: &str) -> Line {
+    if let Ok(crate::Link::Magnet { name: Some(name), .. }) = crate::parse_link(what) {
+        return Line::Name(name);
+    }
+    let link = ["magnet:", "http://", "https://"].iter().any(|scheme| what.starts_with(scheme));
+    if link { Line::Path(what.to_owned()) } else { Line::Name(what.to_owned()) }
+}
+
 /// What the status bar says when opening or revealing a file in Finder failed: "Can't open the
 /// file". The path and the reason are the list's ([`show_failed_more`]).
 pub fn cant_show(action: Action) -> &'static str {
@@ -380,9 +554,14 @@ pub fn cant_start_finder() -> &'static str {
     "Can't open Finder"
 }
 
-/// The list of a failed Open or Reveal: the path, then why.
-pub fn show_failed_more(path: &std::path::Path, reason: &str) -> String {
-    format!("{}\n{}", path.display(), sentence(reason))
+/// The list of a failed Open or Reveal: the path on a line of its own, then why.
+pub fn show_failed_listing(path: &std::path::Path, reason: &str) -> Listing {
+    Listing { groups: vec![vec![Line::Path(path.display().to_string()), Line::Muted(sentence(reason))]] }
+}
+
+/// The button of a failed Open or Reveal that opens the file's folder, when that is on disk.
+pub fn show_folder() -> &'static str {
+    "Show folder"
 }
 
 /// Why Open or Reveal found nothing to show.
@@ -418,23 +597,17 @@ pub fn happened(action: UndoAction, torrents: usize) -> String {
     }
 }
 
-/// What a Remove, Delete or Move to Trash that was done lists: the `names` of the torrents (or the
-/// one file's), then [`happened_note`].
-pub fn happened_more(action: UndoAction, count: usize, names: &[String]) -> String {
-    format!("{}\n{}", names_listed(names), happened_note(action, count))
-}
-
-/// What a Remove or Delete that was done means for the files of `count` torrents.
-fn happened_note(action: UndoAction, count: usize) -> String {
-    match (action, count) {
-        (UndoAction::Remove, 1) => "Its files stay where they are.".into(),
-        (UndoAction::Remove, _) => "Their files stay where they are.".into(),
-        (UndoAction::Delete, 1) => "Its files are in the Trash.".into(),
-        (UndoAction::Delete, _) => "Their files are in the Trash.".into(),
-        (UndoAction::TrashFiles { .. }, 1) => "It's set to Off, so it won't be downloaded again.".into(),
-        (UndoAction::TrashFiles { .. }, _) => "They're set to Off, so they won't be downloaded again.".into(),
-        (UndoAction::Rename, _) => "Its files have this name on disk now.".into(),
-    }
+/// What a Remove, Delete, Move to Trash or Rename that was done lists: the `names` of the
+/// torrents (or the torrent and the files, or "old → new"), then what it did that the line leaves
+/// out: a Delete's files are in the Trash, a moved file is Off.
+pub fn happened_listing(action: UndoAction, count: usize, names: &[String]) -> Listing {
+    let note = match (action, count) {
+        (UndoAction::Delete, 1) => "Its files are in the Trash.",
+        (UndoAction::Delete, _) => "Their files are in the Trash.",
+        (UndoAction::TrashFiles { .. }, _) => "Set to Off",
+        (UndoAction::Remove | UndoAction::Rename, _) => "",
+    };
+    Listing::new(&names_listed(names), note)
 }
 
 /// The action that undoes it.
@@ -535,9 +708,17 @@ pub fn undone_line(undo: &Undoable) -> String {
     }
 }
 
-/// What an undo's list shows: the names of the torrents it brought back.
-pub fn undone_more(undo: &Undoable) -> String {
-    names_listed(&undo.torrents.iter().map(|t| t.name.clone()).collect::<Vec<_>>())
+/// What an undo's list shows: the names of the torrents it brought back. `did` is what the action's
+/// own notice listed, if this app told it: the files a Move to Trash moved are named, and a Rename's
+/// names go back as "renamed → original".
+pub fn undone_listing(undo: &Undoable, did: Option<&[String]>) -> Listing {
+    let torrents = || undo.torrents.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    let names = match (undo.action, did) {
+        (UndoAction::Rename, Some([was, now])) => vec![changed(now, was)],
+        (UndoAction::TrashFiles { .. }, Some(did)) => did.to_vec(),
+        _ => torrents(),
+    };
+    Listing::new(&names_listed(&names), "")
 }
 
 /// The torrents of an undo entry: its one torrent's name, or "3 torrents".
@@ -549,21 +730,37 @@ fn undo_names(undo: &Undoable) -> String {
 }
 
 /// An undo that couldn't be done, as a notice: "Couldn't undo the Delete" for the bar's line; the
-/// list has the torrents' names, then why, with what stayed out of the Trash, if anything did.
-pub fn cant_undo_line(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
+/// list has the torrents' names, then why, and what stayed out of the Trash, if anything did.
+pub fn cant_undo_line(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, Listing) {
     let names: Vec<String> = undo.torrents.iter().map(|t| t.name.clone()).collect();
-    (
-        format!("Couldn't undo the {}", undo_action(undo.action)),
-        format!("{}\n{}", names_listed(&names), sentence(&cant_undo_whole(why, stranded))),
-    )
+    let listing = Listing::new(&names_listed(&names), "").then(cant_undo_reason(why).lines());
+    let stranded = (!stranded.is_empty()).then(|| {
+        std::iter::once(Line::Muted("Still in place:".into())).chain(stranded.iter().map(|p| Line::Path(p.display().to_string()))).collect()
+    });
+    (format!("Couldn't undo the {}", undo_action(undo.action)), listing.then(stranded.unwrap_or_default()))
 }
 
-/// A torrent of an undo of several that didn't come back, as [`cant_undo`] words it; one added
+/// A torrent of an undo of several that didn't come back, as [`cant_undo_line`] words it; one added
 /// again since: "Already in the list", its name in the list (nothing was touched).
-pub fn not_back_line(not: &proto::NotBack) -> (String, String) {
+pub fn not_back_line(not: &proto::NotBack) -> (String, Listing) {
     match &not.why {
-        CantUndo::InList => (already_in_list().into(), not.torrent.name.clone()),
+        CantUndo::InList => (already_in_list().into(), Listing::new(&not.torrent.name, "")),
         why => cant_undo_line(&Undoable { seq: 0, action: not.action, torrents: vec![not.torrent.clone()] }, why, &not.stranded),
+    }
+}
+
+/// Why an undo couldn't be done, as a list says it: short words, the path of what's in the way on
+/// a line of its own.
+pub fn cant_undo_reason(why: &CantUndo) -> Reason {
+    match why {
+        CantUndo::NotInTrash { path } => Reason::at("Not in the Trash any more", path),
+        CantUndo::PathTaken { path } => Reason::at("Something is already at", path),
+        CantUndo::NotAFolder { path } => Reason::at("A link or a file is where a folder should be", path),
+        CantUndo::PutBackFailed { path, detail } => {
+            Reason::at(format!("Couldn't go back ({}), so everything stays in the Trash", without_os_code(detail)), path)
+        }
+        CantUndo::Destination { reason } => unavailable_reason(reason),
+        other => Reason::new(sentence(&cant_undo_why(other))),
     }
 }
 
@@ -693,26 +890,27 @@ pub fn setting_undone(name: proto::SettingName, settings: &proto::Settings) -> S
     back_to(setting_short(name.key()), &setting_value(name, settings))
 }
 
+/// What the bar says of an undo of a change to the saved Look Presets: the preset's name, which the
+/// user chose, is the list's ([`preset_change`]).
+pub fn look_preset_undone() -> &'static str {
+    "Look Preset change undone"
+}
+
+/// A theme setting of a saved Look Preset, as the bar's line names it: no name the user chose,
+/// "Accent colour (Dark) of a saved Look Preset".
+pub fn of_a_saved_preset(short: &str) -> String {
+    format!("{short} of a saved Look Preset")
+}
+
 /// What an undo of a setting tells, short: "Download limit undone"; `short` is [`setting_short`]'s,
 /// or a theme setting's name ("Accent colour (Dark)").
 pub fn setting_undone_short(short: &str) -> String {
     format!("{short} undone")
 }
 
-/// What it tells in the popover: "Download limit back from 10 MB/s to 5 MB/s", the value as
-/// [`setting_value`] words it.
-pub fn setting_undone_more(short: &str, undone: &str, now: &str) -> String {
-    format!("{short} back from {undone} to {now}")
-}
-
 /// What a refused undo says in the list: "Couldn't be undone: the service is stopping" (#200's words).
 pub fn couldnt_undo(why: &str) -> String {
     format!("Couldn't be undone: {why}")
-}
-
-/// What the bar says of an undo of a setting that was refused; the reason is the list's.
-pub fn setting_not_undone() -> &'static str {
-    "Couldn't be undone"
 }
 
 /// What the bar says of a change of a setting the service failed to make; the reason is the list's.
@@ -722,12 +920,19 @@ pub fn setting_not_changed() -> &'static str {
 
 /// What the bar says when the file picker failed; the reason is the list's.
 pub fn cant_ask_for_file() -> &'static str {
-    "Can't ask for a file"
+    "Can't open the file dialog"
 }
 
 /// What the bar says when `gui.json` couldn't be read; the reason is the list's.
 pub fn cant_read_gui_json() -> &'static str {
-    "Can't read gui.json"
+    "Can't read the window settings"
+}
+
+/// What the list behind [`cant_read_gui_json`] says: the file, why it couldn't be read, and what
+/// Phantom did about it.
+pub fn gui_json_listing(file: &std::path::Path, reason: &str) -> Listing {
+    Listing { groups: vec![vec![Line::Path(file.display().to_string()), Line::Muted(sentence(reason))]] }
+        .then(vec![Line::Muted("The window settings are back to their defaults".into())])
 }
 
 /// What the bar says when the service kept the torrents' database aside, unreadable; the list has
@@ -742,24 +947,29 @@ pub fn records_set_aside_why(kept: &std::path::Path) -> String {
     format!("The torrent list was kept aside as it was, at {}. Phantom started with an empty list.", kept.display())
 }
 
+/// What the list behind [`records_set_aside`] says as data: where the database was kept, on a line
+/// of its own, and that Phantom started with an empty list.
+pub fn records_set_aside_listing(kept: &std::path::Path) -> Listing {
+    Listing { groups: vec![vec![Line::Muted("The torrent list was kept aside as it was:".into()), Line::Path(kept.display().to_string())]] }
+        .then(vec![Line::Muted("Phantom started with an empty list.".into())])
+}
+
 /// What the bar says when a part of a file in the Trash couldn't be kept on disk, even at a retry;
-/// the list has the file and why ([`part_not_saved_why`]).
+/// the list has the file and why ([`part_not_saved_listing`]).
 pub fn part_not_saved() -> &'static str {
     "Couldn't save part of a file in the Trash"
 }
 
-/// What the list behind [`part_not_saved`] says: which file, why the disk write failed, and that a
-/// restart loses what it had, so the file's Undo may need a re-download.
-pub fn part_not_saved_why(file: &std::path::Path, reason: &str) -> String {
-    format!(
-        "Part of {} couldn't be saved on disk: {reason}. If Phantom restarts before the file is back, its Undo may need a re-download.",
-        file.display()
-    )
+/// What the list behind [`part_not_saved`] says: the file on a line of its own, then why the disk
+/// write failed.
+pub fn part_not_saved_listing(file: &std::path::Path, reason: &str) -> Listing {
+    Listing { groups: vec![vec![Line::Path(file.display().to_string()), Line::Muted(sentence(without_os_code(reason)))]] }
 }
 
-/// What the bar says of an undo that failed for a reason outside Phantom's words; the list has it.
+/// What the bar says of an undo that failed, whatever the reason and whatever it was of (torrents
+/// or a setting): one failure, one wording. The list has what it was of, and why.
 pub fn undo_failed() -> &'static str {
-    "Couldn't undo"
+    "Couldn't undo the change"
 }
 
 /// What reading a settings file did when some values were invalid: "2 settings were reset to their
@@ -870,10 +1080,12 @@ pub fn replace_preset(name: &str) -> String {
     format!("Replace {name}?")
 }
 
-/// Why, in a settings-reset notice's list, under the settings it names: they couldn't be read, and
-/// where the file as it was is kept.
-pub fn settings_reset_why(copy: &str) -> String {
-    format!("They couldn't be read, so they're back to their defaults. The file as it was is kept as {copy} in the data dir.")
+/// What a settings-reset notice's list says: the settings reset, under a muted "Reset to the
+/// default:", then where the file as it was is kept.
+pub fn settings_reset_listing(names: &[String], copy: &str) -> Listing {
+    let mut group = vec![Line::Muted("Reset to the default:".into())];
+    group.extend(names.iter().map(|n| Line::Name(n.clone())));
+    Listing { groups: vec![group] }.then(vec![Line::Muted(format!("Kept as {copy}"))])
 }
 
 /// The status bar's line of a settings-reset notice: the settings are named in its list (#87).
@@ -960,6 +1172,17 @@ pub fn unavailable(reason: &Unavailable) -> String {
     }
 }
 
+/// [`unavailable`] for a list: the path of the folder on a line of its own.
+pub fn unavailable_reason(reason: &Unavailable) -> Reason {
+    match reason {
+        Unavailable::DriveNotConnected { name } => Reason::new(format!("Drive {name} isn't connected")),
+        Unavailable::FolderMissing { path } => Reason::at("Folder doesn't exist", path),
+        Unavailable::NoPermission { path } => Reason::at("No permission to open the folder", path),
+        Unavailable::NotAFolder { path } => Reason::at("Not a folder", path),
+        Unavailable::CantOpen { path } => Reason::at("Can't open the folder", path),
+    }
+}
+
 /// Why the status needs the user, when it says: "Drive MyDisk isn't connected", or the error.
 pub fn status_reason(name: &str, status: &Status) -> Option<String> {
     match status {
@@ -1042,9 +1265,39 @@ fn does_nothing(why: AnswerWhy) -> String {
 }
 
 /// Why a torrent of a list refused, as its line under its name says it: "It's in that folder
-/// already".
-pub fn refused_why(why: &TorrentRefusal) -> String {
-    torrent_reason(why)
+/// already"; a path it names on a line of its own.
+pub fn refused_why(why: &TorrentRefusal) -> Reason {
+    match why {
+        TorrentRefusal::Clash { files } => {
+            Reason::new("Already in the new destination:").still("", Found::paths(files).iter().map(|f| f.display().to_string()).collect())
+        }
+        TorrentRefusal::ClashChanged { path } => Reason::at("Its new folder changed while it waited", path),
+        TorrentRefusal::AnothersFiles { path } => Reason::at("Another torrent has its files at", path),
+        TorrentRefusal::MovedWithout { files, .. } => Reason::new("Moved, but these weren't in its old destination: it's Missing files")
+            .still("", files.iter().map(|f| f.display().to_string()).collect()),
+        TorrentRefusal::NameTaken { path } => Reason::at("Something is already at", path),
+        TorrentRefusal::NameOfAnother { path, other } => Reason::at(format!("{other} keeps its files at"), path),
+        TorrentRefusal::NotMoved { why, .. } | TorrentRefusal::NotRenamed { why, .. } => not_moved_reason(why),
+        TorrentRefusal::DestinationUnavailable { reason, .. } => unavailable_reason(reason),
+        TorrentRefusal::NotTrashed { kept, .. } if no_trash(kept) => Reason::new("The drive has no Trash"),
+        TorrentRefusal::NotTrashed { kept, .. } => kept_reason("Couldn't move everything to the Trash", "Still at:", kept),
+        TorrentRefusal::FilesNotTrashed { kept, .. } if no_trash(kept) => Reason::new("The drive has no Trash to move its files to"),
+        TorrentRefusal::FilesNotTrashed { kept, .. } => {
+            kept_reason("Couldn't move every file to the Trash", "Still at (set to Off):", kept)
+        }
+        other => Reason::new(torrent_reason(other)),
+    }
+}
+
+/// What a Delete or Move to Trash left: the system's words if it gave any, else `stopped`; each
+/// path left where it was on a line of its own, under `label`.
+fn kept_reason(stopped: &str, label: &str, kept: &[Kept]) -> Reason {
+    let detail = kept.iter().find_map(|k| match &k.why {
+        KeptWhy::Failed { detail } => Some(sentence(without_os_code(detail))),
+        KeptWhy::NoTrash | KeptWhy::Interrupted => None,
+    });
+    let text = detail.unwrap_or_else(|| stopped.replace("Couldn't move", "Phantom stopped before moving"));
+    Reason::new(text).still(label, kept.iter().map(|k| k.path.display().to_string()).collect())
 }
 
 /// Why a torrent refuses, alone, as a sentence naming no torrent: "Drive MyDisk isn't connected".
@@ -1256,24 +1509,16 @@ pub fn commands_failed(action: Action, failed: usize, total: usize) -> String {
     }
 }
 
-/// A failed command for one torrent called `name`, as an error notice's line: what, and why under
-/// it when there's more than the sentence. A Delete the drive's missing Trash refused is one
-/// sentence naming the torrent; the rest are the torrent's name and the refusal or error under it.
-pub fn command_failure(name: &str, failure: &Failure) -> (String, String) {
+/// A failed command for one torrent called `name`, as an entry of an error notice's list: the name,
+/// and why under it, a path on a line of its own.
+pub fn command_failure(name: &str, failure: &Failure) -> (String, Reason) {
     match failure {
-        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { name, kept }, .. }) if no_trash(kept) => {
-            (not_trashed(name, kept), String::new())
-        }
-        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::NotTrashed { name, kept }, .. }) => {
-            (name.clone(), sentence(&not_trashed(name, kept)))
-        }
-        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::FilesNotTrashed { name, kept }, .. }) if no_trash(kept) => {
-            (files_not_trashed(name, kept), String::new())
-        }
-        Failure::Refused(Refusal::Torrent { why: TorrentRefusal::FilesNotTrashed { name, kept }, .. }) => {
-            (name.clone(), sentence(&files_not_trashed(name, kept)))
-        }
-        other => (name.to_owned(), sentence(&format!("{other:#}"))),
+        Failure::Refused(Refusal::Torrent {
+            why: why @ (TorrentRefusal::NotTrashed { name, .. } | TorrentRefusal::FilesNotTrashed { name, .. }),
+            ..
+        }) => (name.clone(), refused_why(why)),
+        Failure::Refused(Refusal::Torrent { why, .. }) => (name.to_owned(), refused_why(why)),
+        other => (name.to_owned(), Reason::new(sentence(&format!("{other:#}")))),
     }
 }
 
@@ -1376,12 +1621,91 @@ mod tests {
 
     use super::*;
 
+    fn at(path: &str) -> AbsolutePath {
+        AbsolutePath::new(path).unwrap()
+    }
+
     /// A setting's undo says which, short, and in the popover from what to what.
     #[test]
     fn a_setting_undo_says_which_and_from_what_to_what() {
         assert_eq!(setting_undone_short("Download limit"), "Download limit undone");
         assert_eq!(setting_undone_short("Accent colour (Dark)"), "Accent colour (Dark) undone");
-        assert_eq!(setting_undone_more("Download limit", "10 MB/s", "5 MB/s"), "Download limit back from 10 MB/s to 5 MB/s");
+    }
+
+    /// A change reads "old → new" in a list, the setting's name staying in the line (rule 6).
+    #[test]
+    fn a_change_reads_old_arrow_new() {
+        assert_eq!(changed("10 MB/s", "2 MB/s"), "10 MB/s → 2 MB/s");
+    }
+
+    /// A Look Preset's name, which the user chose, is never in the bar's line (rule 8).
+    #[test]
+    fn the_line_of_a_look_preset_undo_names_no_preset() {
+        assert_eq!(look_preset_undone(), "Look Preset change undone");
+        assert_eq!(setting_undone_short(&of_a_saved_preset("Accent colour (Dark)")), "Accent colour (Dark) of a saved Look Preset undone");
+    }
+
+    /// One failure, one wording (rule 5): an undo that couldn't be done says "Couldn't undo" with its
+    /// subject, for a setting or a torrent action alike.
+    #[test]
+    fn a_failed_undo_has_one_wording() {
+        assert_eq!(undo_failed(), "Couldn't undo the change");
+        let undo = Undoable { seq: 1, action: UndoAction::Delete, torrents: vec![proto::Named { id: 3, name: "Album".into() }] };
+        assert_eq!(cant_undo_line(&undo, &CantUndo::NotInList, &[]).0, "Couldn't undo the Delete");
+    }
+
+    /// A reason is words, and a path on a line of its own, never inside the sentence (rules 1 and 3).
+    #[test]
+    fn a_reason_keeps_its_path_out_of_its_words() {
+        let path = at("/Users/me/Downloads/Album");
+        let taken = refused_why(&TorrentRefusal::NameTaken { path: path.clone() });
+        assert_eq!((taken.text.as_str(), taken.paths.clone()), ("Something is already at", vec!["/Users/me/Downloads/Album".to_owned()]));
+        assert_eq!(taken.inline(), "Something is already at: /Users/me/Downloads/Album");
+        let full = refused_why(&TorrentRefusal::NotMoved { name: "Album".into(), why: NotMoved::DiskFull });
+        assert_eq!(full.text, "The new destination's disk is full", "no \"Not moved:\", the line says it");
+        let gone = cant_undo_reason(&CantUndo::NotInTrash { path });
+        assert_eq!((gone.text.as_str(), gone.paths.len()), ("Not in the Trash any more", 1));
+        let kept = [Kept { path: at("/d/pack/a"), why: KeptWhy::Failed { detail: "Operation not permitted (os error 1)".into() } }];
+        let still = refused_why(&TorrentRefusal::NotTrashed { name: "Pack".into(), kept: kept.to_vec() });
+        assert_eq!(
+            (still.text.as_str(), still.label.as_str(), still.paths.clone()),
+            ("Operation not permitted", "Still at:", vec!["/d/pack/a".to_owned()]),
+            "the system's words on one line, no os error code, the path under a label"
+        );
+        let no_trash = [Kept { path: at("/Volumes/USB/pack"), why: KeptWhy::NoTrash }];
+        assert_eq!(
+            refused_why(&TorrentRefusal::NotTrashed { name: "Album".into(), kept: no_trash.to_vec() }).text,
+            "The drive has no Trash"
+        );
+    }
+
+    /// What the stranded files of a refused Delete's undo are listed as: names, the reason, then
+    /// "Still in place:" and a path a line.
+    #[test]
+    fn a_refused_undos_stranded_paths_are_listed_each_on_a_line() {
+        let undo = Undoable {
+            seq: 1,
+            action: UndoAction::Delete,
+            torrents: vec![proto::Named { id: 1, name: "A".into() }, proto::Named { id: 2, name: "B".into() }],
+        };
+        let why = CantUndo::PutBackFailed { path: at("/d/B"), detail: "Operation not permitted".into() };
+        let (_, list) = cant_undo_line(&undo, &why, &[at("/d/A")]);
+        assert_eq!(list.lines().last(), Some(&Line::Path("/d/A".into())));
+        let plain = list.plain();
+        assert!(plain.contains("Still in place:") && plain.starts_with("A\nB\n"), "{plain}");
+        assert!(list.lines().filter(|l| matches!(l, Line::Path(_))).count() == 2, "both paths on lines of their own: {plain}");
+        assert!(list.lines().all(|l| matches!(l, Line::Path(_)) || !l.text().contains('/')), "no path inside a sentence: {plain}");
+    }
+
+    /// An add of a magnet link names the link's `dn=` name, else the link as a line of its own; a
+    /// file is its name (rule 1).
+    #[test]
+    fn a_failed_adds_list_names_the_dn_name_or_the_link() {
+        let hash = "00000000000000000000000000000000000000ff";
+        assert_eq!(add_what(&format!("magnet:?xt=urn:btih:{hash}&dn=Big+Buck%20Bunny")), Line::Name("Big Buck Bunny".into()));
+        let bare = format!("magnet:?xt=urn:btih:{hash}&tr=udp%3A%2F%2Ft.example");
+        assert_eq!(add_what(&bare), Line::Path(bare));
+        assert_eq!(add_what("bad-1.torrent"), Line::Name("bad-1.torrent".into()));
     }
 
     /// A Move to Trash is worded by how many files the service says moved; no file is named in the
@@ -1392,14 +1716,39 @@ mod tests {
         assert_eq!(happened(files(1), 2), "Moved a file to the Trash");
         assert_eq!(happened(files(3), 1), "Moved 3 files to the Trash");
         let named = ["Album".to_owned(), "01 Intro.flac".to_owned()];
-        assert_eq!(happened_more(files(1), 1, &named), "Album\n01 Intro.flac\nIt's set to Off, so it won't be downloaded again.");
-        assert_eq!(happened_more(files(3), 3, &named[..1]), "Album\nThey're set to Off, so they won't be downloaded again.");
+        assert_eq!(
+            happened_listing(files(1), 1, &named).plain(),
+            "Album\n01 Intro.flac\nSet to Off",
+            "no \"so it won't be downloaded again\""
+        );
+        assert_eq!(happened_listing(files(3), 3, &named[..1]).plain(), "Album\nSet to Off");
         let undo = |count| Undoable { seq: 1, action: files(count), torrents: vec![proto::Named { id: 3, name: "Album".into() }] };
-        assert_eq!((undone_line(&undo(1)), undone_more(&undo(1))), ("A file is back from the Trash".into(), "Album".into()));
+        assert_eq!(undone_line(&undo(1)), "A file is back from the Trash");
+        assert_eq!(undone_listing(&undo(1), None).plain(), "Album");
+        assert_eq!(undone_listing(&undo(1), Some(&named)).plain(), "Album\n01 Intro.flac", "the file is named too");
         assert_eq!(undone_line(&undo(2)), "2 files are back from the Trash");
         let (short, why) = cant_undo_line(&undo(2), &CantUndo::NotInTrash { path: AbsolutePath::new("/d/Album/a.flac").unwrap() }, &[]);
         assert_eq!(short, "Couldn't undo the Move to Trash");
-        assert_eq!(why, "Album\n/d/Album/a.flac isn't in the Trash any more");
+        assert_eq!(why.plain(), "Album\nNot in the Trash any more\n/d/Album/a.flac");
+    }
+
+    /// What a Remove or a Rename lists carries no note: "Its files stay where they are" and "Its
+    /// files have this name on disk now" went (rule 2); a Delete's files are in the Trash.
+    #[test]
+    fn a_remove_and_a_rename_have_no_note_and_a_delete_keeps_its_one() {
+        let one = ["Album".to_owned()];
+        assert_eq!(happened_listing(UndoAction::Remove, 1, &one).plain(), "Album");
+        assert_eq!(happened_listing(UndoAction::Rename, 1, &[changed("Album", "Album 2")]).plain(), "Album → Album 2");
+        assert_eq!(happened_listing(UndoAction::Delete, 1, &one).plain(), "Album\nIts files are in the Trash.");
+        assert_eq!(happened_listing(UndoAction::Delete, 2, &one).plain(), "Album\nTheir files are in the Trash.");
+    }
+
+    /// A Rename's undo lists "renamed → original", once this app knows what it was renamed from.
+    #[test]
+    fn a_renamed_back_lists_old_arrow_new() {
+        let undo = Undoable { seq: 1, action: UndoAction::Rename, torrents: vec![proto::Named { id: 3, name: "Album 2".into() }] };
+        assert_eq!(undone_listing(&undo, Some(&["Album".to_owned(), "Album 2".to_owned()])).plain(), "Album 2 → Album");
+        assert_eq!(undone_listing(&undo, None).plain(), "Album 2", "a Rename this app didn't tell has only the name");
     }
 
     /// A failed part is worded as any service error or refusal, never as debug text.
@@ -1427,14 +1776,14 @@ mod tests {
         assert_eq!(cant_undo(&undo, &CantUndo::NotKept, &[]).0, "Couldn't undo Delete of 3 torrents");
         assert_eq!(
             cant_undo_line(&undo, &CantUndo::NotKept, &[]),
-            ("Couldn't undo the Delete".into(), "T1\nT2\nT3\nWhat Phantom kept of it can't be read".into())
+            ("Couldn't undo the Delete".into(), Listing::new("T1\nT2\nT3", "What Phantom kept of it can't be read"))
         );
         assert_eq!(undo_entry(&undo), "Undo Delete of 3 torrents", "Edit ▸ Undo names it so (#255)");
         let not = proto::NotBack { torrent: named(2), action: UndoAction::Delete, why: CantUndo::NotKept, stranded: Vec::new() };
         assert_eq!(not_back(&not), ("Couldn't undo Delete of T2".into(), "What Phantom kept of it can't be read".into()));
         let again = proto::NotBack { why: CantUndo::InList, ..not };
         assert_eq!(not_back(&again), ("T2 is already in the list".into(), String::new()), "nothing touched: nothing more to say");
-        assert_eq!(not_back_line(&again), ("Already in the list".into(), "T2".into()), "the name is the list's");
+        assert_eq!(not_back_line(&again), ("Already in the list".into(), Listing::new("T2", "")), "the name is the list's");
     }
 
     #[test]
@@ -1574,7 +1923,7 @@ mod label_tests {
         let refused = Refusal::Torrent { id: 3, why };
         assert_eq!(refusal(&refused), "Couldn't delete Album: the drive has no Trash");
         let failure = crate::Failure::Refused(refused);
-        assert_eq!(command_failure("Album", &failure), ("Couldn't delete Album: the drive has no Trash".to_owned(), String::new()));
+        assert_eq!(command_failure("Album", &failure), ("Album".to_owned(), Reason::new("The drive has no Trash")), "the name, then why");
         let waiting = Status::Error { failure: TorrentFailure::NotTrashed { kept: no_trash.to_vec() } };
         assert_eq!(status_reason("Album", &waiting).as_deref(), Some("Couldn't delete Album: the drive has no Trash"));
         let two = Refusal::Torrent { id: 4, why: TorrentRefusal::NotTrashed { name: "Film".into(), kept: no_trash.to_vec() } };

@@ -364,7 +364,7 @@ struct Note {
     /// How many were in the batch.
     total: usize,
     /// Each failure: the file or link, and why.
-    failed: Vec<(String, String)>,
+    failed: Vec<(String, client::display::Reason)>,
     /// A move's, not adds'.
     moved: bool,
 }
@@ -394,7 +394,10 @@ impl Note {
     /// What its entry draws: the title, then each failure and its reason.
     fn lines(&self) -> Vec<String> {
         let mut lines = vec![self.title()];
-        lines.extend(self.failed.iter().flat_map(|(what, why)| [what.clone(), why.to_string()]));
+        lines.extend(self.failed.iter().flat_map(|(what, why)| {
+            let lines = std::iter::once(client::display::add_what(what)).chain(why.lines());
+            lines.map(|l| l.text().to_owned()).collect::<Vec<_>>()
+        }));
         lines
     }
 }
@@ -566,7 +569,7 @@ impl Rows {
             // A failure, the field's too, goes to its batch's notice.
             let said = if link.fails() {
                 note.total += 1;
-                note.failed.push((link.named(), link.reason().to_owned()));
+                note.failed.push((link.named(), link.reason().into()));
                 continue;
             } else {
                 note.total += 1;

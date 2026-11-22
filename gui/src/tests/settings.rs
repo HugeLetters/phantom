@@ -1419,7 +1419,7 @@ impl Model {
                 self.told.push("Back in the list".to_owned());
             }
             Change::Service(..) if refused => {
-                self.told.push(client::display::setting_not_undone().to_owned());
+                self.told.push(client::display::undo_failed().to_owned());
             }
             Change::Service(name, was) => {
                 self.close_sheet();
@@ -1435,7 +1435,7 @@ impl Model {
                 self.focus = Some("app-icon-edit".into());
                 self.told.push(client::display::setting_undone_short("App icon"));
             }
-            Change::Presets(was, words, name, half) => {
+            Change::Presets(was, _, name, half) => {
                 self.restore(was);
                 self.close_sheet();
                 self.refresh_colours();
@@ -1446,7 +1446,7 @@ impl Model {
                     Some(i) => format!("preset-{i}-{}", half.map_or("both", Appearance::key)),
                     None => "active-edit".to_owned(),
                 });
-                self.told.push(format!("{words} undone"));
+                self.told.push(client::display::look_preset_undone().to_owned());
             }
             Change::Edit(was, target) => {
                 self.restore(was);
@@ -1455,9 +1455,10 @@ impl Model {
                 self.tab = Tab::Appearance;
                 // The Look Presets' first chip.
                 self.focus = (!self.saved.is_empty()).then(|| "preset-0-both".to_owned());
+                // A saved Look Preset's name is the user's: the list's, not the line's.
                 let words = match &target {
                     Target::Active => "Edit of the Active look".to_owned(),
-                    Target::Saved(name) => format!("Edit of {}", name.as_str()),
+                    Target::Saved(_) => client::display::of_a_saved_preset("Edit"),
                 };
                 self.told.push(format!("{words} undone"));
             }
@@ -1484,7 +1485,7 @@ impl Model {
                 };
                 let named = match &target {
                     Target::Active => named,
-                    Target::Saved(name) => format!("{named} of {}", name.as_str()),
+                    Target::Saved(_) => client::display::of_a_saved_preset(&named),
                 };
                 self.told.push(client::display::setting_undone_short(&named));
             }
@@ -2111,9 +2112,13 @@ impl StateMachineTest for Sheet {
             .entries()
             .iter()
             .map(|e| e.notice.short.as_str())
-            .filter(|short| short.ends_with(" undone") || *short == "Back in the list" || short.starts_with("Couldn't be undone"))
+            .filter(|short| short.ends_with(" undone") || *short == "Back in the list" || short.starts_with("Couldn't undo"))
             .collect();
         assert_eq!(told, m.told, "each undo tells what it went back to, or what came back, or why it couldn't be undone");
+        // One failure, one look: a setting's undo that couldn't be done is an error, as a torrent's is.
+        for e in s.bar.entries().iter().filter(|e| e.notice.short.starts_with("Couldn't undo")) {
+            assert_eq!(e.notice.severity, crate::notice::Severity::Error, "{:?}", e.notice.short);
+        }
         let listed: BTreeSet<u64> = s.torrents.iter().map(|t| t.id).collect();
         assert_eq!(listed, m.rows, "the torrents in the list, behind the sheet too");
         // In a Look Preset's editor, ⌘Z takes its own changes only.
@@ -2886,10 +2891,7 @@ fn a_cmd_z_from_settings_runs_before_what_the_service_sends_in_the_same_frame() 
     let told = client::display::setting_undone_short(client::display::setting_short("upnp"));
     assert_eq!(d.main.state.bar.newest().map(|n| n.short.clone()), Some(told), "the app's own change undone");
     crate::tests::tap(&mut d.main, "notice");
-    assert!(
-        crate::tests::texts(&d.main, "notice-listing").contains(&"UPnP back from off to on".to_owned()),
-        "and the popover says from what to what"
-    );
+    assert!(crate::tests::texts(&d.main, "notice-listing").contains(&"off → on".to_owned()), "and the popover says from what to what");
     let next = client::display::undo_change(client::display::setting_short("keep_awake"));
     assert_eq!(crate::changes::menu_title(&d.main.state), next, "the other client's, newer to the main window than the press, stays");
     let now = stored(&d);
@@ -3278,6 +3280,10 @@ fn done_is_one_undo_step_and_cancel_puts_the_preset_back() {
     d.settle();
     assert_eq!(night_tone(&d), [light, dark], "one ⌘Z: as it was when the sheet opened");
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "nothing older");
+    // The bar's line holds no name the user chose; the list has it.
+    let told = d.main.state.bar.entries().last().expect("the undo is told").notice.clone();
+    assert_eq!(told.short, "Edit of a saved Look Preset undone");
+    assert_eq!(told.more.as_ref().map(|list| list.plain()), Some("Night".to_owned()), "the name is the list's");
 
     for cancel in ["edit-cancel", "escape"] {
         let mut d = appearance_tab();

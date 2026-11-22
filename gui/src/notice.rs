@@ -7,8 +7,8 @@
 //! The line holds only words Phantom writes: short, and known in advance ("Added the torrent",
 //! "Can't open the file", "Download limit undone"; a setting's name is Phantom's own). Anything
 //! from outside goes in the list, as [`Notice::with_names`], [`Notice::with_text`] or a [`Listing`]: file paths, file names,
-//! torrent names (and the names a user gave a Look Preset), errors from macOS or a peer, and "back
-//! from X to Y". A notice whose line leaves something out has more to read, so it has a list, and a
+//! torrent names (and the names a user gave a Look Preset), errors from macOS or a peer, and a change as
+//! "old → new". A notice whose line leaves something out has more to read, so it has a list, and a
 //! click on the bar opens the list even when it's the only notice. Wording lives in `client::display`:
 //! a notice's line and its list are separate functions there, and a test
 //! (`a_bar_line_holds_only_fixed_words_and_the_names_are_in_the_list`) tells every kind with long
@@ -20,34 +20,9 @@ use client::display;
 
 use crate::model::Phantom;
 
-/// What a notice's list says under its line: the names the line leaves out, a line each, with a
-/// reason of its own if it has one (a batch's failures: the file, and why), then why, for all of
-/// them. Data, not a view: the popover measures it to fit its width.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Listing {
-    /// Each name, and its own reason (empty: none).
-    pub names: Vec<(String, String)>,
-    /// Why, for all of them; often from outside (macOS, a peer).
-    pub why: String,
-}
-
-impl Listing {
-    /// `names`, a line each, none with a reason of its own, then `why`.
-    pub fn new(names: &str, why: impl Into<String>) -> Self {
-        let names = names.lines().filter(|n| !n.is_empty()).map(|n| (n.to_owned(), String::new())).collect();
-        Self { names, why: why.into() }
-    }
-
-    /// Each of `failures`: what failed, and why.
-    pub fn of_failures(failures: impl IntoIterator<Item = (String, String)>) -> Self {
-        Self { names: failures.into_iter().collect(), why: String::new() }
-    }
-
-    /// Every text it shows, for measuring.
-    pub fn texts(&self) -> impl Iterator<Item = &str> {
-        self.names.iter().flat_map(|(name, why)| [name.as_str(), why.as_str()]).chain([self.why.as_str()]).filter(|t| !t.is_empty())
-    }
-}
+/// What a notice's list says under its line: the names the line leaves out, a reason of their own,
+/// the paths each on a line of its own (as `client::display` words them).
+pub use client::display::{Line, Listing};
 
 /// How much a notice matters; the status bar colours it. Ordered from least to most: the worst of
 /// several is their `max`.
@@ -105,6 +80,8 @@ pub struct Notice {
     /// action, so no undo takes it away.
     pub of: Vec<u64>,
     pub lasts: Lasts,
+    /// A receipt of something that didn't happen ("Already in the list"): a neutral ⓘ instead of ✓.
+    pub nothing: bool,
 }
 
 impl Notice {
@@ -117,12 +94,23 @@ impl Notice {
             actions: Vec::new(),
             of: Vec::new(),
             lasts: Lasts::UntilDismissed,
+            nothing: false,
         }
     }
 
     /// Why, as text in the list, muted: a reason from macOS or a peer, an explanation.
     pub fn with_text(self, why: impl Into<String>) -> Self {
         Self { more: Some(Listing::new("", why)), ..self }
+    }
+
+    /// A receipt that says nothing was done: it wears ⓘ, not the ✓ of a success.
+    pub fn nothing_done(self) -> Self {
+        Self { nothing: true, ..self }
+    }
+
+    /// `more` as the list.
+    pub fn with_listing(self, more: Listing) -> Self {
+        Self { more: Some(more), ..self }
     }
 
     /// What the line leaves out, in the list, a line each: torrent and file names, paths.
@@ -163,10 +151,10 @@ impl Notice {
         Self { lasts: Lasts::Long, ..self }
     }
 
-    /// A setting's undo that worked: "Download limit undone", brief, and in the popover "Download
-    /// limit back from 10 MB/s to 5 MB/s".
+    /// A setting's undo that worked: "Download limit undone", brief, and in the popover "10 MB/s →
+    /// 2 MB/s".
     pub fn setting_undone(short: &str, undone: &str, now: &str) -> Self {
-        Self::new(display::setting_undone_short(short)).brief().with_names(display::setting_undone_more(short, undone, now))
+        Self::new(display::setting_undone_short(short)).brief().with_names(display::changed(undone, now))
     }
 
     pub fn warning(short: impl Into<String>) -> Self {
@@ -189,7 +177,9 @@ impl Notice {
     /// The service couldn't read the torrents' database and kept it aside at `kept`: a warning
     /// that stays until dismissed (#308).
     pub fn records_set_aside(kept: &std::path::Path) -> Self {
-        Self::warning(display::records_set_aside()).with_text(display::records_set_aside_why(kept))
+        Self::warning(display::records_set_aside())
+            .with_listing(display::records_set_aside_listing(kept))
+            .with_actions(vec![NoticeAction::reveal(kept)])
     }
 }
 
@@ -197,7 +187,9 @@ impl Notice {
     /// A part of a file in the Trash couldn't be kept on disk, even at a retry: a warning that
     /// stays until dismissed (#304).
     pub fn part_not_saved(not_saved: &proto::PartNotSaved) -> Self {
-        Self::warning(display::part_not_saved()).with_text(display::part_not_saved_why(&not_saved.file, &not_saved.reason))
+        Self::warning(display::part_not_saved())
+            .with_listing(display::part_not_saved_listing(&not_saved.file, &not_saved.reason))
+            .with_actions(vec![NoticeAction::reveal(&not_saved.file)])
     }
 }
 
@@ -213,10 +205,31 @@ pub struct NoticeAction {
     pub off: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
     /// It's an action's Undo, which the bar offers too, after its line.
     pub undo: bool,
+    /// Whether it's offered now: `None`, always. Reveal in Finder is, while what it shows is on disk.
+    pub shown: Option<Rc<dyn Fn(&Phantom) -> bool>>,
 }
 
 impl NoticeAction {
     pub fn new(title: impl Into<String>, run: impl Fn(&mut Phantom) + 'static) -> Self {
-        Self { title: title.into(), run: Rc::new(run), hint: None, off: None, undo: false }
+        Self { title: title.into(), run: Rc::new(run), hint: None, off: None, undo: false, shown: None }
+    }
+
+    /// Reveal in Finder for `path`, offered while it's on disk.
+    pub fn reveal(path: &std::path::Path) -> Self {
+        Self::on_disk(display::reveal_in_finder(), path, crate::platform::Show::Reveal)
+    }
+
+    /// Show folder: opens `folder` in Finder, offered while it's on disk (a failed Open's, the
+    /// file's folder).
+    pub fn folder(folder: &std::path::Path) -> Self {
+        Self::on_disk(display::show_folder(), folder, crate::platform::Show::Open)
+    }
+
+    /// A button that hands `path` to the system as `how`, offered while it's on disk.
+    fn on_disk(title: &str, path: &std::path::Path, how: crate::platform::Show) -> Self {
+        let (run, there) = (path.to_path_buf(), path.to_path_buf());
+        let mut action = Self::new(title, move |s: &mut Phantom| crate::platform::show(s, &run, how));
+        action.shown = Some(Rc::new(move |s: &Phantom| s.finder.exists(&there)));
+        action
     }
 }

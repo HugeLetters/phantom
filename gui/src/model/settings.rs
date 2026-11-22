@@ -802,18 +802,15 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
         .collect();
     let copy = proto::tolerant::invalid_copy(&proto::data_dir().join(file));
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let reveal = NoticeAction::new(display::reveal_in_finder(), move |s: &mut Phantom| {
-        crate::platform::show(s, &copy, crate::platform::Show::Reveal);
-    });
+    let reveal = NoticeAction::reveal(&copy);
     let reset = reset.to_vec();
     let open = NoticeAction::new("Open settings", move |s: &mut Phantom| {
         let reset = reset.clone();
         s.settings.post(move |w, _| open_reset(w, &reset));
     });
-    let why = display::settings_reset_why(&name);
     Some(
         Notice::warning(display::settings_reset_line())
-            .with_names_and_why(&format!("{}\n{why}", names.join("\n")))
+            .with_listing(display::settings_reset_listing(&names, &name))
             .with_actions(vec![open, reveal]),
     )
 }
@@ -1145,23 +1142,36 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
             let undone = value(&Presets::of(&s.looks.borrow(), &s.saved));
             let back = value(&was);
             restore(s, was);
-            let named = match &target {
-                Target::Active => theme_named(label, side),
-                Target::Saved(name) => display::of_preset(&theme_named(label, side), name.as_str()),
+            // A saved Look Preset's name is the user's: the list's, not the line's.
+            let (named, of) = match &target {
+                Target::Active => (theme_named(label, side), None),
+                Target::Saved(name) => (display::of_a_saved_preset(&theme_named(label, side)), Some(name.as_str().to_owned())),
             };
             presets::show_setting(s, target, key, side, tx);
-            Notice::setting_undone(&named, &undone, &back)
+            let told = Notice::setting_undone(&named, &undone, &back);
+            match of {
+                Some(preset) => {
+                    Notice { more: told.more.map(|list| list.then(vec![crate::notice::Line::Muted(format!("In {preset}"))])), ..told }
+                }
+                None => told,
+            }
         }
         (AppSetting::Presets, Was::Presets(was, change)) => {
             restore(s, was);
             presets::show_change(s, &change, tx);
-            Notice::new(display::setting_undone_short(&change.words())).brief()
+            Notice::new(display::look_preset_undone()).brief().with_names(change.words())
         }
         // An editor's Done: the Look Presets as it opened on them, shown at the Look Presets.
         (AppSetting::Edit, Was::Edit(was, target)) => {
             restore(s, was);
             show_setting(s, presets::SETTING, Some(tx));
-            Notice::new(display::setting_undone_short(&crate::changes::edit_words(&target))).brief()
+            // A saved Look Preset's name is the user's: the list's, not the line's.
+            match &target {
+                Target::Active => Notice::new(display::setting_undone_short(&crate::changes::edit_words(&target))).brief(),
+                Target::Saved(name) => {
+                    Notice::new(display::setting_undone_short(&display::of_a_saved_preset("Edit"))).brief().with_names(name.as_str())
+                }
+            }
         }
         // A change's `was` is always of its setting (`app_changed`'s callers).
         (AppSetting::Icon, Was::Theme(..) | Was::Presets(..) | Was::Edit(..))
@@ -1697,13 +1707,30 @@ fn ask(s: &mut SettingsWindow, waiting: Waiting, setting: Setting) {
     });
 }
 
+/// The setting a row of the sheet changes, by its key in the settings file; none for a row that
+/// isn't one setting's (reading them all, a Look Preset's field).
+fn row_setting(row: Row) -> Option<&'static str> {
+    Some(match row {
+        Row::Folder => "default_destination",
+        Row::Port => "listen_port",
+        Row::Switch(switch) => switch.name(),
+        Row::Limit(Direction::Download) => "download_limit",
+        Row::Limit(Direction::Upload) => "upload_limit",
+        Row::Seeding(SeedingLimit::Ratio) => "seed_ratio",
+        Row::Seeding(SeedingLimit::Time) => "seed_time",
+        Row::All | Row::Colour(..) | Row::PresetName | Row::Image => return None,
+    })
+}
+
 /// The answer to a change of `row`, or to opening: shown while the sheet's open. A refusal shows
 /// under its row; a failure (the torrents didn't start again with a new port, say) also goes to
 /// the status bar as an error, which outlives the sheet.
 fn answer(row: Row) -> Done<Result<Settings, Failure>> {
     Box::new(move |s: &mut Phantom, result, _| {
         if let Err(failure @ (Failure::Failed(_) | Failure::Error(_))) = &result {
-            s.bar.tell(Notice::error(display::setting_not_changed()).with_text(display::sentence(&format!("{failure:#}"))));
+            let of = row_setting(row).map(|key| display::setting_short(key).to_owned()).unwrap_or_default();
+            let why = display::sentence(&format!("{failure:#}"));
+            s.bar.tell(Notice::error(display::setting_not_changed()).with_names_and_why(&format!("{of}\n{why}")));
         }
         s.settings.post(move |s, _| {
             let Some(sheet) = &mut s.sheet else { return };

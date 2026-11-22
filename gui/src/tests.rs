@@ -1498,7 +1498,7 @@ fn a_refused_add_from_the_field_is_a_notice_and_the_link_stays() {
     assert!(rt.state.add_note.is_none() && rt.find("add-note-content").is_none(), "nothing by Add");
     assert_eq!(
         listed(&mut rt),
-        vec![["Couldn't add the torrent", MAGNET, "No peers have this torrent"]],
+        vec![["Couldn't add the torrent", "Big Buck Bunny", "No peers have this torrent"]],
         "an error notice, why in its list"
     );
     assert!(enabled(&rt, "add"), "which can be tried again");
@@ -1594,7 +1594,12 @@ fn a_failure_landing_with_another_answer_is_still_shown() {
     rt.update(|_, tx| tx.blur());
     rt.paste(MAGNET);
     wait(&mut rt, 1.5);
-    assert_eq!(listed(&mut rt), vec![["Couldn't add the torrent", NOBODY, "No peers have this torrent"]]);
+    assert_eq!(
+        listed(&mut rt),
+        vec![["Couldn't add the torrent", "Nobody", "No peers have this torrent"]],
+        "the link's name, not the link"
+    );
+    let _ = NOBODY;
 }
 
 /// An example, not a property: the sequence the generated test shrank to on #111 (slow details,
@@ -1786,7 +1791,11 @@ fn commands_behind_an_undo_that_fails_add_no_errors_of_their_own() {
     wait(&mut rt, 2.0);
     assert!(rt.state.torrents.iter().all(|t| t.id != 0), "gone again: its undo was refused");
     assert!(
-        !rt.state.bar.entries().iter().any(|e| e.notice.severity == crate::notice::Severity::Error),
+        !rt.state
+            .bar
+            .entries()
+            .iter()
+            .any(|e| e.notice.severity == crate::notice::Severity::Error && e.notice.short != "Couldn't undo the Delete"),
         "nothing of its own for the Pause"
     );
     let said: Vec<String> = rt.state.bar.entries().iter().map(|e| e.notice.short.clone()).collect();
@@ -1828,10 +1837,13 @@ fn a_delete_of_several_reports_its_failures_together() {
     let entries = listed(&mut rt);
     assert_eq!(entries.len(), 1, "one entry: {entries:?}");
     assert_eq!(entries[0][0], "Couldn't delete 2 of 3");
-    let mut named = [entries[0][1].as_str(), entries[0][3].as_str()];
-    named.sort();
-    assert_eq!(named, ["a", "c"], "each by name");
-    assert!(entries[0][2].starts_with("Couldn't move everything to the Trash: it's locked"), "{entries:?}");
+    let list = &entries[0];
+    for name in ["a", "c"] {
+        let at = list.iter().position(|l| l == name).unwrap_or_else(|| panic!("{name} named: {entries:?}"));
+        assert_eq!(list[at + 1], "It's locked", "its reason, the system's words, under it: {entries:?}");
+        assert_eq!(list[at + 2], "Still at:", "{entries:?}");
+        assert!(list[at + 3].starts_with('/'), "the path on a line of its own: {entries:?}");
+    }
 }
 
 #[test]
@@ -1968,8 +1980,12 @@ fn the_settings_reset_notice_reveals_the_copy_and_opens_settings_on_the_tab_of_w
     tap(&mut rt, "notice-text");
     let id = rt.state.bar.entries()[0].id;
     let drawn = texts(&rt, &format!("notice/{id}"));
-    assert_eq!(drawn[1], "App icon", "the setting is named first in the list");
-    assert_eq!(drawn[3..], ["Open settings", "Reveal in Finder"]);
+    assert_eq!(
+        drawn[1..4],
+        ["Reset to the default:", "App icon", "Kept as gui.invalid.json"],
+        "what was reset, and where the file is kept"
+    );
+    assert_eq!(drawn[4..], ["Open settings", "Reveal in Finder"]);
     let shown = Shown::default();
     rt.state.finder = Box::new(shown.clone());
     tap(&mut rt, "notice-action/1");

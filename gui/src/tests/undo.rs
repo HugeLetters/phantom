@@ -495,12 +495,12 @@ fn an_undo_of_a_torrent_added_again_says_already_in_the_list() {
             stranded: Vec::new(),
         })
     };
-    let notice = crate::model::undo_notices(&Err(refused(proto::CantUndo::InList))).pop().expect("a notice");
+    let notice = crate::model::undo_notices(&Err(refused(proto::CantUndo::InList)), &Default::default()).pop().expect("a notice");
     assert_eq!((notice.short.as_str(), notice.severity), (display::already_in_list(), crate::notice::Severity::Info));
     assert_eq!(display::already_in_list(), "Already in the list");
     assert!(notice.more.is_some(), "the torrent's name is the list's");
     // Others still say why they couldn't.
-    let other = crate::model::undo_notices(&Err(refused(proto::CantUndo::NotKept))).pop().expect("a notice");
+    let other = crate::model::undo_notices(&Err(refused(proto::CantUndo::NotKept)), &Default::default()).pop().expect("a notice");
     assert_eq!(other.short, "Couldn't undo the Remove");
 }
 
