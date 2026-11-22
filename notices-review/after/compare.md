@@ -48,3 +48,4 @@ Before: [review.md](https://raw.githubusercontent.com/HugeLetters/phantom/pr-art
 - **C6** (the Restart/Undo gap) and **C7** (the mid-undo gap): not in the approved rules; C7 is rule 10, rejected.
 - **C5**'s red dot: kept; rule 9 turns its words red instead.
 - Rows marked "none" in the review (1, 4–7, 18, 19, 30, 35, 37, 38, 43, 48) were not touched.
+| 24 | "Edit of a saved Look Preset undone" (the editor's Done, undone; #348) | A saved preset's name ("Night") is the list's, not the line's. Before: "Edit of Night undone". | — | [L](https://raw.githubusercontent.com/HugeLetters/phantom/pr-artifacts/notices-review/after/edit-undone-light.png) [D](https://raw.githubusercontent.com/HugeLetters/phantom/pr-artifacts/notices-review/after/edit-undone-dark.png) |
