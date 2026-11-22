@@ -354,7 +354,9 @@ fn settings_poll(s: &mut SettingsWindow, _: f64, tx: &mut Tx) -> bool {
     let posted = Inbox::run(s, |s| &s.inbox, tx);
     model::settings::follow_focus(s);
     model::settings::tell_editing(s);
-    posted
+    // An image file added as an icon that's been read.
+    let loaded = model::settings::poll_icons(s);
+    posted || loaded
 }
 
 /// Settings' keys: ⌘W closes it (a Look Preset's sheet first), as Escape does (its page's own, see `views::settings`); ⌘, raises
@@ -396,8 +398,16 @@ fn settings_scene(s: &mut SettingsWindow, tab: Tab, settings: Settings) {
 
 /// Decodes the App icons to draw; a headless run waits for them, so its frames show them.
 fn setup(s: &mut SettingsWindow, waker: Waker) {
+    let headless = rune::tooling::headless_run().is_some();
+    // The image files added as icons are read off the main thread: the window opens at once. A
+    // headless run reads them first, to draw them.
+    if !headless {
+        s.app_icon.load_in_background(waker.clone());
+    }
     s.app_icon.load_images(Rc::new(ImageCache::new(waker)));
-    if rune::tooling::headless_run().is_some() {
+    s.app_icon.load();
+    model::settings::poll_icons(s);
+    if headless {
         for (_, image) in &s.app_icon.images {
             let _ = image.wait();
         }
@@ -417,6 +427,7 @@ fn app_icon(theme: Icons) -> AppIcon {
         IconChange::Chose(choice) => platform::app_icon::appkit::choose(choice),
         IconChange::Theme(theme) => platform::app_icon::appkit::follow(theme),
         IconChange::Added(added) => settings::file::keep(platform::app_icon::ADDED, Some(&added)),
+        IconChange::Loaded(icon) => platform::app_icon::appkit::loaded(icon),
     })
     .with_added(added);
     #[cfg(not(target_os = "macos"))]

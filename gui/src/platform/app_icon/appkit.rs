@@ -106,13 +106,23 @@ pub fn choose(choice: Option<&Icons>) {
     file::keep(SETTING, choice);
     let shown = STATE.with_borrow_mut(|state| {
         let state = state.as_mut()?;
-        if let Some(choice) = choice {
-            let _ = state.manifest.adopt(choice);
-        }
         state.choice = choice.cloned();
         Some(())
     });
     if shown.is_some() {
+        apply(Bundle::Write);
+    }
+}
+
+/// An added image has been read: the Dock and the bundle show it if the choice names it.
+pub fn loaded(icon: &Icon) {
+    let named = STATE.with_borrow_mut(|state| {
+        let state = state.as_mut()?;
+        state.manifest.add_file(icon.clone());
+        let names = |choice: &Icons| [true, false].into_iter().any(|dark| choice.side(dark) == icon.id);
+        state.choice.as_ref().is_some_and(names).then_some(())
+    });
+    if named.is_some() {
         apply(Bundle::Write);
     }
 }
@@ -132,11 +142,10 @@ pub fn follow(theme: &Icons) {
 impl State {
     fn load(theme: Icons) -> Option<State> {
         let bundle = bundle_of(&std::env::current_exe().ok()?)?;
-        let mut manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
+        let manifest = Manifest::load(&bundle.join("Contents/Resources"))?;
+        // An image file the choice names shows once it's read ([`loaded`]), off the main thread;
+        // until then its half shows the theme's icon.
         let choice: Option<Icons> = file::read(SETTING);
-        if let Some(choice) = &choice {
-            let _ = manifest.adopt(choice);
-        }
         Some(State { manifest, bundle, choice, theme, dock: None })
     }
 

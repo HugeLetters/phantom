@@ -150,7 +150,7 @@ fn open_sheet(s: &mut SettingsWindow, target: Target) {
     let opened = Presets::of(&s.looks.borrow(), &s.saved);
     let Some(sheet) = &mut s.sheet else { return };
     sheet.edit = Some(EditSheet { target, editor: Default::default(), opened, focus: None });
-    s.main.post(|s, _| crate::changes::editor_opened(s));
+    s.main.post(|s, _| crate::changes::sheet_opened(s, crate::changes::session::Sheet::Editor));
     looks_changed(s);
 }
 
@@ -164,7 +164,7 @@ pub fn cancel(s: &mut SettingsWindow) {
     if Presets::of(&s.looks.borrow(), &s.saved) != edit.opened {
         super::restore(s, edit.opened);
     }
-    s.main.post(|s, _| crate::changes::editor_closed(s, None));
+    s.main.post(|s, _| crate::changes::sheet_closed(s, None));
     preview(s);
 }
 
@@ -192,8 +192,9 @@ pub fn close(s: &mut SettingsWindow) {
     if let Some(sheet) = &mut s.sheet {
         sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
     }
-    let was = (Presets::of(&s.looks.borrow(), &s.saved) != edit.opened).then(|| Was::Edit(edit.opened, edit.target));
-    s.main.post(move |s, _| crate::changes::editor_closed(s, was));
+    let into = (Presets::of(&s.looks.borrow(), &s.saved) != edit.opened)
+        .then(|| (crate::changes::machine::AppSetting::Edit, Was::Edit(edit.opened, edit.target)));
+    s.main.post(move |s, _| crate::changes::sheet_closed(s, into));
     preview(s);
 }
 

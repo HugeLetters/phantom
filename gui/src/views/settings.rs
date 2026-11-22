@@ -619,11 +619,11 @@ fn chip_faces() -> [(rune::Color, rune::Color); 2] {
 /// added image's tile has an × on hover. An image file dropped on the sheet is added too. Done
 /// closes it.
 fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appearance) -> Vec<El> {
-    if !sheet.icons {
+    if sheet.icons.is_none() {
         return Vec::new();
     }
     let Some(manifest) = &icon.manifest else { return Vec::new() };
-    let name = |id: &str| manifest.icon(id).map_or(id.to_owned(), |i| i.name.clone());
+    let name = |id: &str| icon.name(id);
     let faces = chip_faces();
     let pairs = manifest.pairs().iter().enumerate().map(|(i, pair)| {
         let help = display::use_icon_pair(&name(&pair.light), &name(&pair.dark));
