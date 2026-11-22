@@ -152,7 +152,7 @@ impl Look {
 pub fn themes() -> &'static [&'static dyn Theme] {
     #[cfg(all(not(test), not(debug_assertions)))]
     static THEMES: [&dyn Theme; 1] = [&phantom::PHANTOM];
-    // The Settings prototype's second theme (#87), in debug builds only.
+    // A second theme to see the editor's two lists with (#87), in debug builds only.
     #[cfg(all(not(test), debug_assertions))]
     static THEMES: [&dyn Theme; 2] = [&phantom::PHANTOM, &standin::STAND_IN];
     // A second theme, so tests meet a look that isn't Phantom's.

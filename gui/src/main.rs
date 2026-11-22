@@ -1096,8 +1096,8 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
     }
 }
 
-/// The Active look's Dark half the stand-in theme, in a debug build (#87's prototype); Phantom's
-/// Dark in a release one, which has no stand-in.
+/// The Active look's Dark half the stand-in theme, in a debug build; unchanged in a release one,
+/// which has no stand-in.
 fn stand_in_dark(s: &mut SettingsWindow) {
     if let Some(theme) = theme::find("stand-in") {
         let look = theme::ThemeLook { theme, settings: theme::setting::Values::defaults(theme.settings()) };

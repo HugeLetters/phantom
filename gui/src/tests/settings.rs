@@ -928,8 +928,8 @@ impl ReferenceStateMachine for Sheet {
                 look.settings.iter().any(|(setting, _)| matches!(setting.kind, Kind::Colour { .. }))
             })
         };
-        // Both halves alike sometimes, so a colour's field is one for both, and Same for both
-        // meets it (#332).
+        // Both halves alike sometimes, so a colour's field is one for both, and its Join
+        // button meets it (#332).
         let coloured = prop_oneof![
             (coloured(), coloured()).prop_map(|(light, dark)| LookPreset { light, dark }),
             coloured().prop_map(|look| LookPreset { light: look.clone(), dark: look }),

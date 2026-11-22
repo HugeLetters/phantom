@@ -1,6 +1,6 @@
-//! Stand-in, a second theme for the Settings prototype (#87) only, in debug builds: the editor
-//! sheet's halves can show two themes, each with its own rows, before a second real theme
-//! exists. Never in a release build, nor in tests (they have their own second theme). Three
+//! Stand-in, a second theme for debug builds only (#87): the Look Preset editor's halves can show
+//! two themes, each with its own rows, before a second real theme exists. Never in a release build
+//! (`cfg(debug_assertions)`), nor in tests (they have their own second theme). Three
 //! settings of its own: Shade (a choice), Accent (a colour) and Animations (a toggle).
 
 use rune_kit::Kit;

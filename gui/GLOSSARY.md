@@ -42,7 +42,9 @@ the Active look's: a **look chip** for both halves (◐), for Light (☀) and fo
 it shows the Active look again. The editor's body is split down the middle, the left half ☀ Light drawn
 entirely in the preset's Light look and the right half ☾ Dark entirely in its Dark one (a **joined**
 row, one control for both, left-aligned in the left column where a split row's ☀ control is; a
-**split** row, one per column; its Join or Split button turns one into the other). Its **Cancel** (and Escape) puts the preset back
+**split** row, one per column; its Join or Split button turns one into the other, and only while one
+theme is in both halves; with a theme in each half the columns are two lists, each with its own Theme
+pop-up first, nothing joined). Its **Cancel** (and Escape) puts the preset back
 as it was when the sheet opened; its **Done** keeps what changed as one undo step ("Edit of Night"),
 while inside the sheet ⌘Z steps back one change at a time. Save as… keeps the Active look under a name; a name one has asks
 whether to replace it. A name is never blank, and no two saved ones share one.
