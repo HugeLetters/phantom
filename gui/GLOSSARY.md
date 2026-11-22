@@ -66,7 +66,7 @@ the diagonal from bottom-left to top-right, the Light's page top-left and the Da
 its glyph is one ring on the same diagonal, the top-left half an arc in the Light's text colour,
 the bottom-right half an arc in the Dark's, nothing along the seam, for every preset alike). It carries no theme name; its hover says what a press does ("Apply Evening's
 Light to the active look"). In use, it's outlined 3 pt in that half's accent, 2 pt out from it.
-The App icon's sheet has the same chips under each icon, ☀ on a light page and ☾ on a dark one.
+The App icon's sheet has the same chips under each icon, ☀ on a light page and ☾ on a dark one. ⌘Z in that sheet takes back this visit's picks, one at a time, and the sheet stays open.
 _Avoid_: swatch, badge, pill
 
 **App icon**:

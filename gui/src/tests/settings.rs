@@ -412,6 +412,8 @@ struct Model {
     choice: Option<Icons>,
     /// The App icon's sheet is open; the images added as icons, by id, in order.
     icons_open: bool,
+    /// The picks made since it opened that ⌘Z hasn't taken: with it open, the only changes ⌘Z takes.
+    visit: usize,
     added: Vec<String>,
     /// The shipped icons' ids, and the designed pairs.
     ids: Vec<String>,
@@ -968,6 +970,7 @@ impl ReferenceStateMachine for Sheet {
                     seeding_refused: Default::default(),
                     choice: None,
                     icons_open: false,
+                    visit: 0,
                     added: Vec::new(),
                     ids: ids.clone(),
                     pairs: pairs.clone(),
@@ -994,6 +997,7 @@ impl ReferenceStateMachine for Sheet {
                 // The App icon's sheet open.
                 if start == 2 {
                     m.icons_open = true;
+                    m.visit = 0;
                 }
                 if start == 3 && !m.saved.is_empty() {
                     m.open_editor(Target::Saved(m.saved[0].name.clone()));
@@ -1281,6 +1285,9 @@ impl ReferenceStateMachine for Sheet {
                 }
                 if m.choice != choice {
                     m.push(Change::Icon(choice));
+                    if m.icons_open {
+                        m.visit += 1;
+                    }
                 }
                 let theme = match step {
                     Step::Arrow(side, key, _) | Step::Choose(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => {
@@ -1395,23 +1402,29 @@ impl Model {
     /// ⌘Z: the newest change. A setting's in Settings, opened if it was closed, on its tab, its
     /// control focused, and told; a torrent removed back in the list, and told.
     fn undo(&mut self) {
-        // In a Look Preset's editor, only its own changes, newest first.
+        // In a Look Preset's editor, only its own changes, newest first; in the App icon's sheet,
+        // only this visit's picks.
         let at = match self.sheet {
             Some(_) => self.changes.iter().rposition(|c| matches!(c, Change::Theme(..))),
+            None if self.icons_open => self.changes.iter().rposition(|c| matches!(c, Change::Icon(..))).filter(|_| self.visit > 0),
             None => self.changes.len().checked_sub(1),
         };
         let Some(at) = at else { return };
         let change = self.changes.remove(at);
         let refused = matches!(change, Change::Service(name, _) if self.restarts_fail && restarts(name));
+        // An App icon pick undone in its sheet leaves it open, as it is.
+        let in_sheet = self.icons_open && matches!(change, Change::Icon(..));
         // A setting's undo shows Settings in front, opened if it was closed.
         if !refused && !matches!(change, Change::Removed(_)) {
             if !self.open {
                 self.opened();
             }
             self.front = Some(Which::Settings);
-            // Its control takes the focus; a sheet over the window closes, so it shows.
-            self.name_focused = false;
-            self.icons_open = false;
+            if !in_sheet {
+                // Its control takes the focus; a sheet over the window closes, so it shows.
+                self.name_focused = false;
+                self.icons_open = false;
+            }
         }
         match change {
             Change::Removed(id) => {
@@ -1427,6 +1440,11 @@ impl Model {
                 self.tab = tab_of(name.key()).unwrap();
                 self.focus = Some(control_of(name).into());
                 self.told.push(client::display::setting_undone_short(client::display::setting_short(name.key())));
+            }
+            Change::Icon(was) if in_sheet => {
+                self.visit -= 1;
+                self.choice = was;
+                self.told.push(client::display::setting_undone_short("App icon"));
             }
             Change::Icon(was) => {
                 self.close_sheet();
@@ -1707,7 +1725,12 @@ fn act(mut m: Model, step: &Step) -> Model {
             let folder = m.stored.folder.clone().unwrap();
             m.gone.remove(&folder);
         }
-        Step::EditIcons => m.icons_open = true,
+        Step::EditIcons => {
+            if !m.icons_open {
+                m.visit = 0;
+            }
+            m.icons_open = true;
+        }
         Step::IconsDone => m.icons_open = false,
         Step::IconChip(tile, half) => {
             let id = m.tile(tile).0;
@@ -2124,6 +2147,8 @@ impl StateMachineTest for Sheet {
         // In a Look Preset's editor, ⌘Z takes its own changes only.
         let newest = match m.sheet {
             Some(_) => m.changes.iter().rev().find(|c| matches!(c, Change::Theme(..))),
+            // In the App icon's sheet, this visit's picks only.
+            None if m.icons_open => m.changes.iter().rev().find(|c| matches!(c, Change::Icon(..))).filter(|_| m.visit > 0),
             None => m.changes.last(),
         };
         let newest = newest.map(|change| match change {
@@ -3445,6 +3470,45 @@ fn the_app_icons_sheet() {
         assert!(d.settings.find("icons-sheet").is_none(), "{close} closes it");
         assert!(d.settings.state.sheet.is_some(), "and only it");
     }
+}
+
+/// ⌘Z with the App icon's sheet open takes back one pick of this visit and the sheet stays open,
+/// its tiles showing the undone pick; once the visit's picks are gone it takes nothing older, as
+/// in a Look Preset's editor, and the older change waits for the sheet to close (#87).
+#[test]
+fn cmd_z_in_the_app_icons_sheet_steps_back_one_pick_and_keeps_it_open() {
+    let mut d = appearance_tab();
+    let pairs = manifest().pairs().to_vec();
+    let [dark_hour, memento_mori, sea_of_souls, thief_alt] = [0, 1, 2, 3].map(|i| Some(pairs[i].icons()));
+    let choice = |d: &Desk| d.settings.state.app_icon.choice.clone();
+    // An earlier visit picked Phantom Thief (Alt).
+    press(&mut d, "app-icon-edit");
+    press(&mut d, "icon-pair-3");
+    press(&mut d, "icons-done");
+    assert_eq!(choice(&d), thief_alt);
+    press(&mut d, "app-icon-edit");
+    for pair in [2, 1, 0] {
+        press(&mut d, &format!("icon-pair-{pair}"));
+    }
+    assert_eq!(choice(&d), dark_hour);
+    for (back, shown) in [(&memento_mori, 1), (&sea_of_souls, 2)] {
+        d.key(cmd('z'));
+        d.settle();
+        assert!(d.settings.find("icons-sheet").is_some(), "⌘Z leaves the sheet open");
+        assert_eq!(&choice(&d), back, "one pick back");
+        assert!(d.settings.find(&format!("icon-pair-{shown}/in-use")).is_some(), "its tile in use");
+    }
+    d.key(cmd('z'));
+    d.settle();
+    assert_eq!(choice(&d), thief_alt, "the visit's first pick undone: as it was when the sheet opened");
+    d.key(cmd('z'));
+    d.settle();
+    assert!(d.settings.find("icons-sheet").is_some(), "still open");
+    assert_eq!(choice(&d), thief_alt, "nothing older while it's open");
+    press(&mut d, "icons-done");
+    d.key(cmd('z'));
+    d.settle();
+    assert_ne!(choice(&d), thief_alt, "the older visit's pick waits for the sheet to close");
 }
 
 /// The page colour a chip keyed `key` is drawn on.

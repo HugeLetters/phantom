@@ -860,6 +860,7 @@ pub fn close(s: &mut SettingsWindow) {
 pub fn closed(s: &mut SettingsWindow) {
     // A Look Preset's sheet keeps what was done in it, as Done does.
     presets::close(s);
+    close_icons(s);
     leave_all(s);
     s.sheet = None;
     // A saved preset's sheet goes with it, and so does its preview.
@@ -1134,7 +1135,13 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
         (AppSetting::Icon, Was::Icon(choice)) => {
             let undone = icon_name(&s.app_icon, s.app_icon.choice.as_ref());
             show_icon(s, choice.clone());
-            show_setting(s, "app_icon", Some(tx));
+            // The App icon's sheet, open, shows the pick it went back to and stays open: ⌘Z in it
+            // is its own, as in a Look Preset's editor. Any other sheet closes to show it.
+            if s.sheet.as_ref().is_some_and(|sheet| sheet.icons) {
+                s.window.raise();
+            } else {
+                show_setting(s, "app_icon", Some(tx));
+            }
             Notice::setting_undone(display::setting_short("app_icon"), &undone, &icon_name(&s.app_icon, choice.as_ref()))
         }
         (AppSetting::Theme { key, label }, Was::Theme(was, target, side)) => {
@@ -1534,16 +1541,23 @@ pub fn theme_rows(preset: &LookPreset, editor: &Editor) -> ThemeRows {
 /// The App icon's Edit…: its sheet over Settings.
 pub fn edit_icons(s: &mut SettingsWindow) {
     follow_focus(s);
-    if let Some(sheet) = &mut s.sheet {
+    if let Some(sheet) = &mut s.sheet
+        && !sheet.icons
+    {
         sheet.icons = true;
+        // Its picks are its own for ⌘Z, until it closes.
+        s.main.post(|s, _| crate::changes::icons_opened(s));
     }
 }
 
 /// Done in the App icon's sheet, Escape or ⌘W: it closes.
 pub fn close_icons(s: &mut SettingsWindow) {
     if let Some(sheet) = &mut s.sheet {
-        sheet.icons = false;
+        let was_open = std::mem::replace(&mut sheet.icons, false);
         sheet.refused.retain(|r| r.row != Row::Image);
+        if was_open {
+            s.main.post(|s, _| crate::changes::icons_closed(s));
+        }
     }
 }
 

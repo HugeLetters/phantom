@@ -42,7 +42,7 @@
 //! | Listed { at, changes }, newer | | listed when `by` it | gone unless listed; another client's added, newest |
 //! | Listed, not newer | | | |
 //!
-//! | PressApp { id } (⌘Z in a Look Preset's editor) | taken, if not yet; else nothing | | |
+//! | PressApp { id } (⌘Z in a Look Preset's editor, or the App icon's sheet) | taken, if not yet; else nothing | | |
 //! | Fold { ids, into } (the editor closed) | `ids` gone; `into`, if any, added newest | | |
 //!
 //! | Event \ the torrent action it's about | Pending | Action |
@@ -254,7 +254,7 @@ pub enum Command {
     PressAction { seq: u64 },
     /// The service was asked to undo its top torrent action, for the entry `seq`.
     AskedAction { seq: u64 },
-    /// ⌘Z in a Look Preset's editor: its newest change, the app's `id` (#87).
+    /// ⌘Z in a Look Preset's editor, or in the App icon's sheet: its newest change, the app's `id` (#87).
     PressApp { id: u64 },
     /// The editor closed: its changes `ids` leave; Done folds them into one, `into`, the newest,
     /// if they changed anything (Cancel, none).

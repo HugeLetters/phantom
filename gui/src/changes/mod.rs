@@ -45,6 +45,10 @@ pub struct Changes {
     /// ⌘Z then takes only these, newest first; its Done folds them into one, its Cancel drops
     /// them (#87).
     editor: Option<Vec<u64>>,
+    /// While the App icon's sheet is open: the ids of the picks made in it, oldest first. ⌘Z then
+    /// takes only these, newest first, as in the editor, but each stays a change of its own, kept
+    /// when the sheet closes (#87).
+    icons: Option<Vec<u64>>,
 }
 
 /// What an app setting was before a change.
@@ -136,7 +140,7 @@ impl Default for Changes {
         // From now in nanoseconds, so an id is never one an earlier run of the app gave a change
         // the service still lists.
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64);
-        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, seen: BTreeMap::new(), editor: None }
+        Self { state: machine::State::default(), was: BTreeMap::new(), next: now, seen: BTreeMap::new(), editor: None, icons: None }
     }
 }
 
@@ -199,6 +203,10 @@ pub fn app_changed(s: &mut Phantom, of: AppSetting, was: Was) {
         (Some(ids), AppSetting::Theme { .. }) => {
             ids.push(id);
             let _ = c.decide(Event::Command(Command::Edited { id, of }));
+        }
+        (_, AppSetting::Icon) if let Some(ids) = &mut c.icons => {
+            ids.push(id);
+            let _ = c.decide(Event::Command(Command::Changed { id, of }));
         }
         _ => {
             let _ = c.decide(Event::Command(Command::Changed { id, of }));
@@ -267,8 +275,8 @@ pub fn made(s: &mut Phantom, id: u64, seq: Option<u64>) {
 /// While a Look Preset's editor is open, the newest of its own changes, and only those: what
 /// came before it stays until it's closed.
 pub fn press(s: &mut Phantom) {
-    let event = match &s.changes.editor {
-        Some(_) => match editor_top(&s.changes) {
+    let event = match scope(&s.changes) {
+        Some(ids) => match top_of(&s.changes, ids) {
             Some(id) => Command::PressApp { id },
             None => return,
         },
@@ -279,13 +287,28 @@ pub fn press(s: &mut Phantom) {
     }
 }
 
-/// The newest change made in the open editor that ⌘Z hasn't taken.
-fn editor_top(c: &Changes) -> Option<u64> {
-    let ids = c.editor.as_ref()?;
+/// The changes ⌘Z is limited to while a sheet is open: the Look Preset editor's, or the App
+/// icon's sheet's picks (the editor, when both are).
+fn scope(c: &Changes) -> Option<&Vec<u64>> {
+    c.editor.as_ref().or(c.icons.as_ref())
+}
+
+/// The newest of `ids`, the changes made in the open sheet, that ⌘Z hasn't taken.
+fn top_of(c: &Changes, ids: &[u64]) -> Option<u64> {
     c.state.list.iter().rev().find_map(|ch| match ch {
         machine::Change::App { id, press: machine::Press::No, .. } if ids.contains(id) => Some(*id),
         _ => None,
     })
+}
+
+/// The App icon's sheet opened: ⌘Z takes only its picks from now on, until it closes.
+pub fn icons_opened(s: &mut Phantom) {
+    s.changes.icons = Some(Vec::new());
+}
+
+/// The App icon's sheet closed: its picks stay on the list, and ⌘Z takes any change again.
+pub fn icons_closed(s: &mut Phantom) {
+    s.changes.icons = None;
 }
 
 /// A Look Preset's editor opened: its changes are its own from now on, until it closes.
@@ -322,8 +345,8 @@ pub fn press_action(s: &mut Phantom, seq: u64) {
 /// own undo ⌘Z then is.
 pub fn menu_title(s: &Phantom) -> String {
     let editing = s.front == Which::Settings && s.settings_editing;
-    let top = match &s.changes.editor {
-        Some(_) => editor_top(&s.changes)
+    let top = match scope(&s.changes) {
+        Some(ids) => top_of(&s.changes, ids)
             .and_then(|id| s.changes.state.list.iter().find(|c| matches!(c, machine::Change::App { id: i, .. } if *i == id))),
         None => s.changes.state.top(),
     };
