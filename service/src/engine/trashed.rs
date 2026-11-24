@@ -138,6 +138,8 @@ pub struct Check {
     real: Mutex<Vec<bool>>,
     /// Opened a second time: what was read is of two openings, and tells nothing of either.
     spoiled: AtomicBool,
+    /// librqbit's check through its storage ended ([`Check::end`]).
+    ended: AtomicBool,
 }
 
 /// What a held storage opened: where, and each file by index (none: padding) at its path, as it was
@@ -172,6 +174,16 @@ impl Check {
     /// of reach, the torrent's files kept untouched) checked nothing.
     pub fn read(&self) -> bool {
         self.opening().is_some()
+    }
+
+    /// librqbit's check through its storage is over: what it opened was read to the end.
+    pub fn end(&self) {
+        self.ended.store(true, Ordering::SeqCst);
+    }
+
+    /// What its storage opened, once its check [ended](Check::end) having read it.
+    pub fn read_to_the_end(&self) -> Option<&Opening> {
+        self.opening().filter(|_| self.ended.load(Ordering::SeqCst))
     }
 
     /// Whether any piece in `saved` (librqbit's bits of this check, [`super::bitv`]) is one it read a

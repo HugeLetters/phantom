@@ -81,6 +81,10 @@ impl Actor {
         if torrent.lifecycle.phase != Phase::Ready || matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
             return;
         }
+        // Its check is over, whatever is decided of it and when.
+        if let Some(check) = self.evidence(id) {
+            check.end();
+        }
         // Not under a step of its own (files of it on their way to the Trash, say): the next poll does.
         if self.steps.machine().lanes.get(&id).is_some_and(|lane| !lane.is_empty()) {
             return;
@@ -126,12 +130,13 @@ impl Actor {
     }
 
     /// The files of torrent `id` the person chooses by "Download over them" (Resume, its files not
-    /// matching), taken before the Resume is decided: those its last check opened, if one did in this
-    /// run. None after a restart, an undo or a move: nothing read them yet.
+    /// matching), taken before the Resume is decided: those its last check opened and read to the
+    /// end, if one did in this run. None after a restart, an undo or a move, nor of a check still
+    /// reading: nothing read them yet.
     pub(super) fn choice(&self, id: TorrentId) -> Option<Option<Opening>> {
         let torrent = self.torrents.get(&id)?;
         (torrent.record.held() == Some(Held::DontMatch))
-            .then(|| torrent.hold.check.as_ref().and_then(|(_, check)| check.opening().cloned()))
+            .then(|| torrent.hold.check.as_ref().and_then(|(_, check)| check.read_to_the_end().cloned()))
     }
 
     /// Torrent `id` was resumed with `choice` ([`Actor::choice`]): carried out by the first judging of
