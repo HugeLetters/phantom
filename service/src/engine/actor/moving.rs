@@ -818,10 +818,12 @@ impl Actor {
         // way was of the files it leaves, and would make them again here, empty. The size check
         // below finds them missing instead.
         let pointed = matches!(stage, Stage::RemovingOld { .. }) && plan.as_ref().is_some_and(|p| p.moves_none());
+        let before = torrent.lifecycle.phase.clone();
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
         if pointed && matches!(torrent.lifecycle.phase, Phase::CheckDue { .. } | Phase::Checking { .. }) {
             torrent.lifecycle = lifecycle::State::new(torrent.lifecycle.wants, Phase::Ready);
         }
+        super::track_uncounted(&mut torrent.polled.uncounted, &before, &torrent.lifecycle.phase);
         match torrent.record.moving.take() {
             // Checked in full once librqbit has it again. Till then (Missing files keeps it out),
             // none of a file replaced by hand is had: what librqbit said of it was of the one it had
@@ -840,6 +842,7 @@ impl Actor {
             }
             Some(_) | None => {}
         }
+        torrent.keep_known();
         self.save();
         // The stash isn't named any more.
         self.save_undo();

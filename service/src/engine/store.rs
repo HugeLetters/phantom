@@ -31,7 +31,7 @@ use proto::{AbsolutePath, TorrentId};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::files::Gone;
+use super::files::{Gone, Seen, Stamp};
 use super::machine::{Wants, letgo};
 use super::trash::Trashed;
 use super::undo::Stash;
@@ -122,13 +122,14 @@ pub struct Saved {
     /// What it did in its seeding round ([`lifecycle::seeding`]): librqbit forgets what it
     /// uploaded at every stop. Kept at the regular size check and when the service stops.
     pub round: lifecycle::seeding::Round,
-    /// The files that were missing (in Missing files) when the service stopped, by index, with
-    /// what librqbit had of each before it went. Taken on start.
+    /// The files known missing, by index, kept as that's learnt, so a crash loses none (#370): those
+    /// of Missing files, and those a check is to tell are back; as they were while it's away, or an
+    /// error. A start judges them as they're here.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub missing_at_shutdown: BTreeMap<usize, u64>,
-    /// What librqbit had of each file, by index, when the service stopped: the first size check at
-    /// the next start, before librqbit has it again, judges its files by it. Taken on start, so a
-    /// crash, which skips the stop, judges them by their paths alone.
+    pub missing: BTreeMap<usize, Missing>,
+    /// What librqbit had of each file, by index, as its phase last changed or the service stopped:
+    /// the first size check at the next start, before librqbit has it again, judges its files by it
+    /// where librqbit's saved pieces are gone (they go as it's taken out). None: nothing is known.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub had: Vec<u64>,
     /// What Delete couldn't move to the Trash, while the torrent waits for it to be tried again
@@ -163,6 +164,28 @@ pub struct Saved {
     /// destination it's found at, so a start after a crash checks it again, held.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<proto::Held>,
+}
+
+/// A missing file, as the record keeps it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Missing {
+    /// What librqbit had of it before it went.
+    pub had: u64,
+    /// What was at its path when it was last judged.
+    pub seen: Seen,
+}
+
+impl From<&Gone> for Missing {
+    fn from(gone: &Gone) -> Self {
+        let seen = match gone.seen {
+            // A time before 1970 can't be kept: the file there then differs, so it's checked.
+            Seen::Was(Some(at)) => {
+                Seen::Was(Some(Stamp { modified: at.modified.filter(|m| m.duration_since(std::time::UNIX_EPOCH).is_ok()), ..at }))
+            }
+            seen => seen,
+        };
+        Self { had: gone.progress_bytes, seen }
+    }
 }
 
 /// A move under way, as the record keeps it.
@@ -258,7 +281,7 @@ pub struct Record {
     pub wants: Wants,
     pub unchecked: bool,
     pub round: lifecycle::seeding::Round,
-    pub missing_at_shutdown: BTreeMap<usize, u64>,
+    pub missing: BTreeMap<usize, Missing>,
     pub had: Vec<u64>,
     pub delete_failed: Vec<proto::Kept>,
     pub deleting: Vec<PathBuf>,
@@ -368,7 +391,7 @@ impl Record {
             wants,
             unchecked,
             round,
-            missing_at_shutdown,
+            missing,
             had,
             delete_failed,
             deleting,
@@ -394,7 +417,7 @@ impl Record {
             wants,
             unchecked,
             round,
-            missing_at_shutdown,
+            missing,
             had,
             delete_failed,
             deleting,
@@ -427,7 +450,7 @@ impl Record {
             wants,
             unchecked: false,
             round: Default::default(),
-            missing_at_shutdown: BTreeMap::new(),
+            missing: BTreeMap::new(),
             had: Vec::new(),
             delete_failed: Vec::new(),
             deleting: Vec::new(),
@@ -485,7 +508,7 @@ impl Record {
             wants: self.wants,
             unchecked: self.unchecked,
             round: self.round,
-            missing_at_shutdown: self.missing_at_shutdown.clone(),
+            missing: self.missing.clone(),
             had: self.had.clone(),
             delete_failed: self.delete_failed.clone(),
             deleting: self.deleting.clone(),
@@ -570,16 +593,16 @@ impl Record {
         Some(name.to_string_lossy().into_owned())
     }
 
-    /// The files missing at start, with what librqbit had of each, not judged yet: what's at their
-    /// paths then is taken for what was there when they went.
+    /// The files known missing at start: what's at their paths then is judged against what was
+    /// there before, as it would be had the service not gone.
     pub fn gone_at_start(&self) -> BTreeMap<usize, Gone> {
         let (Some(info), paths) = (&self.info, self.paths()) else { return BTreeMap::new() };
-        self.missing_at_shutdown
+        self.missing
             .iter()
             .filter(|(i, _)| self.gets(**i))
-            .filter_map(|(&i, &progress_bytes)| {
+            .filter_map(|(&i, &Missing { had: progress_bytes, seen })| {
                 let f = info.files.get(i)?;
-                Some((i, Gone { path: paths[i].clone(), size_bytes: f.len, progress_bytes, seen: lifecycle::disk::Seen::NotYet }))
+                Some((i, Gone { path: paths[i].clone(), size_bytes: f.len, progress_bytes, seen }))
             })
             .collect()
     }
@@ -1058,7 +1081,7 @@ mod tests {
         let mut record = record(&mut store, &torrent(), Wants::Run);
         record.gets = Gets::Only([1].into());
         record.unchecked = true;
-        record.missing_at_shutdown = [(1, 5)].into();
+        record.missing = [(1, Missing { had: 5, seen: Seen::NotYet })].into();
         record.had = vec![9, 3];
         store.save([&record]).unwrap();
         let loaded = load(dir.path());

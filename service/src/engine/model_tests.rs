@@ -343,6 +343,9 @@ struct Pack {
     have: [bool; FILES],
     /// The files found missing; it's Missing files while there are any.
     missing: BTreeMap<usize, Gone>,
+    /// Files whose bytes can't be read now (their destination went while they were missing or
+    /// returning): shown with none counted, though librqbit's `have` is what it was (#366).
+    uncounted: BTreeSet<usize>,
     /// Its destination is unavailable: it's Destination unavailable, and `running` says whether it runs
     /// again once it's back.
     unavailable: bool,
@@ -425,7 +428,7 @@ impl Pack {
     fn check(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool, held: bool, returning: BTreeMap<usize, Gone>, away: Away) {
         self.make_absent(disk, folder);
         self.unchecked = false;
-        self.missing.clear();
+        self.uncounted.extend(std::mem::take(&mut self.missing).into_keys());
         if held {
             self.checking = Some(returning);
             return;
@@ -437,6 +440,7 @@ impl Pack {
     /// the files put back that it doesn't hold as they were are missing again.
     fn checked(&mut self, disk: &[OnDisk; FILES], returning: BTreeMap<usize, Gone>, away: Away) {
         self.checking = None;
+        self.uncounted.clear();
         self.have = read(disk, away);
         self.missing =
             returning.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
@@ -543,6 +547,7 @@ impl Model {
                     off: [false; FILES],
                     have: [false; FILES],
                     missing: BTreeMap::new(),
+                    uncounted: BTreeSet::new(),
                     unavailable: false,
                     delete_failed: false,
                     deleting: false,
@@ -824,9 +829,8 @@ impl Model {
             p.delete_failed = true;
             // A file it was missing can't be read: none of it is counted, though librqbit still
             // holds the stopped torrent and says it has it (#297).
-            for f in std::mem::take(&mut p.missing).into_keys() {
-                p.have[f] = false;
-            }
+            p.uncounted.extend(std::mem::take(&mut p.missing).into_keys());
+            p.uncounted.extend(p.checking.take().into_iter().flat_map(BTreeMap::into_keys));
             // Its check was halted with it, and nobody asked for a new one.
             p.checking = None;
         } else if let Some(returning) = p.checking.take() {
@@ -1326,12 +1330,15 @@ impl Model {
     }
 
     /// With its destination unavailable, it's stopped in librqbit, remembering whether it was running; its missing files are
-    /// forgotten, as they're out of reach.
+    /// forgotten, as they're out of reach, and none of them is shown counted, as before it went (#366).
+    /// A check under way is lost with them: its returning files are the same.
     fn destination_gone(&mut self, pack: usize) {
         self.unavailable[pack] = true;
         if let Some(p) = self.pack_torrent(pack) {
             p.unavailable = true;
-            p.missing.clear();
+            for f in std::mem::take(&mut p.missing).into_keys() {
+                p.have[f] = false;
+            }
             p.unchecked = false;
         }
     }
@@ -1428,6 +1435,7 @@ impl Model {
         let aways = self.aways();
         for (id, t) in self.torrents.iter_mut() {
             let Torrent::Pack(p) = t else { continue };
+            p.uncounted.clear();
             // Away, or partly in the Trash (its error comes back with it): nothing is known of what
             // it has until it's back and checked.
             if p.unavailable || p.delete_failed {
@@ -1483,7 +1491,7 @@ impl Model {
                 },
                 Torrent::Pack(p) => {
                     let p = &self.shown(id, p);
-                    let counted = |f: usize| !p.off[f] && p.have[f] && !p.missing.contains_key(&f);
+                    let counted = |f: usize| !p.off[f] && p.have[f] && !p.missing.contains_key(&f) && !p.uncounted.contains(&f);
                     // How far a check has got isn't the model's to say; nothing is known of one not checked.
                     let progress_bytes = match p.status() {
                         _ if p.unchecked => 0,
@@ -1964,7 +1972,6 @@ impl ReferenceStateMachine for EngineModel {
             Step::DeleteFile { .. }
             | Step::PutBack { .. }
             | Step::Overwrite { .. }
-            | Step::DestinationGone { .. }
             | Step::DestinationBack { .. }
             | Step::Restart
             | Step::Kill
@@ -2045,7 +2052,8 @@ impl ReferenceStateMachine for EngineModel {
             Step::WriteLitter { pack } => !model.unavailable[*pack] && !model.litter[*pack],
             Step::DestinationBack { pack } => model.unavailable[*pack],
             Step::Restart => restorable(model),
-            // A crash records nothing at stop: no torrent misses files, which a stop records.
+            // What was missing is judged at the start against what was there before a crash, unlike
+            // after a stop, which the model doesn't follow (`tests/crashed.rs` does).
             Step::Kill => {
                 !model.pending.is_empty()
                     && restorable(model)
@@ -3708,4 +3716,40 @@ fn the_undo_of_a_move_to_trash_of_a_file_replaced_by_hand_checks_what_is_put_bac
     use Step::*;
     replay(&[Add { pack: Some(1), paused: false }, PutBack { pack: 1, file: 0 }, TrashFiles { id: 0, files: vec![0] }, Undo]);
     replay(&[Add { pack: Some(1), paused: false }, Overwrite { pack: 1, file: 0 }, TrashFiles { id: 0, files: vec![0] }, Undo]);
+}
+
+/// #366, found by a 256-case run: a file deleted by hand, a restart, then the destination gone. The
+/// deleted file's bytes can't be read: none of it is counted once it's Destination unavailable, as
+/// none was while it was Missing files.
+#[test]
+fn a_file_deleted_by_hand_isnt_counted_once_its_destination_is_gone_after_a_restart() {
+    use Step::*;
+    for (pack, paused) in [(0, false), (1, true)] {
+        replay(&[Add { pack: Some(pack), paused }, DeleteFile { pack, file: 0 }, Restart, DestinationGone { pack }]);
+    }
+}
+
+/// #366, the same without the restart: the deleted file counted again, as librqbit last said it had it.
+#[test]
+fn a_file_deleted_by_hand_isnt_counted_once_its_destination_is_gone() {
+    use Step::*;
+    for (pack, paused) in [(0, false), (1, true)] {
+        replay(&[Add { pack: Some(pack), paused }, DeleteFile { pack, file: 0 }, DestinationGone { pack }]);
+    }
+}
+
+/// #366's review: the destination going during a check of a torrent missing a file: its bytes can't
+/// be read either, so none of them is counted, as when it goes while Missing files.
+#[test]
+fn a_file_deleted_by_hand_isnt_counted_once_its_destination_is_gone_during_a_check() {
+    use Step::*;
+    replay(&[
+        Add { pack: Some(0), paused: false },
+        DeleteFile { pack: 0, file: 0 },
+        HoldChecks,
+        Check(0),
+        DestinationGone { pack: 0 },
+        ReleaseChecks,
+        DestinationBack { pack: 0 },
+    ]);
 }

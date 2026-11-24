@@ -45,7 +45,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -387,14 +387,15 @@ impl Actor {
                 },
                 (_, phase) => phase,
             };
-            record.missing_at_shutdown.clear();
-            let had = std::mem::take(&mut record.had);
+            // librqbit's saved pieces outlast a crash, and say more than the record of one downloading
+            // since; they go as it's taken out, the record's doesn't (#370).
+            let had = saved_progress(&super::session_folder(&data_dir), &record).unwrap_or_else(|| record.had.clone());
             // Away, or partly in the Trash: nothing is known of what it has until it's checked.
             let polled = match phase {
                 Phase::DestinationUnavailable { .. } | Phase::DeleteFailed { .. } => Polled::default(),
                 _ => Polled::kept(&record, had),
             };
-            let torrent = Torrent {
+            let mut torrent = Torrent {
                 id,
                 lifecycle: State::new(record.wants, phase),
                 meter: seeding::Meter::new(record.round),
@@ -406,6 +407,7 @@ impl Actor {
                 #[cfg(test)]
                 added: 0,
             };
+            torrent.keep_known();
             torrents.insert(id, torrent);
         }
         let (went_tx, went) = mpsc::unbounded_channel();
@@ -888,16 +890,12 @@ impl Actor {
         }
         let mut running = Vec::new();
         for torrent in self.torrents.values_mut() {
-            let had = torrent.kept().had;
-            let record = &mut torrent.record;
-            record.had = had;
-            record.round = torrent.meter.round;
-            record.missing_at_shutdown = match &torrent.lifecycle.phase {
-                Phase::MissingFiles { gone } | Phase::Unchecked { gone } => {
-                    gone.iter().map(|(&i, gone)| (i, gone.progress_bytes)).collect()
-                }
-                _ => BTreeMap::new(),
-            };
+            torrent.keep_known();
+            torrent.record.round = torrent.meter.round;
+            // Stopped, what's at the missing files' paths at the next start is taken for what was there.
+            if matches!(torrent.lifecycle.phase, Phase::MissingFiles { .. } | Phase::Unchecked { .. }) {
+                torrent.record.missing.values_mut().for_each(|m| m.seen = files::Seen::NotYet);
+            }
             match &torrent.lib {
                 lib::Lib::In(handle) if matches!(handle.stats().state, TorrentStatsState::Live) => running.push(handle.clone()),
                 lib::Lib::Adding(task) => task.abort(),
@@ -947,6 +945,12 @@ impl Actor {
             let wants_changed = next.wants != torrent.lifecycle.wants;
             torrent.meter.wants_changed(torrent.lifecycle.wants, next.wants);
             torrent.lifecycle = next;
+            // A file that was missing, or returning to a check, has its bytes unreadable: what
+            // librqbit said of it last (kept through a check, or saved as the service stopped) isn't
+            // counted while it's shown, until its check ends (#290, #366). Only shown: what librqbit
+            // said stays as it was, as it's saved and what's decided from (is a file there still
+            // the torrent's own).
+            track_uncounted(&mut torrent.polled.uncounted, &before, &torrent.lifecycle.phase);
             // What Delete left is kept across restarts, and librqbit's storage for it touches
             // nothing meanwhile: restoring it would make the trashed files again, empty. What a
             // Delete under way is about to trash is saved by `delete`, and forgotten once it's over.
@@ -974,8 +978,16 @@ impl Actor {
             // leaves nothing to undo.
             let undoable = matches!(torrent.lifecycle.phase, Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted);
             let (wants, round) = (torrent.lifecycle.wants, torrent.meter.round);
+            // Before librqbit is made to match, which can drop the pieces it saved. Saved at every
+            // change, not only when it learnt something: a save that failed then is made up for, as
+            // the store writes what differs from its last successful one (#370).
+            let phase_changed = torrent.lifecycle.phase != before;
+            if phase_changed {
+                torrent.keep_known();
+            }
             let record = &mut torrent.record;
             if wants_changed
+                || phase_changed
                 || record.unchecked != unchecked
                 || record.delete_failed != kept
                 || (!deleting && !record.deleting.is_empty())
@@ -1304,7 +1316,11 @@ impl Actor {
         if torrent.record.held() == Some(proto::Held::Checking) && torrent.lifecycle.phase == Phase::Ready {
             return None;
         }
-        Some(Observation::Files(on_disk(torrent)))
+        // Gone while its files were looked at, every one seemed missing: it's the destination that is.
+        Some(match files::seen(&torrent.record.destination, || on_disk(torrent)) {
+            Ok(disk) => Observation::Files(disk),
+            Err(reason) => Observation::DestinationGone { reason },
+        })
     }
 
     /// A command that isn't a step, on its torrent's lane.
@@ -1374,7 +1390,7 @@ impl Actor {
         let partly_deleted = matches!(torrent.lifecycle.phase, Phase::DeleteFailed { .. });
         let polled = Polled::of(&stats, &torrent.polled);
         // Partly deleted, librqbit still holds the stopped torrent and says it has a file that was
-        // missing as the Delete began: what it said of each file stands as `trashed` left it, none
+        // missing as the Delete began: what it said of each file stands as `event` left it, none
         // of a file whose bytes can't be read (#290, #297).
         torrent.polled = match partly_deleted {
             true => Polled { file_progress: std::mem::take(&mut torrent.polled.file_progress), ..polled },
@@ -1603,18 +1619,7 @@ impl Actor {
             .into_iter()
             .map(|(path, why)| Kept { path: AbsolutePath::new(path).expect("librqbit's paths are absolute"), why })
             .collect();
-        let gone = self.torrents.get(&id).map(|t| missing(&t.lifecycle.phase)).unwrap_or_default();
-        let observed = self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await;
-        // Partly deleted, it isn't Missing files any more: a file it was missing has none of it
-        // counted, whatever was said of it last (saved as the service stopped, say) (#290).
-        if let Some(t) = self.torrents.get_mut(&id).filter(|t| matches!(t.lifecycle.phase, Phase::DeleteFailed { .. })) {
-            for i in gone {
-                if let Some(p) = t.polled.file_progress.get_mut(i) {
-                    *p = 0;
-                }
-            }
-        }
-        let (ended, answer) = match observed {
+        let (ended, answer) = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
             Err(e) => (self.end(seq, id, steps::Over::Failed), Err(e)),
             // Its step ends there, written ahead of its record going.
             Ok(()) => {
@@ -1685,6 +1690,7 @@ impl Actor {
         // Nothing is known of what an unchecked torrent has.
         let progress = if torrent.lifecycle.phase.unchecked() { &[] } else { torrent.polled.file_progress.as_slice() };
         let mut files = files(record, progress, &missing(&torrent.lifecycle.phase));
+        uncount(&mut files, torrent);
         // One in the Trash for an undo, nothing at its path: librqbit reads it where it went, for its
         // undo, but it shows none of it (#276), as it would download it all set Normal.
         let in_trash = self.guard.trashed().in_trash(&record.info_hash);
@@ -1815,11 +1821,9 @@ impl Actor {
     /// What torrent `id` shows it has of each file is what librqbit saved of it, as it's about to be
     /// added back with that: nothing, with nothing saved (it's checked in full then).
     pub(super) fn polled_as_saved(&mut self, id: TorrentId) {
-        let saved = self.torrents.get(&id).map(|t| bitv::path(&self.session_folder(), &t.record.info_hash));
-        let (Some(saved), Some(torrent)) = (saved, self.torrents.get_mut(&id)) else { return };
-        let Some(info) = &torrent.record.info else { return };
-        let lens: Vec<u64> = info.files.iter().map(|f| f.len).collect();
-        let had = bitv::file_progress(&std::fs::read(saved).unwrap_or_default(), &lens, info.piece_length);
+        let session = self.session_folder();
+        let Some(torrent) = self.torrents.get_mut(&id).filter(|t| t.record.info.is_some()) else { return };
+        let had = saved_progress(&session, &torrent.record).unwrap_or_default();
         let kept = Polled::kept(&torrent.record, had);
         torrent.polled = Polled { finished: kept.finished, file_progress: kept.file_progress, ..std::mem::take(&mut torrent.polled) };
     }
@@ -1853,9 +1857,48 @@ impl Torrent {
     /// shows that until librqbit has it again.
     pub(super) fn kept(&self) -> super::store::Saved {
         let mut saved = self.record.saved();
+        // Brought back, its files are size-checked as they are then.
+        saved.missing.clear();
         saved.had = if self.lifecycle.phase.unchecked() { Vec::new() } else { progress(self) };
         saved
     }
+
+    /// Puts what's known of its files in its record: those missing, and what librqbit has of each.
+    /// Saved as it's learnt, not only at a stop, as taking it out of librqbit
+    /// drops the pieces it saved, and a start after a crash would then take any file at a missing
+    /// one's path for the torrent's own (#370).
+    pub(super) fn keep_known(&mut self) {
+        let phase = &self.lifecycle.phase;
+        let missing = match phase {
+            Phase::MissingFiles { gone: files }
+            | Phase::Unchecked { gone: files }
+            | Phase::CheckDue { returning: files }
+            | Phase::Checking { returning: files } => files.iter().map(|(&i, gone)| (i, gone.into())).collect(),
+            // Its files unreachable, or as they were: what was missing still is, for all that's known.
+            Phase::DestinationUnavailable { .. }
+            | Phase::Error { .. }
+            | Phase::DeleteFailed { .. }
+            | Phase::Deleting { .. }
+            | Phase::Moving { .. } => self.record.missing.clone(),
+            Phase::FetchingInfo | Phase::FetchFailed { .. } | Phase::Ready | Phase::Deleted => BTreeMap::new(),
+        };
+        let had = match phase {
+            // Whatever is on disk is what a check of no file put back takes.
+            Phase::CheckDue { returning } | Phase::Checking { returning } if returning.is_empty() => Vec::new(),
+            phase if phase.unchecked() => Vec::new(),
+            // librqbit says nothing while it checks, nor the last poll of one away at a start.
+            _ => Some(progress(self)).filter(|p| !p.is_empty()).unwrap_or_else(|| self.record.had.clone()),
+        };
+        (self.record.missing, self.record.had) = (missing, had);
+    }
+}
+
+/// What librqbit's saved pieces, in its `session` folder, say it has of each of `record`'s files.
+fn saved_progress(session: &Path, record: &Record) -> Option<Vec<u64>> {
+    let info = record.info.as_ref()?;
+    let saved = std::fs::read(bitv::path(session, &record.info_hash)).ok()?;
+    let lens: Vec<u64> = info.files.iter().map(|f| f.len).collect();
+    Some(bitv::file_progress(&saved, &lens, info.piece_length))
 }
 
 impl Librqbit for Arc<ManagedTorrent> {
@@ -1960,6 +2003,33 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
         // As it was, until the trash says how it went, or the move ends.
         Phase::Deleting { was } | Phase::Moving { was, .. } => missing(was),
         _ => BTreeSet::new(),
+    }
+}
+
+/// The files of `phase`'s torrent whose bytes can't be read: those missing, and those it had
+/// missing that a check was to look at again.
+fn unreadable(phase: &Phase) -> BTreeSet<usize> {
+    match phase {
+        Phase::CheckDue { returning } | Phase::Checking { returning } => returning.keys().copied().collect(),
+        phase => missing(phase),
+    }
+}
+
+/// Updates `uncounted` as a torrent's phase goes from `before` to `next`: files that can't be read
+/// are added as it's set aside, kept while a check is yet to end, forgotten once none is.
+pub(super) fn track_uncounted(uncounted: &mut BTreeSet<usize>, before: &Phase, next: &Phase) {
+    match next {
+        Phase::CheckDue { .. } | Phase::DeleteFailed { .. } | Phase::DestinationUnavailable { .. } => uncounted.extend(unreadable(before)),
+        // An Error is no check's end: a file's bytes are as unreadable as they were.
+        Phase::Checking { .. } | Phase::Unchecked { .. } | Phase::Deleting { .. } | Phase::Moving { .. } | Phase::Error { .. } => {}
+        _ => uncounted.clear(),
+    }
+}
+
+/// `files` as shown: none counted of those whose bytes can't be read now.
+fn uncount(files: &mut [File], torrent: &Torrent) {
+    for f in files.iter_mut().filter(|f| torrent.polled.uncounted.contains(&f.index)) {
+        f.progress_bytes = 0;
     }
 }
 
@@ -2088,6 +2158,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, priorities: &BTreeMap<usize, Priorit
     // Size and progress from the files you're getting: librqbit counts whole pieces, which
     // spill into neighbouring files that may be Off.
     let mut files = files(&t.record, &stats.file_progress, &missing(&t.lifecycle.phase));
+    uncount(&mut files, t);
     shown_as(&mut files, priorities);
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
     let size_bytes = normal().map(|f| f.size_bytes).sum();
@@ -2134,6 +2205,11 @@ struct Polled {
     /// What librqbit last said it has of each file, by index: kept through a check, during which
     /// it says nothing per file.
     file_progress: Vec<u64>,
+    /// Files whose bytes can't be read now (missing as their destination went, or as a delete
+    /// failed): shown with none counted, whatever `file_progress` says of them. Never saved as what
+    /// librqbit has (`undo.json` holds the row as shown, which only draws the step), nor decided
+    /// from: `file_progress` is what librqbit said (#366).
+    uncounted: BTreeSet<usize>,
     uploaded_bytes: u64,
     download_bytes_per_sec: u64,
     upload_bytes_per_sec: u64,
@@ -2157,6 +2233,7 @@ impl Polled {
             finished: stats.finished,
             checked_bytes: stats.progress_bytes,
             file_progress: file_progress.clone(),
+            uncounted: last.uncounted.clone(),
             uploaded_bytes: stats.uploaded_bytes,
             download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
             upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),
@@ -2185,6 +2262,31 @@ impl Actor {
         let t = self.torrents.get_mut(&id)?;
         (t.polled.download_bytes_per_sec, t.polled.upload_bytes_per_sec, t.polled.live_peers) = (rate, rate, 1);
         self.listed(id).map(|t| (t.download_bytes_per_sec, t.upload_bytes_per_sec, t.live_peers))
+    }
+}
+
+#[cfg(test)]
+mod uncounted_tests {
+    use super::*;
+
+    /// A missing file whose check fails (librqbit erroring as the drive goes) and whose destination
+    /// then goes: it stays uncounted, as no check ended (#366's review).
+    #[test]
+    fn an_error_without_a_check_ending_keeps_the_files_uncounted() {
+        let expected = files::Expected { index: 0, path: "/gone/b.bin".into(), size_bytes: 10, progress_bytes: 10 };
+        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected]).files[&0]))]);
+        let error = Phase::Error { failure: Broke::Librqbit { detail: "drive gone".into() } };
+        let away =
+            Phase::DestinationUnavailable { reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() } };
+        let mut uncounted = BTreeSet::new();
+        let mut steps = vec![(Phase::MissingFiles { gone: gone.clone() }, Phase::CheckDue { returning: gone.clone() })];
+        steps.push((steps[0].1.clone(), Phase::Checking { returning: gone }));
+        steps.push((steps[1].1.clone(), error.clone()));
+        steps.push((error, away));
+        for (before, next) in &steps {
+            track_uncounted(&mut uncounted, before, next);
+        }
+        assert_eq!(uncounted, BTreeSet::from([1]));
     }
 }
 
