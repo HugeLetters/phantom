@@ -654,22 +654,45 @@ pub fn found_now(w: &Waiting) -> String {
 }
 
 /// What the CLI prints once the wait for `w` ends, or `None` while its check goes on: `now` is its
-/// status and hold in the latest snapshot, `None` if it's no longer listed. Every outcome ends it.
+/// status and hold in the latest snapshot, `None` if it's no longer listed. Every outcome ends it, and
+/// none is told of a check that's still going or whose end isn't told yet.
 pub fn found_outcome(w: &Waiting, now: Option<(&proto::Status, Option<proto::Held>)>) -> Option<String> {
     use proto::{Held, Status};
     let (name, id) = (&w.name, w.id);
     let line = match now {
         None => format!("{name}: removed before its check ended"),
-        Some((Status::Checking, Some(Held::Checking))) => return None,
-        Some((_, None)) => format!("{name}: its files match; nothing moved, and it's back as it was"),
+        // Its check goes on, or comes once its move is over.
+        Some((Status::Checking | Status::Moving { .. } | Status::WaitingToMove, _)) => return None,
         Some((_, Some(Held::DontMatch))) => {
             format!("{name}: its files don't match; it's stopped and nothing was written. `phantom resume {id}` downloads over them")
         }
         Some((Status::MissingFiles, Some(Held::Checking))) => format!(
             "{name}: files of it are missing or aren't its own to write; it's stopped and nothing was written. Once they are put right it's checked again"
         ),
-        Some((_, Some(Held::Checking))) => {
+        Some((Status::Unchecked, Some(Held::Checking))) => {
             format!("{name}: not checked; it's stopped and nothing was written. `phantom check {id}` checks it")
+        }
+        Some((Status::DestinationUnavailable { .. }, Some(Held::Checking))) => {
+            format!("{name}: its destination is out of reach; nothing was written, and it's checked once it's back")
+        }
+        Some((Status::Error { .. } | Status::FetchingInfo, Some(Held::Checking))) => {
+            format!("{name}: it couldn't be checked; it's stopped and nothing was written. `phantom check {id}` checks it")
+        }
+        // Its check is over, and what it found is told with the next snapshot: lifted, or stopped.
+        Some((Status::Downloading | Status::Seeding | Status::Paused | Status::Done { .. }, Some(Held::Checking))) => return None,
+        // Only one running or stopped as before was checked and found to be the torrent's.
+        Some((Status::Downloading | Status::Seeding | Status::Paused | Status::Done { .. }, None)) => {
+            format!("{name}: its files match; nothing moved, and it's back as it was")
+        }
+        // Pointed back by an undo of its Rename, or its files went as it was checked.
+        Some((Status::MissingFiles, None)) => {
+            format!("{name}: its files aren't there any more (its Rename was undone, or they were moved); nothing was written")
+        }
+        Some((
+            status @ (Status::Unchecked | Status::DestinationUnavailable { .. } | Status::Error { .. } | Status::FetchingInfo),
+            None,
+        )) => {
+            format!("{name}: its check there didn't end; it's {} now", self::status(status))
         }
     };
     Some(line)
@@ -1887,9 +1910,26 @@ mod tests {
             at(Status::MissingFiles, Some(Held::Checking)).unwrap(),
             "Album: files of it are missing or aren't its own to write; it's stopped and nothing was written. Once they are put right it's checked again"
         );
+        // Checked there once its move is over: still going.
+        assert_eq!(at(Status::WaitingToMove, Some(Held::Checking)), None);
+        assert_eq!(at(Status::Moving { done: 0, total: 1 }, None), None);
+        // Its check over, what it found not told yet (a command on its lane holds that back): no
+        // "not checked" of a check that ended.
+        assert_eq!(at(Status::Seeding, Some(Held::Checking)), None);
+        assert_eq!(at(Status::Paused, Some(Held::Checking)), None);
+        // Not held and not as it was: nothing says its files match. Its Rename undone during the wait:
         assert_eq!(
-            at(Status::WaitingToMove, Some(Held::Checking)).unwrap(),
-            "Album: not checked; it's stopped and nothing was written. `phantom check 3` checks it"
+            at(Status::MissingFiles, None).unwrap(),
+            "Album: its files aren't there any more (its Rename was undone, or they were moved); nothing was written"
+        );
+        assert_eq!(at(Status::Unchecked, None).unwrap(), "Album: its check there didn't end; it's Unchecked now");
+        assert_eq!(
+            at(
+                Status::DestinationUnavailable { reason: proto::Unavailable::DriveNotConnected { name: "Films".into() } },
+                Some(Held::Checking)
+            )
+            .unwrap(),
+            "Album: its destination is out of reach; nothing was written, and it's checked once it's back"
         );
         assert_eq!(found_outcome(&waiting, None).unwrap(), "Album: removed before its check ended");
         assert_eq!(
