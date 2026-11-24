@@ -286,6 +286,7 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         trackers: Vec::new(),
         location: None,
         actions: proto::Actions::default(),
+        held: None,
     }
 }
 

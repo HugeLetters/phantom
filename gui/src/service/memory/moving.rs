@@ -304,6 +304,7 @@ mod tests {
             trackers: Vec::new(),
             location: None,
             actions: proto::Actions::default(),
+            held: None,
         }
     }
 

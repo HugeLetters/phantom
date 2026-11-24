@@ -119,3 +119,35 @@ fn move_to_finds_a_folder_moved_in_finder() {
     assert_eq!(status(&rt, 1), Status::Seeding);
     assert!(rt.state.undo.is_empty(), "a Move isn't undone");
 }
+
+/// Its folder renamed in Finder, and its files there of their names and lengths but other bytes:
+/// Rename… to that name finds it, and its check finds none of its pieces there. It's stopped, and a
+/// warning says "Files don't match", with its name and where it is, and Reveal in Finder. Resume
+/// then downloads over them, the person's choice.
+#[test]
+fn a_found_torrent_whose_files_do_not_match_stays_stopped_with_a_warning() {
+    let renamed = format!("{DOWNLOADS}/Album (2024)");
+    let mut rt = app(seeding_album().moved_by_hand_onto_others(1, &renamed));
+    wait(&mut rt, 0.5);
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    row_pick(&mut rt, 1, "Rename…");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    rt.paste("Album (2024)");
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    settle(&mut rt);
+    wait(&mut rt, 3.0);
+
+    assert_eq!(notice(&rt), Some("Files don't match"));
+    assert_eq!(newest_list(&mut rt), format!("Files don't match\nAlbum (2024)\n{renamed}\nReveal in Finder"));
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.status.clone(), t.held), (Status::Paused, Some(proto::Held::DontMatch)), "stopped, untouched");
+    let entries = rt.state.bar.entries().iter().filter(|e| e.notice.short == "Files don't match").count();
+    wait(&mut rt, 2.0);
+    assert_eq!(rt.state.bar.entries().iter().filter(|e| e.notice.short == "Files don't match").count(), entries, "told once");
+
+    row_pick(&mut rt, 1, "Resume");
+    wait(&mut rt, 1.0);
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.status.clone(), t.held), (Status::Downloading, None), "downloads over them");
+}

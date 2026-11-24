@@ -71,7 +71,9 @@ enum Command {
     /// copied to another (then the originals go); each keeps what it had, without a full check.
     /// Several go one after another, in the order given, each in FOLDER as it would be on its own;
     /// one that can't doesn't hold up the rest. Answered once each is moved, or back where it was.
-    /// A torrent moved to FOLDER in Finder is found there: nothing moves, it's checked there
+    /// A torrent moved to FOLDER in Finder is found there: nothing moves, it's checked there, held
+    /// stopped with its files untouched, and answered once that's over: back as it was, or stopped
+    /// if none of its pieces is there (its files don't match)
     Move {
         #[arg(required = true, num_args = 1.., value_name = "ID")]
         ids: Vec<TorrentId>,
@@ -92,7 +94,7 @@ enum Command {
     /// Give a torrent a new name on disk, where it is: a torrent of one file its file's, a torrent
     /// of several its folder's (the files in it keep theirs); it keeps what it had. Something at
     /// the new name already refuses it, and nothing is written over, but its own files renamed to
-    /// NAME in Finder: it's found there, nothing moves, and it's checked. `phantom undo` renames it
+    /// NAME in Finder: it's found there, nothing moves, and it's checked as `move` says. `phantom undo` renames it
     /// back (a found one is pointed back, moving nothing)
     Rename {
         id: TorrentId,
@@ -382,14 +384,22 @@ fn moves(client: &mut Client, ids: &[TorrentId], to: proto::AbsolutePath, choice
     }
 }
 
-/// Each torrent of `found` a Move or a Rename found where it is now (#358), and where that is.
+/// Each torrent of `found` a Move or a Rename found where it is now (#358), where that is and how
+/// its check there went: once none is held for it any more.
 fn print_found(client: &mut Client, found: &[TorrentId]) -> Result<()> {
     if found.is_empty() {
         return Ok(());
     }
-    for t in client.list()?.iter().filter(|t| found.contains(&t.id)) {
+    let mut snapshots = client.snapshots()?;
+    let torrents = loop {
+        let torrents: Vec<proto::TorrentInfo> = snapshots.receive()?.torrents.into_iter().filter(|t| found.contains(&t.id)).collect();
+        if !torrents.iter().any(|t| t.held == Some(proto::Held::Checking)) {
+            break torrents;
+        }
+    };
+    for t in &torrents {
         if let Some(at) = &t.location {
-            println!("{}", display::found_line(t.display_name(), at));
+            println!("{}", display::found_line(t.id, t.display_name(), at, t.held));
         }
     }
     Ok(())

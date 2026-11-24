@@ -158,6 +158,11 @@ pub struct Saved {
     /// one past the point where `destination` names the new one, and restores one before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moving: Option<Moving>,
+    /// A Move or a Rename found it where it is now (#358): held stopped, librqbit's storage of it
+    /// touching nothing there, until a check finds any of its pieces there. Written ahead with the
+    /// move, so a start after a crash checks it again, held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<proto::Held>,
 }
 
 /// A move under way, as the record keeps it.
@@ -225,6 +230,7 @@ pub struct Record {
     pub stash: Option<Stash>,
     pub letting_go: letgo::State,
     pub moving: Option<Moving>,
+    pub held: Option<proto::Held>,
 }
 
 /// The files a torrent gets (those Normal).
@@ -333,6 +339,7 @@ impl Record {
             stash,
             letting_go,
             moving,
+            held,
         } = saved;
         let gets = match normal {
             Some(only) => Gets::Only(only),
@@ -358,6 +365,7 @@ impl Record {
             stash,
             letting_go,
             moving,
+            held,
         }
     }
 
@@ -390,6 +398,7 @@ impl Record {
             stash: None,
             letting_go: letgo::State::Holding,
             moving: None,
+            held: None,
         }
     }
 
@@ -416,6 +425,7 @@ impl Record {
             stash: self.stash.clone(),
             letting_go: self.letting_go.clone(),
             moving: self.moving.clone(),
+            held: self.held,
         }
     }
 

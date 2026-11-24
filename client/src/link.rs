@@ -151,6 +151,7 @@ mod tests {
             trackers,
             location: None,
             actions: proto::Actions::default(),
+            held: None,
         }
     }
 

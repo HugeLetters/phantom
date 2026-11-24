@@ -199,6 +199,12 @@ pub struct MemoryService {
     /// one file), and what was at each of its files' paths before, which a Move or a Rename that
     /// finds it there gives back (`found.rs`).
     by_hand: BTreeMap<TorrentId, (PathBuf, BTreeMap<usize, Option<Stamp>>)>,
+    /// Those of [`by_hand`](Self::by_hand) where the person put files of the torrent's names and
+    /// lengths but other bytes: found there, none of its pieces is (`found.rs`).
+    others_by_hand: BTreeSet<TorrentId>,
+    /// The torrents found where none of their pieces is, stopped with their files untouched until
+    /// Resume (#358): "Files don't match".
+    dont_match: BTreeSet<TorrentId>,
 }
 
 /// A torrent that left the list, as it was before the command that took it off: what brings it
@@ -493,6 +499,8 @@ impl Default for MemoryService {
             moving: BTreeMap::new(),
             taken_on_disk: BTreeSet::new(),
             by_hand: BTreeMap::new(),
+            others_by_hand: BTreeSet::new(),
+            dont_match: BTreeSet::new(),
         }
     }
 }
@@ -1143,6 +1151,7 @@ impl MemoryService {
             t.status = status;
         }
         t.actions = m.state.actions();
+        t.held = self.dont_match.contains(&id).then_some(proto::Held::DontMatch);
         let location = self.location(&self.torrents[idx]);
         self.torrents[idx].location = location;
     }
@@ -1206,6 +1215,7 @@ impl MemoryService {
             original_name: None,
             trackers: Vec::new(),
             location: None,
+            held: None,
         }
     }
 
@@ -1259,7 +1269,11 @@ impl MemoryService {
             }
         }
         for id in ended {
+            let others = self.checked_onto_others(id);
             let have = self.files.get(&id).map(|files| files.iter().map(|f| f.progress_bytes).collect()).unwrap_or_default();
+            if others {
+                self.event(id, Event::Command(proto::Action::Pause));
+            }
             self.event(id, Event::Observed(Observation::Idle { have }));
         }
 
@@ -1330,7 +1344,9 @@ impl MemoryService {
             | TorrentCommand::CancelMove => {
                 unreachable!("a step of its lane is `steps.rs`'s, or answered as it comes")
             }
-            TorrentCommand::Pause | TorrentCommand::Resume | TorrentCommand::Check | TorrentCommand::CancelCheck => {}
+            // Resumed once its files didn't match: it downloads over them (#358).
+            TorrentCommand::Resume => drop(self.dont_match.remove(&id)),
+            TorrentCommand::Pause | TorrentCommand::Check | TorrentCommand::CancelCheck => {}
         }
         self.refresh(id);
         self.changed = true;
@@ -1515,6 +1531,7 @@ impl MemoryService {
             original_name: None,
             trackers: Vec::new(),
             location: None,
+            held: None,
         }
     }
 

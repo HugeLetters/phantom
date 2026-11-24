@@ -92,6 +92,9 @@ pub struct Phantom {
     /// The files whose parts the service couldn't keep, as last told, so each is told of once while
     /// it stays in the list (#304).
     pub service_parts_not_saved: Vec<std::path::PathBuf>,
+    /// The torrents found where they are now whose files don't match (#358), as last told, so each
+    /// is told of once while it stays so.
+    pub service_dont_match: Vec<TorrentId>,
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
     /// Why the default destination can't be reached, as the latest snapshot says (#209): Settings'
@@ -332,6 +335,7 @@ impl Phantom {
             service_reset: Vec::new(),
             service_records_set_aside: None,
             service_parts_not_saved: Vec::new(),
+            service_dont_match: Vec::new(),
             volumes: Vec::new(),
             default_unavailable: None,
             undo: Vec::new(),
@@ -392,6 +396,14 @@ impl Phantom {
                     }
                 }
                 self.service_parts_not_saved = snapshot.parts_not_saved.iter().map(|p| p.file.clone()).collect();
+                // Found, and its check found none of its pieces there (#358): told once, while it stays so.
+                let dont_match: Vec<&TorrentInfo> = snapshot.torrents.iter().filter(|t| t.held == Some(proto::Held::DontMatch)).collect();
+                for t in &dont_match {
+                    if let (false, Some(at)) = (self.service_dont_match.contains(&t.id), &t.location) {
+                        self.bar.tell(crate::notice::Notice::files_dont_match(t.display_name(), at));
+                    }
+                }
+                self.service_dont_match = dont_match.iter().map(|t| t.id).collect();
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
                 let left = self.undos.observe(&snapshot.left);

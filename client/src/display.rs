@@ -605,9 +605,23 @@ pub fn found_listing(found: &[(String, std::path::PathBuf)]) -> Listing {
     Listing { groups: found.iter().map(|(name, at)| vec![Line::Name(name.clone()), Line::Path(at.display().to_string())]).collect() }
 }
 
-/// What the CLI prints of a torrent a Move or a Rename found where it is now (#358).
-pub fn found_line(name: &str, at: &std::path::Path) -> String {
-    format!("Found {name} at {}: nothing moved, it's checked there", at.display())
+/// What the CLI prints of torrent `id`, which a Move or a Rename found where it is now (#358), once
+/// its check there is over: back as it was, or, `held` because none of its pieces is there, stopped
+/// with its files untouched.
+pub fn found_line(id: proto::TorrentId, name: &str, at: &std::path::Path, held: Option<proto::Held>) -> String {
+    let at = at.display();
+    match held {
+        Some(proto::Held::DontMatch) => format!(
+            "Found {name} at {at}, but its files don't match: it's stopped and nothing was written; `phantom resume {id}` downloads over them"
+        ),
+        Some(proto::Held::Checking) | None => format!("Found {name} at {at}: nothing moved, it's checked there and back as it was"),
+    }
+}
+
+/// What the status bar says of a torrent found where it is now (#358) whose check found none of
+/// its pieces there: it's stopped, its files untouched. Its name and where it is are the list's.
+pub fn files_dont_match() -> &'static str {
+    "Files don't match"
 }
 
 /// The action that undoes it.
@@ -1750,6 +1764,17 @@ mod tests {
         assert_eq!((found(1), found(3)), ("Found".to_owned(), "Found 3 torrents".to_owned()));
         let listed = found_listing(&[("Album".into(), "/Films/Album".into())]);
         assert_eq!(listed.groups, [vec![Line::Name("Album".into()), Line::Path("/Films/Album".into())]]);
+    }
+
+    /// The CLI's line once a found torrent's check is over: back as it was, or its files don't match.
+    #[test]
+    fn a_found_torrent_s_line_says_how_its_check_went() {
+        let at = std::path::Path::new("/Films/Album");
+        assert_eq!(found_line(3, "Album", at, None), "Found Album at /Films/Album: nothing moved, it's checked there and back as it was");
+        assert_eq!(
+            found_line(3, "Album", at, Some(proto::Held::DontMatch)),
+            "Found Album at /Films/Album, but its files don't match: it's stopped and nothing was written; `phantom resume 3` downloads over them"
+        );
     }
 
     /// A Rename's undo lists "renamed → original", once this app knows what it was renamed from.

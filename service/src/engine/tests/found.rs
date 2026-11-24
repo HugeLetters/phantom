@@ -423,3 +423,165 @@ async fn a_found_rename_a_crash_cut_short_is_still_undone_moving_nothing() {
     assert!(!downloads.join("pack").exists());
     engine.stop().await;
 }
+
+// Held while it's checked (#358): what's found isn't touched until the check found its pieces there.
+
+/// Everything under `folder`, its files and folders, by path inside it: whether it's a folder, its
+/// inode, length and modification time. A file made, written, grown or stamped, or a folder made,
+/// changes it.
+fn tree(folder: &Path) -> BTreeMap<PathBuf, (bool, u64, u64, i64, i64)> {
+    let mut found = BTreeMap::new();
+    let mut dirs = vec![folder.to_owned()];
+    while let Some(dir) = dirs.pop() {
+        for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let m = std::fs::symlink_metadata(e.path()).unwrap();
+            if m.is_dir() {
+                dirs.push(e.path());
+            }
+            let at = e.path().strip_prefix(folder).unwrap().to_owned();
+            found.insert(at, (m.is_dir(), m.ino(), m.len(), m.mtime(), m.mtime_nsec()));
+        }
+    }
+    found
+}
+
+/// Waits until torrent `id` is held so, or isn't (`None`).
+async fn until_held(engine: &Engine, id: u64, held: Option<proto::Held>) {
+    for _ in 0..1000 {
+        if find(engine, id).await.held == held {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("torrent {id} never held {held:?}: {:?}", find(engine, id).await);
+}
+
+/// An engine whose storage keeps what's under `folder` as each storage of librqbit's is made, in
+/// the snapshots it returns: before what it makes, librqbit's own (held or not) making the files.
+async fn keeping_trees(dir: &Path, folder: PathBuf) -> (Engine, Arc<std::sync::Mutex<Vec<BTreeMap<PathBuf, (bool, u64, u64, i64, i64)>>>>) {
+    let trees = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let kept = trees.clone();
+    let init_in: super::super::files::InitIn = Arc::new(move |destination, init| {
+        kept.lock().unwrap().push(tree(&folder));
+        super::super::files::init_in(destination, init)
+    });
+    let engine = super::letgo::engine_guarded(dir, super::super::files::Guard::new(init_in), Default::default()).await;
+    (engine, trees)
+}
+
+/// A found torrent, one of its files not there, is held while it's checked: nothing there is made,
+/// written, grown or stamped, the file that isn't there isn't made, nor any folder. Its pieces
+/// found there, the hold is lifted, and only then are its own files touched (each set to its
+/// length, the one not there made); it's back to running or stopped as it was, with what it had
+/// there, and the person's file beside them stays as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_found_torrent_is_held_untouched_while_checked_then_back_as_it_was() {
+    for paused in [false, true] {
+        let dir = temp();
+        let downloads = dir.path().join("downloads");
+        let (engine, trees) = keeping_trees(dir.path(), downloads.join("Album")).await;
+        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, paused).await.unwrap().id;
+        let settled = if paused { Status::Done { reached: None } } else { Status::Seeding };
+        wait_for(&engine, id, settled).await;
+        std::fs::rename(downloads.join("pack"), downloads.join("Album")).unwrap();
+        std::fs::remove_file(downloads.join("Album/c.bin")).unwrap();
+        std::fs::write(downloads.join("Album/mine.txt"), b"mine").unwrap();
+        wait_for(&engine, id, Status::MissingFiles).await;
+        let (before, bytes) = (tree(&downloads.join("Album")), bytes_in(&downloads.join("Album")));
+        let made = trees.lock().unwrap().len();
+
+        let answer = engine.commanded(vec![id], rename("Album")).await.unwrap();
+        assert_eq!(answer.found, vec![id], "paused {paused}");
+        let back = if paused { Status::Paused } else { Status::Downloading };
+        wait_for(&engine, id, back).await;
+        // Its held storage, for the check, then its normal one, once the check found its pieces:
+        // up to then nothing there was touched.
+        let since = trees.lock().unwrap()[made..].to_vec();
+        assert!(since.len() >= 2, "paused {paused}: held, then lifted: {}", since.len());
+        for (n, seen) in since.iter().enumerate() {
+            assert_eq!(seen, &before, "paused {paused}: nothing touched or made while held, up to storage {n}");
+        }
+        let t = find(&engine, id).await;
+        assert_eq!((t.held, t.content.unwrap().progress_bytes), (None, 2 * FULL), "paused {paused}: what it had there");
+        let after = bytes_in(&downloads.join("Album"));
+        assert_eq!(after.get(Path::new("c.bin")).map(Vec::len), Some(2 * PIECE), "paused {paused}: its own file made, once lifted");
+        for name in ["a.bin", "b.bin", "mine.txt"] {
+            assert_eq!(after.get(Path::new(name)), bytes.get(Path::new(name)), "paused {paused}: {name}'s bytes");
+        }
+        let mine = Path::new("mine.txt");
+        assert_eq!(tree(&downloads.join("Album")).get(mine), before.get(mine), "paused {paused}: the person's file as it was");
+        engine.stop().await;
+    }
+}
+
+/// Found files of the torrent's names and lengths but other bytes: the check finds none of its
+/// pieces there, so it stays stopped, though it was running, and is told "Files don't match".
+/// Nothing there changed at all: no byte, length or time, no file or folder made. Resume then
+/// downloads over them, as the person chooses.
+#[tokio::test(flavor = "multi_thread")]
+async fn found_files_none_of_whose_pieces_are_the_torrents_are_left_untouched_and_it_stays_stopped() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    std::fs::rename(downloads.join("pack"), downloads.join("Album")).unwrap();
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        std::fs::write(downloads.join("Album").join(name), vec![9; 2 * PIECE]).unwrap();
+    }
+    std::fs::write(downloads.join("Album/mine.txt"), b"mine").unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    let (before, bytes) = (tree(&downloads.join("Album")), bytes_in(&downloads.join("Album")));
+
+    let answer = engine.commanded(vec![id], rename("Album")).await.unwrap();
+    assert_eq!(answer.found, vec![id]);
+    until_held(&engine, id, Some(proto::Held::DontMatch)).await;
+    let t = find(&engine, id).await;
+    assert_eq!((t.status, t.content.unwrap().progress_bytes), (Status::Paused, 0), "stopped, none of it there");
+    // A size check or two later, too.
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    assert_eq!(tree(&downloads.join("Album")), before, "nothing touched");
+    assert_eq!(bytes_in(&downloads.join("Album")), bytes);
+    assert_eq!(find(&engine, id).await.status, Status::Paused);
+
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    until_held(&engine, id, None).await;
+    wait_for(&engine, id, Status::Downloading).await;
+    engine.stop().await;
+}
+
+/// A crash while a found torrent is held for its check: it comes back held, checked in full again
+/// with nothing touched meanwhile, then runs as it did.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_found_torrent_held_for_its_check_comes_back_held_after_a_crash() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let (id, before) = {
+        let (engine, gate, _reads, _opens) = reading_engine(dir.path()).await;
+        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        std::fs::rename(downloads.join("pack"), downloads.join("Album")).unwrap();
+        wait_for(&engine, id, Status::MissingFiles).await;
+        let before = tree(&downloads.join("Album"));
+        gate.hold(true);
+        assert_eq!(engine.commanded(vec![id], rename("Album")).await.unwrap().found, vec![id]);
+        until(&engine, id, |s| matches!(s, Status::Checking)).await;
+        assert_eq!(find(&engine, id).await.held, Some(proto::Held::Checking));
+        engine.kill().await;
+        (id, before)
+    };
+    let (gate, reads) = (Arc::new(super::super::files::Gate::default()), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+    gate.hold(true);
+    let _opens = Opens(gate.clone());
+    let engine = engine_reading(dir.path(), reads.clone(), gate.clone()).await;
+    let t = find(&engine, id).await;
+    assert_eq!((t.held, t.location), (Some(proto::Held::Checking), at(downloads.join("Album"))), "back held");
+    until(&engine, id, |s| matches!(s, Status::Checking)).await;
+    assert_eq!(tree(&downloads.join("Album")), before, "nothing touched while held");
+    gate.hold(false);
+    wait_for(&engine, id, Status::Seeding).await;
+    let t = find(&engine, id).await;
+    assert_eq!((t.held, t.content.unwrap().progress_bytes), (None, 3 * FULL));
+    assert!(reads.load(Ordering::SeqCst) >= 6, "checked in full");
+    engine.stop().await;
+}

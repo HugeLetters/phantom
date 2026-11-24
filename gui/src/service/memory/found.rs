@@ -18,6 +18,32 @@ impl MemoryService {
         self
     }
 
+    /// Torrent `id`'s folder (or its one file) is moved or renamed by hand to `to`, and its files
+    /// there are of their names and lengths but other bytes: found there, none of its pieces is.
+    pub fn moved_by_hand_onto_others(mut self, id: TorrentId, to: impl Into<PathBuf>) -> Self {
+        self.others_by_hand.insert(id);
+        self.moved_by_hand(id, to)
+    }
+
+    /// Torrent `id`'s check ended: found on files that aren't its own, none of its pieces is there,
+    /// so it's stopped, its files untouched, as the engine's (#358). Whether it was.
+    pub(super) fn checked_onto_others(&mut self, id: TorrentId) -> bool {
+        if self.by_hand.contains_key(&id) || !self.others_by_hand.remove(&id) {
+            return false;
+        }
+        for f in self.files.get_mut(&id).into_iter().flatten() {
+            f.progress_bytes = 0;
+        }
+        // The engine's found Move is checked with none of its files returning: none is missing.
+        if let Some(m) = self.machines.get_mut(&id)
+            && let lifecycle::Phase::Checking { returning } = &mut m.state.phase
+        {
+            returning.clear();
+        }
+        self.dont_match.insert(id);
+        true
+    }
+
     /// Torrent `id`'s files leave its place for `to`: none is at its path any more.
     pub(super) fn left_by_hand(&mut self, id: TorrentId, to: PathBuf) {
         let Some(m) = self.machines.get_mut(&id) else { return };

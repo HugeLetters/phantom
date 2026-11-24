@@ -203,6 +203,13 @@ impl Client {
         Ok(self.snapshot_here(Vec::new())?.torrents)
     }
 
+    /// Every snapshot from now on, on this connection, which becomes the stream: the client goes on
+    /// with a fresh one to the same service.
+    pub fn snapshots(&mut self) -> Result<Subscription, Failure> {
+        let fresh = Self { service_version: self.service_version.clone(), ..Self::connect_raw()? };
+        std::mem::replace(self, fresh).subscribe(Vec::new())
+    }
+
     /// The first snapshot on this connection, which becomes a stream: so the client goes on with a
     /// fresh one to the same service, opened first so the service never sees it without one.
     fn snapshot_here(&mut self, watching: Vec<TorrentId>) -> Result<Snapshot, Failure> {

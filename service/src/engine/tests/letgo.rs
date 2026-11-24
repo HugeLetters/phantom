@@ -54,7 +54,7 @@ pub(super) async fn engine_reading(dir: &Path, reads: Arc<std::sync::atomic::Ato
 }
 
 /// [`engine`]'s, librqbit's storage through `guard`, its trash waiting while `trash` is held.
-async fn engine_guarded(dir: &Path, guard: super::super::files::Guard, trash: super::super::trash::Gate) -> Engine {
+pub(super) async fn engine_guarded(dir: &Path, guard: super::super::files::Guard, trash: super::super::trash::Gate) -> Engine {
     let config = Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),

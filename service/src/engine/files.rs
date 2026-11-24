@@ -294,6 +294,12 @@ impl Guard {
         Self { layout: Some((destination, Layout::new(folder, Some(normal)).one_file_as(one_file))), ..self.clone() }
     }
 
+    /// For an add of a torrent found where it is now and `held` while it's checked (#358): its
+    /// storage touches nothing there ([`Layout::held_as`]).
+    pub fn held(self, held: bool) -> Self {
+        Self { layout: self.layout.map(|(destination, layout)| (destination, layout.held_as(held))), ..self }
+    }
+
     /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files. The
     /// storage it has already too: kept untouched, what it's doing to them ends first, so nothing
     /// touches them once this returns (#186). That waits for a disk write, which a stalled drive

@@ -424,6 +424,7 @@ mod tests {
             trackers: Vec::new(),
             location: None,
             actions,
+            held: None,
         }
     }
 

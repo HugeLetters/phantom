@@ -177,6 +177,16 @@ impl Notice {
 }
 
 impl Notice {
+    /// A torrent found where it is now (#358), `name` at `at`, whose check found none of its pieces
+    /// there: it's stopped and its files untouched. A warning that stays until dismissed.
+    pub fn files_dont_match(name: &str, at: &std::path::Path) -> Self {
+        Self::warning(display::files_dont_match())
+            .with_listing(display::found_listing(&[(name.to_owned(), at.to_owned())]))
+            .with_actions(vec![NoticeAction::reveal(at)])
+    }
+}
+
+impl Notice {
     /// A part of a file in the Trash couldn't be kept on disk, even at a retry: a warning that
     /// stays until dismissed (#304).
     pub fn part_not_saved(not_saved: &proto::PartNotSaved) -> Self {

@@ -583,11 +583,20 @@ pub struct Layout {
     normal: Option<Arc<BTreeSet<usize>>>,
     /// The name of a torrent of one file's file, renamed (#331): librqbit names it as its info does.
     one_file: Option<PathBuf>,
+    /// Found where it is now and held while it's checked (#358): nothing is made, written, set to a
+    /// length or removed, and each file is opened only to read, if it's there.
+    held: bool,
 }
 
 impl Layout {
     pub fn new(folder: PathBuf, normal: Option<&[usize]>) -> Self {
-        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), one_file: None }
+        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), one_file: None, held: false }
+    }
+
+    /// Touching nothing, if it's `held` (#358): its files are only read where they are.
+    pub fn held_as(mut self, held: bool) -> Self {
+        self.held = held;
+        self
     }
 
     /// Its one file under `name` in its folder, whatever librqbit calls it: a torrent of one file
@@ -613,6 +622,10 @@ impl Layout {
 /// for a piece it shares with a file the torrent gets (a stub, of that file's length: librqbit
 /// only sets the length of the files it gets), with the folders to it, but never the destination.
 /// Nothing is ever removed but what librqbit asks.
+///
+/// Held (#358, [`Layout::held_as`]), it touches nothing: each file is opened only to read, if it's
+/// there; none is made, nor the folders to it; no length is set, and a write or a removal fails.
+/// librqbit's check then reads what's there, a file that isn't there having none of its pieces.
 ///
 /// A file in the Trash for an undo is never changed where it went (#217's fourth review): librqbit
 /// keeps it open, and a write or a length set through it would change it there, so its undo
@@ -696,6 +709,9 @@ impl Files {
     /// Writes `bufs`, one after another, at `offset` into file `index`, made first if it isn't
     /// there; aside if it's in the Trash. Where it is is looked at once.
     fn write(&self, index: usize, offset: u64, bufs: &[&[u8]]) -> Result<()> {
+        if self.layout.held {
+            bail!("file {index} is held: nothing is written into it until its check found its pieces");
+        }
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         self.at(At::Change);
@@ -891,6 +907,19 @@ fn open(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().read(true).write(true).create(create).truncate(false).custom_flags(libc::O_NOFOLLOW).open(path)
 }
 
+/// The file at `path` opened only to read, for a storage that's held ([`Layout::held_as`]): nothing
+/// is made, and a link there, or nothing (nor a folder on the way), is a file that isn't there.
+fn read_only(path: &Path) -> Result<Opened> {
+    use std::os::unix::fs::OpenOptionsExt;
+    match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) {
+        Ok(file) => Ok(Opened::File(file)),
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) || is_link(&e) => {
+            Ok(Opened::NotThere)
+        }
+        Err(e) => Err(e).with_context(|| format!("opening {path:?}")),
+    }
+}
+
 /// The file a torrent gets at `path`, made if it isn't there: none is made through a symbolic link
 /// there, which fails it, and the size check finds the file missing.
 fn torrent_file(path: &Path) -> Result<std::fs::File> {
@@ -959,7 +988,9 @@ impl TorrentStorage for Files {
                 continue;
             }
             let path = self.layout.at(&info.relative_filename);
-            let file = if self.layout.is_off(index) {
+            let file = if self.layout.held {
+                read_only(&path)?
+            } else if self.layout.is_off(index) {
                 self.open_off(index, &path)?
             } else {
                 std::fs::create_dir_all(path.parent().context("a file without a folder")?)?;
@@ -1029,7 +1060,10 @@ impl TorrentStorage for Files {
         Ok(a.len() + b.len())
     }
 
-    fn remove_file(&self, _: usize, path: &Path) -> Result<()> {
+    fn remove_file(&self, index: usize, path: &Path) -> Result<()> {
+        if self.layout.held {
+            bail!("file {index} is held: nothing of it is removed");
+        }
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         self.at(At::Change);
@@ -1037,6 +1071,9 @@ impl TorrentStorage for Files {
     }
 
     fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {
+        if self.layout.held {
+            return Ok(());
+        }
         let path = self.layout.folder.join(path);
         if !path.is_dir() {
             bail!("cannot remove dir: {path:?} is not a directory")
@@ -1048,6 +1085,11 @@ impl TorrentStorage for Files {
     }
 
     fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
+        // Held: as its check ends, librqbit sets each file to its length, which would grow a short
+        // one and stamp each with a new time. Set once the hold is lifted, as it's added again.
+        if self.layout.held {
+            return Ok(());
+        }
         // librqbit asks for the files it gets only. A file set Off but held, until a check applies it,
         // is one it still gets: neither made nor resized.
         if self.layout.is_off(file) {

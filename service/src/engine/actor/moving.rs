@@ -518,9 +518,15 @@ impl Actor {
         let torrent = self.torrents.get_mut(&id).expect("just found");
         torrent.record.moving =
             Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced: !replaced.is_empty(), names });
+        // Found (#358): held while it's checked there, written ahead with the move.
+        let held = torrent.record.held;
+        if found {
+            torrent.record.held = Some(proto::Held::Checking);
+        }
         if let Err(e) = self.save_move() {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.moving = None;
+            torrent.record.held = held;
             let why = NotMoved::Failed { detail: format!("couldn't save where it goes: {e:#}") };
             return Err(refused(not_done(why)));
         }
@@ -801,6 +807,10 @@ impl Actor {
                 }
             }
         };
+        // A found torrent's move that went back is held no more: it's where it was (#358).
+        if mover.found && matches!(stage, Stage::Restoring { .. }) {
+            torrent.record.held = None;
+        }
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
         match torrent.record.moving.take() {
             // Checked in full once librqbit has it again. Till then (Missing files keeps it out),

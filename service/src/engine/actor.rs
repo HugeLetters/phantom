@@ -75,6 +75,7 @@ use super::undo;
 use super::{Failure, Prepared, default_folder};
 
 mod filetrash;
+mod held;
 pub(super) mod letgo;
 pub(super) mod moving;
 mod steps;
@@ -362,6 +363,8 @@ impl Actor {
                 // Its files partly in the Trash on purpose, wherever its drive is.
                 away if !record.delete_failed.is_empty() => Phase::DeleteFailed { kept: record.delete_failed.clone(), away, unchecked },
                 Some(reason) => Phase::DestinationUnavailable { reason },
+                // Found and held while it was checked (#358): checked again, held, whatever's there.
+                None if record.held == Some(proto::Held::Checking) => Phase::CheckDue { returning: BTreeMap::new() },
                 // Whatever files went meanwhile: only a check says.
                 None if unchecked => Phase::Unchecked { gone: BTreeMap::new() },
                 None if gone.is_empty() => Phase::Ready,
@@ -995,6 +998,7 @@ impl Actor {
                 self.save();
             }
             self.carry_out(id).await?;
+            self.judge_held(id).await;
             let moved = self.torrents.get(&id).is_some_and(|t| t.lifecycle.phase != before);
             // Ends: a size check decided on the files as they are leaves the phase as it is.
             match self.size_checked(id) {
@@ -1019,6 +1023,9 @@ impl Actor {
                 // Not while it has pieces to let go of (#234): librqbit would offer some it can't read,
                 // and drop each peer that asks. It starts once it's added back without them.
                 (lib::Do::Start, Some(_)) if matches!(torrent.record.letting_go, machine::letgo::State::Gone { .. }) => return Ok(()),
+                // Found and held (#358): stopped, its files untouched, until its check found its pieces
+                // there or the person resumes it once it found none (`judge_held`).
+                (lib::Do::Start, Some(_)) if torrent.record.held.is_some() => return Ok(()),
                 (lib::Do::Start, Some(handle)) => {
                     self.session.unpause(&handle).await?;
                     // librqbit's upload counter starts again with the torrent.
@@ -1120,7 +1127,7 @@ impl Actor {
         // Its folder and priorities known, the files set Off aren't made (#67).
         let normal: Vec<usize> = record.normal().into_iter().collect();
         let one_file = info.single().then(|| record.on_disk.as_ref().map(PathBuf::from)).flatten();
-        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, one_file);
+        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, one_file).held(record.held.is_some());
         let opts = AddTorrentOptions {
             paused: true,
             overwrite: true,
@@ -1962,6 +1969,7 @@ fn fetching_info(id: TorrentId, t: &Torrent, lifecycle: &State) -> Option<Torren
         trackers: t.record.trackers.clone(),
         location: None,
         actions: lifecycle.actions(),
+        held: None,
     })
 }
 
@@ -2033,6 +2041,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, priorities: &BTreeMap<usize, Priorit
         trackers: t.record.trackers.clone(),
         location: t.record.location().and_then(|path| AbsolutePath::new(path).ok()),
         actions: lifecycle.actions(),
+        held: t.record.held,
     })
 }
 

@@ -1269,6 +1269,22 @@ pub struct TorrentInfo {
     /// What each action would do to it now, as the service decides: clients offer those that
     /// [`Answer::Does`] something, and say why the others don't.
     pub actions: Actions,
+    /// A Move or a Rename found it where it is now (#358), and it's held stopped, its files
+    /// untouched, until a check finds its pieces there. `None` once it's not held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<Held>,
+}
+
+/// A torrent found where it is now (#358), held stopped with its files untouched there: nothing is
+/// made, written, grown or stamped until a check finds any of its pieces there.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Held {
+    /// Its check is due or under way.
+    Checking,
+    /// The check found none of its pieces there ("Files don't match"): it stays stopped and its
+    /// files untouched until Resume, which downloads over them.
+    DontMatch,
 }
 
 /// A torrent's files, summed: what it has of the files it's getting.
