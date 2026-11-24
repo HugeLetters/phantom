@@ -62,8 +62,12 @@ enum Step {
     CancelCheck,
     Resume,
     Pause,
-    Restart,
-    Crash,
+    /// The service stopped, or killed as a crash, `swapped` (each file made so, any link to it
+    /// removed) while it's closed, and started.
+    Restart {
+        crash: bool,
+        swapped: Vec<(usize, Kind)>,
+    },
     DestinationGone,
     DestinationBack,
     Priority {
@@ -91,8 +95,8 @@ fn step() -> impl Strategy<Value = Step> {
         1 => Just(Step::CancelCheck),
         6 => Just(Step::Resume),
         1 => Just(Step::Pause),
-        3 => Just(Step::Restart),
-        3 => Just(Step::Crash),
+        6 => (any::<bool>(), prop::collection::vec((0..3usize, kind()), 0..4))
+            .prop_map(|(crash, swapped)| Step::Restart { crash, swapped }),
         1 => Just(Step::DestinationGone),
         1 => Just(Step::DestinationBack),
         2 => (0..3usize, any::<bool>()).prop_map(|(file, off)| Step::Priority { file, off }),
@@ -339,6 +343,12 @@ impl World {
         let _ = tokio::time::timeout(Duration::from_secs(20), self.engine().command(self.id, command)).await.expect("answered");
     }
 
+    /// With no engine running: whether what's at its place is still as put there by hand, which it is
+    /// of a torrent held or off the list. Else it was lifted as the engine stopped, and the start tells.
+    fn at_rest_as_put(&self) -> bool {
+        super::moving::bytes_in(&self.album()) == self.mine()
+    }
+
     /// Makes `step`; whether the case is over (its hold was lifted).
     async fn take(&mut self, step: &Step) -> Result<bool, TestCaseError> {
         let before = self.seen().await;
@@ -406,14 +416,30 @@ impl World {
                 self.chosen = false;
                 self.command(TorrentCommand::Pause).await;
             }
-            Step::Restart | Step::Crash => {
+            Step::Restart { crash, swapped } => {
                 self.gate.hold(false);
                 let engine = self.engine.take().expect("running");
-                match step {
-                    Step::Crash => engine.kill().await,
-                    _ => engine.stop().await,
+                match crash {
+                    true => engine.kill().await,
+                    false => engine.stop().await,
                 }
                 drop(engine);
+                // Nothing runs: lifted as it stopped, its files are its own, and none is changed.
+                let may = self.at_rest_as_put() && self.album().exists();
+                for (file, kind) in swapped.into_iter().filter(|_| may) {
+                    let path = self.album().join(NAMES[file]);
+                    match self.bytes(file, kind) {
+                        None => drop(std::fs::remove_file(&path)),
+                        Some(bytes) => {
+                            let new = self.dir.path().join("new.bin");
+                            std::fs::write(&new, bytes).unwrap();
+                            std::fs::rename(&new, &path).unwrap();
+                        }
+                    }
+                    let _ = std::fs::remove_file(self.link(file));
+                    self.linked[file] = false;
+                    self.kinds[file] = kind;
+                }
                 self.chosen = false;
                 self.start().await;
             }
@@ -604,18 +630,15 @@ fn files_swapped_across_a_crash_or_a_restart_or_after_a_refused_resume_stay_held
     // 1: one linked, all put right in place, checked, a crash, all replaced.
     let mut steps = vec![Step::Link { file: 2, on: true }];
     steps.extend((0..3).map(|file| Step::Hand { file, kind: Own, replace: false }));
-    steps.extend([Step::Check, Step::Crash, Step::Link { file: 2, on: false }]);
-    steps.extend(swap(Other));
+    let all = |kind| (0..3).map(|file| (file, kind)).collect::<Vec<_>>();
+    steps.extend([Step::Check, Step::Restart { crash: true, swapped: all(Other) }]);
     replay(false, other, steps);
-    // 2: replaced while Phantom is closed is as replaced before it starts; then Resume.
-    let mut steps: Vec<Step> = vec![Step::Restart];
-    steps.extend(swap(Zeros));
-    steps.extend([Step::Restart, Step::Resume]);
-    replay(false, other, steps);
+    // 2: replaced while Phantom is closed, then Resume.
+    replay(false, other, vec![Step::Restart { crash: false, swapped: all(Zeros) }, Step::Resume]);
     // 3: a Resume refused for a longer file, then other files.
     for restart in [false, true] {
         let mut steps = vec![Step::Hand { file: 2, kind: Longer, replace: false }, Step::Check, Step::Resume];
-        steps.extend(restart.then_some(Step::Restart));
+        steps.extend(restart.then_some(Step::Restart { crash: false, swapped: Vec::new() }));
         steps.extend(swap(Zeros));
         replay(false, other, steps);
     }
