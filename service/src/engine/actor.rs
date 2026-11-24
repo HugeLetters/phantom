@@ -1963,14 +1963,30 @@ fn expected(torrent: &Torrent) -> Vec<Expected> {
 }
 
 /// The files the torrent is getting as they are on disk. Held (#358), one that isn't its to write (reached
-/// through a link, or with another hard link) isn't there.
+/// through a link, or with another hard link) isn't there, and neither is one set Off that's there and
+/// isn't its to write: it's Missing files then too, as the lift never writes into it.
 fn on_disk(torrent: &Torrent) -> files::Disk {
     let mut disk = files::disk_of(&expected(torrent));
     if torrent.record.held.is_some() {
         let destination = &torrent.record.destination;
+        let reach = |path: &std::path::Path| path.strip_prefix(destination).ok().and_then(|inside| super::moving::reached(destination, inside));
         for found in disk.files.values_mut() {
-            let reached = found.file.path.strip_prefix(destination).ok().and_then(|inside| super::moving::reached(destination, inside));
-            found.at = found.at.filter(|_| reached.is_some_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) == 1));
+            found.at = found.at.filter(|_| reach(&found.file.path).is_some_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) == 1));
+        }
+        // Only while pieces are found or not judged: with none found it's "Files don't match", stopped.
+        let off = (torrent.record.held == Some(proto::Held::Checking))
+            .then(|| files(&torrent.record, &progress(torrent), &BTreeSet::new()))
+            .into_iter()
+            .flatten()
+            .filter(|f| f.priority == Priority::Off);
+        let paths = torrent.record.paths();
+        for f in off {
+            let path = &paths[f.index];
+            let own = reach(path).is_some_and(|m| super::trashed::its_own(&m, f.size_bytes));
+            if !own && std::fs::symlink_metadata(path).is_ok() {
+                let file = Expected { index: f.index, path: path.clone(), size_bytes: f.size_bytes, progress_bytes: f.progress_bytes };
+                disk.files.insert(f.index, files::Found { file, at: None });
+            }
         }
     }
     disk

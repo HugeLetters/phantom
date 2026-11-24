@@ -1273,24 +1273,45 @@ async fn pieces_in_files_set_off_match_too() {
     }
 }
 
-/// A file set Off longer than its own, the rest its pieces: nothing to list as missing, so it's stopped,
-/// and stays as it is, whatever Resume says; put right, it's back.
+/// A file set Off that isn't its own to write (longer, or with another hard link), the rest its pieces:
+/// Missing files, held, as a wanted file in that state is: no "Files don't match", nothing written,
+/// and Resume doesn't get past it; put right, it's checked again and lifts by itself.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_file_set_off_that_is_not_its_own_keeps_it_held() {
-    let f = found_and_held(false, |_| {}).await;
+async fn a_file_set_off_that_is_not_its_own_is_missing_files_held() {
+    for how in ["longer", "linked"] {
+        let f = found_and_held(false, |_| {}).await;
+        set(&f.engine, f.id, &["c.bin"], proto::Priority::Off).await;
+        let other = f.dir.path().join("other");
+        match how {
+            "longer" => append(&f),
+            _ => std::fs::hard_link(f.album.join("c.bin"), &other).unwrap(),
+        }
+        let before = (tree(&f.album), bytes_in(&f.album));
+        f.gate.hold(false);
+        wait_for(&f.engine, f.id, Status::MissingFiles).await;
+        f.engine.command(f.id, TorrentCommand::Resume).await.unwrap();
+        tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+        let t = find(&f.engine, f.id).await;
+        assert_eq!((t.status, t.held), (Status::MissingFiles, Some(proto::Held::Checking)), "{how}");
+        assert_eq!((tree(&f.album), bytes_in(&f.album)), before, "{how}: nothing written");
+        match how {
+            "longer" => std::fs::OpenOptions::new().write(true).open(f.album.join("c.bin")).unwrap().set_len(2 * PIECE as u64).unwrap(),
+            _ => std::fs::remove_file(&other).unwrap(),
+        }
+        until_held(&f.engine, f.id, None).await;
+        f.engine.stop().await;
+    }
+}
+
+/// The same file, with no piece found at all: it's "Files don't match", as ever.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_set_off_that_is_not_its_own_with_no_piece_found_is_files_that_do_not_match() {
+    let f = found_and_held(false, other_bytes).await;
     set(&f.engine, f.id, &["c.bin"], proto::Priority::Off).await;
     append(&f);
-    let before = (tree(&f.album), bytes_in(&f.album));
     f.gate.hold(false);
     until_held(&f.engine, f.id, Some(proto::Held::DontMatch)).await;
-    wait_for(&f.engine, f.id, Status::Done { reached: None }).await;
-    f.engine.command(f.id, TorrentCommand::Resume).await.unwrap();
-    wait_for(&f.engine, f.id, Status::Done { reached: None }).await;
-    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
-    assert_eq!((tree(&f.album), bytes_in(&f.album)), before);
-    assert_eq!(find(&f.engine, f.id).await.held, Some(proto::Held::DontMatch));
-    std::fs::OpenOptions::new().write(true).open(f.album.join("c.bin")).unwrap().set_len(2 * PIECE as u64).unwrap();
-    until_held(&f.engine, f.id, None).await;
+    wait_for(&f.engine, f.id, Status::Paused).await;
     f.engine.stop().await;
 }
 
