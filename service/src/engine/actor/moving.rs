@@ -737,7 +737,9 @@ impl Actor {
                 }
             }
         };
+        let before = torrent.lifecycle.phase.clone();
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
+        super::track_uncounted(&mut torrent.polled.uncounted, &before, &torrent.lifecycle.phase);
         match torrent.record.moving.take() {
             // Checked in full once librqbit has it again. Till then (Missing files keeps it out),
             // none of a file replaced by hand is had: what librqbit said of it was of the one it had

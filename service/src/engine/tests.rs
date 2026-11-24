@@ -1580,6 +1580,40 @@ async fn setting_the_missing_file_off_of_a_paused_torrent_leaves_it_paused() {
     engine.stop().await;
 }
 
+/// #366's review: a file deleted by hand, its destination gone, the service stopped, the destination
+/// back before the next start. Another file put at the missing file's path then isn't the torrent's
+/// own: it's left as it is, and the torrent stays Missing files. The count shown for the missing
+/// file is not what's saved or decided from.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_file_put_where_one_was_missing_across_a_stop_while_its_destination_was_gone_isnt_downloaded_over() {
+    let dir = temp();
+    let (here, away) = (dir.path().join("downloads"), dir.path().join("away"));
+    let id = {
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &here, complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        std::fs::remove_file(file(dir.path(), "b.bin")).unwrap();
+        wait_for(&engine, id, Status::MissingFiles).await;
+        std::fs::rename(&here, &away).unwrap();
+        until(&engine, id, |s| matches!(s, Status::DestinationUnavailable { .. })).await;
+        assert_eq!(files_on(&engine, id).await[1].1, 0, "the missing file isn't counted while away");
+        engine.stop().await;
+        id
+    };
+    std::fs::rename(&away, &here).unwrap();
+    let engine = engine(dir.path()).await;
+    wait_for(&engine, id, Status::MissingFiles).await;
+    let other = vec![0u8; 2 * PIECE];
+    std::fs::write(file(dir.path(), "b.bin"), &other).unwrap();
+
+    // Long enough for its size check to see the file and a check to end.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "not the file that went");
+    assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), 0, true));
+    assert_eq!(std::fs::read(file(dir.path(), "b.bin")).unwrap(), other, "not written over");
+    engine.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_deleted_while_the_service_was_stopped_is_missing_on_start_and_not_resumed() {
     let dir = temp();

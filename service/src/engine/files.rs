@@ -61,6 +61,17 @@ pub fn disk_of(files: &[Expected]) -> Disk {
     Disk { files: files.iter().map(|f| (f.index, Found { file: f.clone(), at: stamp(&f.path) })).collect() }
 }
 
+/// What `look` finds of the files, if the destination is still reachable after it: one that goes
+/// while its files are looked at makes every one seem missing, so what was found isn't taken for
+/// the files then (#366). Gone and back within one look isn't told; the next look recovers.
+pub fn seen(destination: &AbsolutePath, look: impl FnOnce() -> Disk) -> Result<Disk, Unavailable> {
+    let disk = look();
+    match unavailable(destination) {
+        Some(reason) => Err(reason),
+        None => Ok(disk),
+    }
+}
+
 /// The regular file at `path`, if there is one: a symbolic link there, even to one, isn't (#267).
 pub fn stamp(path: &Path) -> Option<Stamp> {
     let m = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file())?;
@@ -682,6 +693,27 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         std::fs::write(&path, [1; 100]).unwrap();
         assert!(recreated.is_back(stamp(&path)), "another one since");
+    }
+
+    #[test]
+    fn files_looked_at_while_their_destination_goes_arent_taken_for_the_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("downloads");
+        std::fs::create_dir(&destination).unwrap();
+        let path = destination.join("a.bin");
+        std::fs::write(&path, [0; 100]).unwrap();
+        let (dest, files) = (abs(&destination), [expected(path, 100, 100)]);
+
+        let disk = seen(&dest, || disk_of(&files)).unwrap();
+        assert!(!disk.files[&0].is_missing(), "there all along");
+
+        let away = dir.path().join("away");
+        let gone = seen(&dest, || {
+            let disk = disk_of(&files);
+            std::fs::rename(&destination, &away).unwrap();
+            disk
+        });
+        assert_eq!(gone.err(), Some(Unavailable::FolderMissing { path: dest }), "went after the look began");
     }
 
     #[test]
