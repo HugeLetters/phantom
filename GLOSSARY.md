@@ -291,10 +291,15 @@ stopped as before, with every matching piece, zeros too, as good as any. Changed
 checked again (Unchecked after three times in a row); one gone, or not its own to write (one set Off
 too), it's Missing files, nothing made or cut, and still held. No such piece found, it's stopped
 (Missing files if one it gets isn't there) and still held: **Files don't match**, a warning. Then
-Resume, the person's choice, ends the hold by the same rule and downloads over them; a Check that
-finds such a piece ends it too. Nothing else does: a Resume during the check waits for it, a
-cancelled check, a restart or a crash leaves it held (and checks it again, so what the check read is
-read again). A Move or a Rename of it takes its hold along. A Delete only takes it off the list,
+Resume, the person's choice, ends the hold by the same rule and downloads over them: over the files
+a check read to the end since Phantom started, and only if they're still those, unchanged. With no
+such check (after a restart, a crash, an undo or a move, which keep nothing of what was read; or the
+files changed since), Resume has it checked first: its pieces found, the hold ends; none, it's
+stopped again, and Resume is to be chosen again, of what was just read. A Resume that isn't carried
+out is never kept for later, or for other files. A Check that finds such a piece ends the hold too.
+Nothing else does: a Resume during the check waits for it; a cancelled check, a restart or a crash
+leaves it held (one still to be checked is checked again; one whose files don't match is listed with
+none of its pieces, nothing read, till Check or Resume). A Move or a Rename of it takes its hold along. A Delete only takes it off the list,
 whether it's checked still or its files don't match: its files weren't verified as the torrent's, so
 nothing goes to the Trash and nothing at its paths is written or removed. The undo of a Remove or a
 Delete brings it back held.

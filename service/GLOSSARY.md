@@ -53,13 +53,24 @@ only the phase and is never refused.
 
 **Hold**:
 Why a found torrent is held, in its record: checking, or its files don't match. Saved with the
-destination it's found at; while there is one, librqbit's storage of the torrent only reads, and the
-torrent is never started. It's saved as over only once the files opened to write were found to be
-the ones the check read. Whether the check found a piece with real content is read off what it read
-(the held storage notes each piece it saw a non-zero byte in, as it reads), against the pieces
-librqbit saved when the check ended: nothing of it is kept, so a crash between the check's end and
-the lift checks again, held, and reads it again.
+destination it's found at; while there is one, librqbit's storage of the torrent only reads, the
+torrent is never started, and it's never added with pieces librqbit saved. It's saved as over only
+with the proof that the files opened to write were found to be the ones the check read (the rule and
+every way in and out: `engine/actor/held.rs`).
 _Avoid_: lock
+
+**Evidence** (of a hold):
+One check in full of a held torrent, over, by the storage of the torrent librqbit has now: each file
+as that storage opened it, and each piece it read a non-zero byte in. The only thing a hold is
+lifted on. In memory only, never saved: after a restart, a crash, an undo or a move there is none
+until the torrent is checked again.
+_Avoid_: proof (that's what the lift's storage gives once it opened the files), cache
+
+**Choice** (of a hold):
+"Download over them": Resume of a held torrent whose files don't match, taken as a choice of the
+files a check read to the end, as it opened them. Carried out only on those files, unchanged, at the
+first judging of the hold after it, and never kept past that.
+_Avoid_: resumed (as a state), pending resume
 
 **Size check**:
 Phantom's cheap, automatic look at a torrent's files: does each file it's getting still exist,

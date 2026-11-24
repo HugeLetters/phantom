@@ -1,22 +1,83 @@
-//! A torrent a Move or a Rename found where it is now (#358) is held while it's checked there:
-//! saved with the place it's found at (`Record::held`), it's added to librqbit with storage that touches
-//! nothing ([`Guard::held`](super::super::files::Guard::held)), and never started, so nothing there
-//! is made, written, grown or stamped. Once the check ends:
+//! A torrent a Move or a Rename found where it is now (#358) is held: what's at that place may be the
+//! person's own files, so nothing there is made, written, grown, stamped or removed until it's known
+//! to be the torrent's, or the person chose to download over it.
 //!
-//! - any of its pieces found there (in a file set Off too), and its files still those the check read,
-//!   unchanged, each its own to write ([`AsChecked`]): the hold is lifted. It's taken out of librqbit,
-//!   kept aside with the pieces it found, and added back with them (as letting go of a file is,
-//!   `letgo.rs`) in storage that looks at each file again through what it opened to write, then makes
-//!   what isn't there and sets each file's length; then it runs or stays stopped as wanted.
-//! - its files changed, or others, since the check opened them: checked again, held. After
-//!   [`CHECKS`] times in a row, Unchecked, held, for the person to check once they stay as they are.
-//! - one gone, or not its own to write any more (a link, longer, with another hard link): Missing
-//!   files, held (set Off, so not missing: stopped, as with none of its pieces there).
-//! - none of its pieces: it's stopped, still held, its files as they were ("Files don't match", which
-//!   clients tell). Resume lifts the hold, by the same rule, and it downloads over them, the person's
-//!   choice.
+//! # The rule
 //!
-//! A crash meanwhile leaves it held: the next start checks it in full again, held.
+//! **A hold is lifted only on evidence made in this run, of the files as they are at the lift.**
+//!
+//! - *Evidence* is one check in full, over, by the storage of the torrent librqbit has now
+//!   ([`Check`], [`Actor::evidence`]): each file as that storage opened it before reading any (volume,
+//!   inode, length, modification and change times), and each piece it read a non-zero byte in. It's
+//!   in memory only. Nothing saved stands in for it: a held torrent is never added with pieces
+//!   librqbit saved (`Actor::add_to_librqbit`), so after a restart, a crash, an undo or a move there
+//!   is none until it's checked again, and another add of the torrent has another check or none.
+//! - *Lifted by match*: a piece that check found, with real content.
+//! - *Lifted by choice*: "Download over them" (Resume, its files not matching) is a choice of the
+//!   files a check read to the end ([`Actor::choice`]), and is carried out only by a check that opened
+//!   those same files, unchanged ([`Opening`]), at the first judging after it. Made with no such
+//!   check, it only has the torrent checked. Refused or not carried out, it's dropped, and the
+//!   torrent is stopped: never kept for other files, or for later.
+//! - *At the lift* the files are looked at by path ([`Trashed::as_checked`]), then opened to write by
+//!   the lift's own storage, which compares each, through what it opened, with what the check opened
+//!   ([`Lift`]), before anything is made or written. A storage that can't open them (the destination
+//!   out of reach, the torrent kept untouched) fails the add.
+//! - *Saved unheld* only by [`Record::lift`], which takes the proof only that storage gives
+//!   ([`Lifted`]). The record's hold is private to `store.rs`: the other ways out are a place nothing
+//!   of the torrent is at ([`Hold::nothing_there`]) and leaving the list.
+//!
+//! What it doesn't cover is in [`Files`](super::super::trashed)' docs: a change to the same file after
+//! the lift's look, as any torrent's file may get.
+//!
+//! # Every way into, within and out of a hold
+//!
+//! Tests are `engine::tests::found`'s unless they say; "generated" is
+//! `engine::tests::hold::nothing_changes_while_held_and_a_hold_is_lifted_only_on_what_was_read`, which
+//! makes these in any order, with files changed by hand between and while the service is closed.
+//!
+//! | What happens | Held after | Evidence after | Test |
+//! |---|---|---|---|
+//! | **Into** | | | |
+//! | Move to… or Rename… finds it (saved with the place, `placed`) | Checking | none till its check ends | `a_found_torrent_is_held_untouched_while_checked_then_back_as_it_was`; a crash before the save: `a_found_rename_a_crash_put_back_is_not_held_where_it_was`; after: `a_found_torrent_held_for_its_check_comes_back_held_after_a_crash` |
+//! | Undo of a found Rename finds it back under its old name | Checking | none till its check ends | `undo_of_a_found_rename_finds_it_back_under_its_old_name` |
+//! | A start (restart, crash, the engine restarted for new settings: all `Actor::new` from the records), Checking | Checking, checked in full | none till it ends | `a_found_torrent_held_for_its_check_comes_back_held_after_a_crash`, generated |
+//! | A start, its files not matching | DontMatch, added with none of its pieces, nothing read | none | `pieces_an_earlier_check_saved_are_not_taken_for_files_swapped_across_a_crash`, `files_that_do_not_match_stay_held_across_a_restart_until_they_do`, generated |
+//! | A start, Unchecked | as saved, not added | none | `a_held_torrent_whose_check_is_cancelled_stays_held` |
+//! | Undo of its Remove or Delete | as it was, added as at a start | none | `a_remove_while_held_leaves_the_files_and_its_undo_brings_it_back_held`, `a_delete_of_files_not_verified_leaves_them_and_its_undo_brings_it_back_held`, generated |
+//! | **Within** | | | |
+//! | Its check ends, a real piece found, files as checked | lifted (below) | | `a_found_torrent_is_held_untouched_while_checked_then_back_as_it_was` |
+//! | The same, files changed or others since | Checking, checked again; Unchecked after 3 in a row | none till it ends | `a_file_swapped_while_checked_is_checked_again`, `files_that_never_stay_as_they_are_are_left_unchecked`, `pieces_found_are_not_taken_for_bytes_changed_before_the_hold_is_judged` |
+//! | The same, a file gone or not its own to write | as it was, Missing files | kept, of files that aren't its own | `a_file_that_is_not_its_own_once_checked_is_missing_files_untouched`, `a_file_set_off_that_is_not_its_own_is_missing_files_held` |
+//! | Its check ends, no real piece | DontMatch, stopped, one save | that check | `found_files_none_of_whose_pieces_are_the_torrents_are_left_untouched_and_it_stays_stopped`, `another_file_that_shares_only_a_zero_piece_does_not_match` |
+//! | Its check ends, nothing there at all | Checking, Missing files | that check | `a_found_folder_renamed_while_checked_is_missing_files_and_not_made_again` |
+//! | Its check ends, its storage having opened nothing, or twice | Checking, checked again | none | `trashed::check_tests::a_check_tells_only_of_one_opening` (no command reaches it) |
+//! | Check | as it was, checked in full | that check, once over | `files_that_do_not_match_stay_held_across_a_restart_until_they_do`, generated |
+//! | Cancel check | as it was, Unchecked | none read to the end | `a_held_torrent_whose_check_is_cancelled_stays_held`, `a_file_grown_while_held_and_not_checked_is_not_cut` |
+//! | Resume while it's checked | as it was, wanted running: lifted or stopped as its check ends | | `a_resume_while_held_waits_for_the_check` |
+//! | Resume, files not matching, read to the end in this run and unchanged | lifted (below) | | `a_resume_of_files_that_do_not_match_writes_over_none_that_is_not_its_own`, `files_that_do_not_match_with_one_missing_are_left_untouched`, generated (its end) |
+//! | Resume, files not matching, nothing read them in this run | Checking, checked; then lifted by match, or DontMatch, stopped | that check | `a_resume_after_a_restart_checks_first_and_downloads_over_nothing_it_did_not_read` |
+//! | Resume not carried out (files changed, one not its own, paused before it's judged) | DontMatch (or Checking, checked again), stopped; the choice dropped | | `a_refused_resume_is_not_carried_out_later_on_other_files`, generated |
+//! | Pause | as it was, wanted stopped | unchanged | generated; found paused: `a_found_torrent_is_held_untouched_while_checked_then_back_as_it_was` |
+//! | A priority | as it was; nothing made | unchanged (which files it gets is read at the lift) | `a_file_set_normal_while_held_is_made_only_once_the_hold_is_lifted`, `pieces_in_files_set_off_match_too`, generated |
+//! | Move to Trash of its files | as it was, not judged meanwhile | unchanged | `the_hold_is_not_lifted_under_a_move_to_trash`, `a_file_trashed_while_held_is_read_where_it_went_after_a_restart` |
+//! | Move or Rename, taking its files | as it was, at the new place | none: added again | `a_move_while_held_takes_the_files_as_they_are_and_it_is_held_there` |
+//! | Its destination goes | as it was, Destination unavailable; not judged, and a lift under way fails | none once it's back: added again | `a_destination_gone_as_the_hold_is_lifted_leaves_it_held`, `a_found_folder_gone_across_a_crash_is_missing_files`, generated |
+//! | Its add fails (an error) | as it was, Error | none | `a_destination_gone_as_the_hold_is_lifted_leaves_it_held` (the lift's add); any other add is the same code |
+//! | Its files changed by hand | as it was | stale: the lift's look and its storage find them changed | `a_file_changed_as_the_hold_is_lifted_is_left_as_it_is`, `a_file_grown_as_its_length_is_set_is_not_cut`, generated |
+//! | **Out** | | | |
+//! | Lifted: the lift's storage opened its files as checked, then saved | none | | `a_crash_as_the_hold_is_lifted_before_its_files_are_looked_at_leaves_it_held`, generated (a lift is only ever on what was read) |
+//! | Undo of the found Rename, nothing of it under its old name | none there, Missing files | | `undo_of_a_found_rename_while_held_points_it_back_untouched` |
+//! | The found Move or Rename goes back before it's placed | none, where it was, as it was | | `a_found_rename_a_crash_put_back_is_not_held_where_it_was` |
+//! | Moved with no file left to take, where nothing of it is | none there, Missing files | | `a_held_torrent_with_no_file_left_moved_where_nothing_of_it_is_is_not_held_there` |
+//! | Remove, Delete | off the list, its files left; its undo's record keeps the hold | | `a_remove_while_held_leaves_the_files_and_its_undo_brings_it_back_held`, `a_delete_of_files_not_verified_leaves_them_and_its_undo_brings_it_back_held`, `a_delete_of_several_goes_by_each_ones_own_state` |
+//!
+//! [`Check`]: super::super::trashed::Check
+//! [`Opening`]: super::super::trashed::Opening
+//! [`Lift`]: super::super::trashed::Lift
+//! [`Lifted`]: super::super::trashed::Lifted
+//! [`Trashed::as_checked`]: super::super::trashed::Trashed::as_checked
+//! [`Record::lift`]: super::super::store::Record::lift
+//! [`Hold::nothing_there`]: super::super::store::Hold::nothing_there
 
 use std::path::PathBuf;
 use std::sync::Arc;
