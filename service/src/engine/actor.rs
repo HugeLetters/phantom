@@ -71,6 +71,7 @@ use super::snapshot::{Published, Snapshot};
 use super::space;
 use super::store::{Gets, Info, Record, Store};
 use super::trash::{self, Trash, Trashed};
+use super::trashed::Lift;
 use super::undo;
 use super::{Failure, Prepared, default_folder};
 
@@ -312,6 +313,8 @@ pub(super) struct Torrent {
     pub(super) there: BTreeSet<usize>,
     /// Its seeding round, counted at each poll.
     pub(super) meter: seeding::Meter,
+    /// Its hold's way out (#358).
+    pub(super) hold: held::Hold,
     /// How many times the actor added it to librqbit, for tests.
     #[cfg(test)]
     pub(super) added: u32,
@@ -400,6 +403,7 @@ impl Actor {
                 polled,
                 lib: lib::Lib::Out,
                 there: BTreeSet::new(),
+                hold: Default::default(),
                 record,
                 #[cfg(test)]
                 added: 0,
@@ -1068,6 +1072,9 @@ impl Actor {
         }
         let record = &self.torrents[&id].record;
         let saved = bitv::path(&self.session_folder(), &record.info_hash);
+        // Held for its check (#358): what librqbit saved is of files as another storage read them, so
+        // it isn't taken for a check of those opened now.
+        let checks = checks || record.held == Some(proto::Held::Checking);
         if checks {
             bitv::forget(&saved);
         }
@@ -1077,10 +1084,10 @@ impl Actor {
             self.torrents.get_mut(&id).expect("just found").record.letting_go = machine::letgo::State::Holding;
             self.save();
         }
-        let record = &self.torrents[&id].record;
         // Nothing saved, librqbit checks it all: a check like any.
         let resumes = !checks && saved.exists();
-        let added = self.add_from_record(record).await;
+        let lift = self.torrents.get_mut(&id).and_then(|t| t.hold.lifting.take());
+        let added = self.add_from_record(&self.torrents[&id].record, lift).await;
         let torrent = self.torrents.get_mut(&id).expect("being added");
         match added {
             Ok(handle) => {
@@ -1120,14 +1127,15 @@ impl Actor {
         }
     }
 
-    /// librqbit's torrent for `record`, added stopped.
-    async fn add_from_record(&self, record: &Record) -> Result<Arc<ManagedTorrent>> {
+    /// librqbit's torrent for `record`, added stopped, its hold lifted if `lift`.
+    async fn add_from_record(&self, record: &Record, lift: Option<Arc<Lift>>) -> Result<Arc<ManagedTorrent>> {
         let info = record.info.as_ref().context("a torrent without info isn't added")?;
         let folder = record.output_folder().context("a torrent with info has its folder")?;
         // Its folder and priorities known, the files set Off aren't made (#67).
         let normal: Vec<usize> = record.normal().into_iter().collect();
         let one_file = info.single().then(|| record.on_disk.as_ref().map(PathBuf::from)).flatten();
-        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, one_file).held(record.held.is_some());
+        let storage =
+            self.guard.for_add(record.destination.clone(), folder.clone(), &normal, one_file).held(record.held.is_some()).lifting(lift);
         let opts = AddTorrentOptions {
             paused: true,
             overwrite: true,
@@ -1275,7 +1283,7 @@ impl Actor {
         if torrent.record.held == Some(proto::Held::Checking) && torrent.lifecycle.phase == Phase::Ready {
             return None;
         }
-        Some(Observation::Files(files::disk_of(&expected(torrent))))
+        Some(Observation::Files(on_disk(torrent)))
     }
 
     /// A command that isn't a step, on its torrent's lane.
@@ -1420,6 +1428,7 @@ impl Actor {
             lib: lib::Lib::Adding(task),
             polled: Polled::default(),
             there: BTreeSet::new(),
+            hold: Default::default(),
             meter: seeding::Meter::new(record.round),
             record,
             #[cfg(test)]
@@ -1749,7 +1758,9 @@ impl Actor {
             torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
             self.guard.trashed().let_go(&hash, &closing);
         }
-        for (i, path, len) in made {
+        // Held (#358), nothing is made there: the add that lifts the hold makes it.
+        let held = self.torrents.get(&id).is_some_and(|t| t.record.held.is_some());
+        for (i, path, len) in made.into_iter().filter(|_| !held) {
             if let Err(e) = super::trashed::make_again(&destination, &path, len) {
                 warn!(id, file = i, error = %e, "couldn't make a file set Normal again at its path");
             }
@@ -1948,6 +1959,20 @@ fn expected(torrent: &Torrent) -> Vec<Expected> {
         .filter(|f| f.priority == Priority::Normal)
         .map(|f| Expected { index: f.index, path: paths[f.index].clone(), size_bytes: f.size_bytes, progress_bytes: f.progress_bytes })
         .collect()
+}
+
+/// The files the torrent is getting as they are on disk. Held (#358), one that isn't its to write (reached
+/// through a link, or with another hard link) isn't there.
+fn on_disk(torrent: &Torrent) -> files::Disk {
+    let mut disk = files::disk_of(&expected(torrent));
+    if torrent.record.held.is_some() {
+        let destination = &torrent.record.destination;
+        for found in disk.files.values_mut() {
+            let reached = found.file.path.strip_prefix(destination).ok().and_then(|inside| super::moving::reached(destination, inside));
+            found.at = found.at.filter(|_| reached.is_some_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) == 1));
+        }
+    }
+    disk
 }
 
 /// Its files with the priorities clients see: `priorities` where it says.

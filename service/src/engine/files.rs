@@ -54,7 +54,7 @@ pub use lifecycle::disk::{Disk, Expected, Found, Gone, Stamp};
 
 #[cfg(test)]
 pub use super::trashed::At;
-use super::trashed::{Layout, Trashed};
+use super::trashed::{Layout, Lift, Trashed};
 
 /// Size-checks `files` now: each, and what's at its path.
 pub fn disk_of(files: &[Expected]) -> Disk {
@@ -300,6 +300,11 @@ impl Guard {
         Self { layout: self.layout.map(|(destination, layout)| (destination, layout.held_as(held))), ..self }
     }
 
+    /// For an add that lifts a hold: its storage opens only what the check read ([`Lift`]).
+    pub fn lifting(self, lift: Option<Arc<Lift>>) -> Self {
+        Self { layout: self.layout.map(|(destination, layout)| (destination, layout.lifting(lift))), ..self }
+    }
+
     /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files. The
     /// storage it has already too: kept untouched, what it's doing to them ends first, so nothing
     /// touches them once this returns (#186). That waits for a disk write, which a stalled drive
@@ -357,7 +362,13 @@ impl Guard {
         if unavailable(&destination).is_some() {
             return Ok(Box::new(UnavailableStorage));
         }
+        // Held, or its hold lifted, it makes neither the destination nor anything through it: what it
+        // would take out as made again is the person's.
+        let careful = layout.careful();
         let files = Box::new(self.trashed.storage(hash, layout, destination.to_path_buf()));
+        if careful {
+            return Ok(files);
+        }
         Ok(Box::new(Guarded { destination: destination.to_path_buf(), storage: files, init_in: self.init_in.clone() }))
     }
 }

@@ -386,7 +386,7 @@ pub fn found_in(from: &Path, to: &Path, name: Option<&str>, files: &[(usize, Pat
         let new = to.join(path);
         match (meta(&new), reached(to, path)) {
             (None, _) => {}
-            (Some(_), Some(m)) if m.len() <= *len && m.nlink() == 1 => there.extend(found(&new, &m)),
+            (Some(_), Some(m)) if super::trashed::its_own(&m, *len) => there.extend(found(&new, &m)),
             (Some(_), _) => return None,
         }
     }
@@ -492,7 +492,7 @@ fn at_path(path: &Path, why: impl FnOnce(AbsolutePath) -> NotMoved) -> NotMoved 
 }
 
 /// Whether `file` is a real file inside `root`, reached through real folders only.
-fn reached(root: &Path, inside: &Path) -> Option<std::fs::Metadata> {
+pub(super) fn reached(root: &Path, inside: &Path) -> Option<std::fs::Metadata> {
     let folders = inside.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty());
     for folder in folders {
         if !meta(&root.join(folder)).is_some_and(|m| m.file_type().is_dir()) {
