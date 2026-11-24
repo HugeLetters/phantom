@@ -2093,3 +2093,27 @@ fn a_click_on_a_files_priority_with_no_pane_open_while_an_add_is_on_its_way_leav
     assert_eq!(rt.state.torrents.len(), 3, "the add landed");
     assert!(focus_path(&rt).is_some_and(|p| p.contains("magnet-field")), "the field took the focus: {:?}", focus_path(&rt));
 }
+
+/// A torrent removed from inside its own pane, with the files focused: the pane goes with it, and
+/// the focus goes to the list while another torrent is there to focus, else (an empty list shows
+/// no list) nowhere (#364).
+#[test]
+fn a_removed_torrent_leaves_the_focus_on_the_list_if_one_is_left() {
+    let focused =
+        |rt: &Runtime<Phantom>| -> Vec<String> { rt.elements().into_iter().filter(|e| e.focused && !e.exiting).map(|e| e.path).collect() };
+    let mut rt = app(with_an_album());
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    tap(&mut rt, "files/viewport/rows/0");
+    assert!(focused(&rt).iter().any(|p| p.contains("files")), "the files have the focus");
+    rt.update(|s, tx| crate::commands::run_on_torrents(s, OnTorrents::Remove, tx));
+    settle(&mut rt);
+    assert_eq!(rt.state.table.selected_len(), 0, "no torrent is selected");
+    assert_eq!(focused(&rt), ["kit-root/app/body/list/table"], "the list has the focus");
+
+    // The last one removed: no list to take it.
+    tap(&mut rt, "rows/0");
+    shortcut(&mut rt, OnTorrents::Remove);
+    assert!(rt.state.torrents.is_empty());
+    assert_eq!(focused(&rt), Vec::<String>::new(), "nowhere");
+}

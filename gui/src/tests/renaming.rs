@@ -260,6 +260,21 @@ fn the_pane_showing_another_torrent_cancels_the_open_field() {
     assert_eq!(find_torrent(&rt, 1).display_name(), "Album");
 }
 
+/// An add of a link already listed selects its torrent: the pane leaves the open field (the
+/// rename is cancelled, as ever), and the focus goes to the list, not nowhere (#364).
+#[test]
+fn an_add_that_switches_the_pane_from_the_open_field_leaves_the_focus_on_the_list() {
+    let mut rt = app(with_a_movie());
+    open_field(&mut rt, 1);
+    assert!(rt.elements().iter().any(|e| e.focused && e.path.contains("rename-field")), "the field has the focus");
+    let link = crate::service::AddRequest::link(&format!("magnet:?xt=urn:btih:{:040x}", 2)).expect("a link");
+    rt.update(|s, _| crate::model::add(s, vec![link], Vec::new()));
+    settle(&mut rt);
+    assert!(rt.state.rename.id.is_none() && rt.find("rename-field").is_none(), "the field closes");
+    let focused: Vec<String> = rt.elements().into_iter().filter(|e| e.focused && !e.exiting).map(|e| e.path).collect();
+    assert!(focused.iter().all(|p| p.split('/').any(|part| part == "table")) && focused.len() == 1, "the list has the focus: {focused:?}");
+}
+
 /// A name a file can't have, with a click away: the field stays open, focused, with what was
 /// typed, and the tooltip under it says why until the next keystroke. Nothing is sent.
 #[test]
