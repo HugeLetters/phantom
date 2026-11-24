@@ -89,10 +89,10 @@ fn step() -> impl Strategy<Value = Step> {
         2 => (0..3usize, any::<bool>()).prop_map(|(file, on)| Step::Link { file, on }),
         3 => Just(Step::Check),
         1 => Just(Step::CancelCheck),
-        4 => Just(Step::Resume),
+        6 => Just(Step::Resume),
         1 => Just(Step::Pause),
-        2 => Just(Step::Restart),
-        2 => Just(Step::Crash),
+        3 => Just(Step::Restart),
+        3 => Just(Step::Crash),
         1 => Just(Step::DestinationGone),
         1 => Just(Step::DestinationBack),
         2 => (0..3usize, any::<bool>()).prop_map(|(file, off)| Step::Priority { file, off }),
@@ -101,10 +101,13 @@ fn step() -> impl Strategy<Value = Step> {
     ]
 }
 
-/// What's found: each file as it is there (none longer than its own, and one there at least).
+/// What's found: each file as it is there (none longer than its own, and one there at least). Half
+/// the time with none of its own content: "Files don't match", where most of what can go wrong does.
 fn found() -> impl Strategy<Value = [Kind; 3]> {
-    let there = || prop_oneof![Just(Kind::Own), Just(Kind::Other), Just(Kind::Zeros), Just(Kind::Short), Just(Kind::Gone)];
-    [there(), there(), there()].prop_filter("a file of it is there", |kinds| kinds.iter().any(|k| *k != Kind::Gone))
+    let any = || prop_oneof![Just(Kind::Own), Just(Kind::Other), Just(Kind::Zeros), Just(Kind::Short), Just(Kind::Gone)];
+    let others = || prop_oneof![3 => Just(Kind::Other), 1 => Just(Kind::Zeros), 1 => Just(Kind::Gone)];
+    prop_oneof![[any(), any(), any()], [others(), others(), others()]]
+        .prop_filter("a file of it is there", |kinds| kinds.iter().any(|k| *k != Kind::Gone))
 }
 
 struct World {
@@ -598,9 +601,10 @@ fn files_swapped_across_a_crash_or_a_restart_or_after_a_refused_resume_stay_held
     use Kind::*;
     let other = [Other, Other, Other];
     let swap = |kind| (0..3).map(move |file| Step::Hand { file, kind, replace: true });
-    // 1: put right but one linked, checked, a crash, all replaced.
-    let mut steps: Vec<Step> = swap(Own).collect();
-    steps.extend([Step::Link { file: 2, on: true }, Step::Check, Step::Crash, Step::Link { file: 2, on: false }]);
+    // 1: one linked, all put right in place, checked, a crash, all replaced.
+    let mut steps = vec![Step::Link { file: 2, on: true }];
+    steps.extend((0..3).map(|file| Step::Hand { file, kind: Own, replace: false }));
+    steps.extend([Step::Check, Step::Crash, Step::Link { file: 2, on: false }]);
     steps.extend(swap(Other));
     replay(false, other, steps);
     // 2: replaced while Phantom is closed is as replaced before it starts; then Resume.
