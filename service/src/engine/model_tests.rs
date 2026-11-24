@@ -2052,7 +2052,8 @@ impl ReferenceStateMachine for EngineModel {
             Step::WriteLitter { pack } => !model.unavailable[*pack] && !model.litter[*pack],
             Step::DestinationBack { pack } => model.unavailable[*pack],
             Step::Restart => restorable(model),
-            // A crash records nothing at stop: no torrent misses files, which a stop records.
+            // What was missing is judged at the start against what was there before a crash, unlike
+            // after a stop, which the model doesn't follow (`tests/crashed.rs` does).
             Step::Kill => {
                 !model.pending.is_empty()
                     && restorable(model)

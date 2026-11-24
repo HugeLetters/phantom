@@ -50,7 +50,7 @@ use tracing::warn;
 /// How long the watcher gathers events before reporting them.
 const DEBOUNCE: Duration = Duration::from_millis(250);
 
-pub use lifecycle::disk::{Disk, Expected, Found, Gone, Stamp};
+pub use lifecycle::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
 
 #[cfg(test)]
 pub use super::trashed::At;
