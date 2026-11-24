@@ -262,7 +262,8 @@ own (reached through real folders, no link) with no other hard link, at least on
 another listed torrent's place. Then nothing moves: the Move makes, writes over or removes nothing
 in either place, and the torrent is pointed there, **held** and checked in full. The status bar says
 "Found", with its name and where it is in the list (and Reveal in Finder); `phantom move` and
-`phantom rename` wait for the check and print how it went. Not found (files of it still where it was, a
+`phantom rename` print `Found <name> at <path>, checking…` at once, then how the check went, which ends the wait
+(Ctrl-C ends only the waiting: the check carries on in the service). Not found (files of it still where it was, a
 file there longer than its own or with another hard link, or none of its files there), it's a Move
 or a Rename as ever: a Move
 asks about the files there as a clash, a Rename finds the name taken. A found Rename is one step
@@ -270,21 +271,33 @@ of Undo, which points it back at its old name, moving nothing, Missing files aga
 if the person put it back); a found Move isn't undone, as a Move isn't.
 _Avoid_: locate, relink, reconcile (in what people see)
 
+**Files don't match**:
+The warning of a found torrent (#358) whose check found no piece with real content where it was
+found, which stays stopped, its files untouched. Its notice has Check again, Download over them (the
+torrent's Resume, with its rules; the row menu and Space keep that name) and Reveal in Finder, in
+that order, each offered while it would do something to that torrent alone. It goes by itself
+once the torrent isn't held so any more (checked and lifted, resumed, removed).
+_Avoid_: mismatch
+
 **Held**:
 A found torrent while it's checked where it was found (#358): it doesn't run, and nothing there
 changes (no file or folder made, written, grown or given a new time; a file that isn't there has
-none of its pieces). Any of its pieces found there (in a file set Off too) ends the hold, if its
-files are still the ones checked, unchanged, and each its own to write (a file, reached through no
-link, no longer than its own, with no other hard link): each file it gets is then made or
-set to its length, and it's running or stopped as before. Changed since, they're checked again
-(Unchecked after three times in a row); one gone, or not its own to write, it's Missing files,
-nothing made or cut, and still held. No piece found, it's stopped (Missing files
-if one it gets isn't there) and still held: **Files don't match**, a warning. Then Resume, the
-person's choice, ends the hold by the same rule and downloads over them; a Check that finds its
-pieces ends it too. A file set Off that isn't its own to write keeps it stopped the same way.
-Nothing else does: a Resume during the check waits for it, a cancelled check, a restart or a crash
-leaves it held. A Move or a Rename of it takes its hold along; a Delete moves what's at its files'
-paths to the Trash, as ever; the undo of a Remove or a Delete brings it back held.
+none of its pieces). A piece found there (in a file set Off too) with real content, at least one
+non-zero byte in what the check read (a piece of zeros proves nothing: another file, a disk image
+or a preallocated one, may share it), ends the hold, if its files are still the ones checked,
+unchanged, and each its own to write (a file, reached through no link, no longer than its own, with
+no other hard link): each file it gets is then made or set to its length, and it's running or
+stopped as before, with every matching piece, zeros too, as good as any. Changed since, they're
+checked again (Unchecked after three times in a row); one gone, or not its own to write (one set Off
+too), it's Missing files, nothing made or cut, and still held. No such piece found, it's stopped
+(Missing files if one it gets isn't there) and still held: **Files don't match**, a warning. Then
+Resume, the person's choice, ends the hold by the same rule and downloads over them; a Check that
+finds such a piece ends it too. Nothing else does: a Resume during the check waits for it, a
+cancelled check, a restart or a crash leaves it held (and checks it again, so what the check read is
+read again). A Move or a Rename of it takes its hold along. A Delete only takes it off the list,
+whether it's checked still or its files don't match: its files weren't verified as the torrent's, so
+nothing goes to the Trash and nothing at its paths is written or removed. The undo of a Remove or a
+Delete brings it back held.
 _Avoid_: quarantine, locked
 
 **Rename…**:
