@@ -70,7 +70,10 @@ enum Command {
     /// Move torrents' files into FOLDER, their destination from then on: renamed on the same drive,
     /// copied to another (then the originals go); each keeps what it had, without a full check.
     /// Several go one after another, in the order given, each in FOLDER as it would be on its own;
-    /// one that can't doesn't hold up the rest. Answered once each is moved, or back where it was
+    /// one that can't doesn't hold up the rest. Answered once each is moved, or back where it was.
+    /// A torrent moved to FOLDER in Finder is found there: nothing moves, it's checked there, held
+    /// stopped with its files untouched, and answered once that's over: back as it was, or stopped
+    /// if none of its pieces is there (its files don't match)
     Move {
         #[arg(required = true, num_args = 1.., value_name = "ID")]
         ids: Vec<TorrentId>,
@@ -90,7 +93,9 @@ enum Command {
     },
     /// Give a torrent a new name on disk, where it is: a torrent of one file its file's, a torrent
     /// of several its folder's (the files in it keep theirs); it keeps what it had. Something at
-    /// the new name already refuses it, and nothing is written over. `phantom undo` renames it back
+    /// the new name already refuses it, and nothing is written over, but its own files renamed to
+    /// NAME in Finder: it's found there, nothing moves, and it's checked as `move` says. `phantom undo` renames it
+    /// back (a found one is pointed back, moving nothing)
     Rename {
         id: TorrentId,
         name: String,
@@ -227,7 +232,7 @@ fn main() -> Result<()> {
             });
             moves(&mut client, &ids, to, clash, name)?;
         }
-        Command::Rename { id, name } => client.command(id, rename(name)?)?,
+        Command::Rename { id, name } => commands(&mut client, &[id], rename(name)?)?,
         // Of a selection, each torrent that didn't come back says why, and then how many: a partial
         // failure, as a Remove's is.
         Command::Undo => {
@@ -309,11 +314,22 @@ fn main() -> Result<()> {
 
 /// `command` for each of `ids` (each once), in one request (a Remove or a Delete of several is one
 /// undo step): one that failed fails as itself; of several, each says why, and then how many failed.
+/// A Rename that found its torrent where it is now says so (#358).
 fn commands(client: &mut Client, ids: &[TorrentId], command: TorrentCommand) -> Result<()> {
     let action = command.action();
     let mut seen = std::collections::BTreeSet::new();
     let ids: Vec<TorrentId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
-    let mut failed = client.commands(&ids, command)?;
+    // Its name, which it no longer has once it's off the list.
+    let names: Vec<(TorrentId, String)> = match (&command, client.list()) {
+        (TorrentCommand::Delete, Ok(listed)) => listed.iter().map(|t| (t.id, t.display_name().to_owned())).collect(),
+        _ => Vec::new(),
+    };
+    let client::Commanded { mut failed, found, stayed } = client.commands(&ids, command)?;
+    for (id, held) in &stayed {
+        let name = names.iter().find(|(n, _)| n == id).map_or_else(|| format!("torrent {id}"), |(_, name)| name.clone());
+        println!("{}", display::stayed_line(&name, *held));
+    }
+    print_found(client, &found)?;
     match failed.len() {
         0 => Ok(()),
         1 if ids.len() == 1 => Err(failed.remove(0).1.into()),
@@ -363,7 +379,8 @@ fn moves(client: &mut Client, ids: &[TorrentId], to: proto::AbsolutePath, choice
         Some(proto::Answered { choice: choice?, found: found.files.clone() })
     };
     let moves = ids.iter().map(|&id| proto::MoveOf { id, clash: answered(id), name: name.clone() }).collect();
-    let mut failed = client.moves(to, moves)?;
+    let client::Commanded { mut failed, found, .. } = client.moves(to, moves)?;
+    print_found(client, &found)?;
     match failed.len() {
         0 => Ok(()),
         1 if ids.len() == 1 => anyhow::bail!("{}", said(&failed.remove(0).1)),
@@ -374,6 +391,63 @@ fn moves(client: &mut Client, ids: &[TorrentId], to: proto::AbsolutePath, choice
             anyhow::bail!("{}", display::commands_failed(proto::Action::Move, n, ids.len()))
         }
     }
+}
+
+/// Each torrent of `found` a Move or a Rename found where it is now (#358): told at once ("Found
+/// <name> at <path>, checking…"), then how its check there went, as each one's ends. Every outcome ends
+/// the wait: its files match, don't, couldn't be checked, the torrent removed, the service stopped.
+/// Ctrl-C ends only the waiting: the check carries on in the service, which this is a client of.
+fn print_found(client: &mut Client, found: &[TorrentId]) -> Result<()> {
+    use std::io::Write;
+    if found.is_empty() {
+        return Ok(());
+    }
+    let say = |line: String| {
+        println!("{line}");
+        // Told at once, though what's piped may be buffered.
+        let _ = std::io::stdout().flush();
+    };
+    let mut snapshots = client.snapshots()?;
+    let mut waiting: Vec<display::Waiting> = Vec::new();
+    let mut first = true;
+    while first || !waiting.is_empty() {
+        let snapshot = match snapshots.receive() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                for w in &waiting {
+                    say(display::found_lost(w));
+                }
+                return Err(e.into());
+            }
+        };
+        if std::mem::take(&mut first) {
+            for id in found {
+                let listed = snapshot.torrents.iter().find(|t| t.id == *id);
+                let at = listed.and_then(|t| t.location.as_ref());
+                let w = display::Waiting {
+                    id: *id,
+                    name: listed.map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned()),
+                    at: at.map(|at| at.to_path_buf()).unwrap_or_default(),
+                };
+                match listed {
+                    Some(_) => say(display::found_now(&w)),
+                    None => say(display::found_outcome(&w, None).expect("a torrent that isn't listed is over")),
+                }
+                waiting.extend(listed.map(|_| w));
+            }
+        }
+        waiting.retain(|w| {
+            let now = snapshot.torrents.iter().find(|t| t.id == w.id).map(|t| (&t.status, t.held));
+            match display::found_outcome(w, now) {
+                Some(line) => {
+                    say(line);
+                    false
+                }
+                None => true,
+            }
+        });
+    }
+    Ok(())
 }
 
 /// The CLI's own fix for a refusal, after the shared words.

@@ -1,6 +1,7 @@
 //! The UI driven like a person would, against `MemoryService` on Rune's virtual clock.
 
 mod files;
+mod found;
 mod generated;
 mod moving;
 mod notices;
@@ -285,6 +286,7 @@ fn torrent(id: TorrentId, name: &str) -> TorrentInfo {
         trackers: Vec::new(),
         location: None,
         actions: proto::Actions::default(),
+        held: None,
     }
 }
 

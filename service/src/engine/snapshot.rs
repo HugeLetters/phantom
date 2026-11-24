@@ -121,6 +121,7 @@ mod tests {
             trackers: Vec::new(),
             location: None,
             actions: Default::default(),
+            held: None,
         }
     }
 

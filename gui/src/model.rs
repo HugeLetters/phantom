@@ -92,6 +92,9 @@ pub struct Phantom {
     /// The files whose parts the service couldn't keep, as last told, so each is told of once while
     /// it stays in the list (#304).
     pub service_parts_not_saved: Vec<std::path::PathBuf>,
+    /// The torrents found where they are now whose files don't match (#358), as last told, so each
+    /// is told of once while it stays so.
+    pub service_dont_match: Vec<TorrentId>,
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
     /// Why the default destination can't be reached, as the latest snapshot says (#209): Settings'
@@ -332,6 +335,7 @@ impl Phantom {
             service_reset: Vec::new(),
             service_records_set_aside: None,
             service_parts_not_saved: Vec::new(),
+            service_dont_match: Vec::new(),
             volumes: Vec::new(),
             default_unavailable: None,
             undo: Vec::new(),
@@ -392,6 +396,25 @@ impl Phantom {
                     }
                 }
                 self.service_parts_not_saved = snapshot.parts_not_saved.iter().map(|p| p.file.clone()).collect();
+                // Found, and its check found none of its pieces there (#358): told once, while it stays so.
+                let dont_match: Vec<&TorrentInfo> = snapshot.torrents.iter().filter(|t| t.held == Some(proto::Held::DontMatch)).collect();
+                for t in &dont_match {
+                    if let (false, Some(at)) = (self.service_dont_match.contains(&t.id), &t.location) {
+                        self.bar.tell(crate::notice::Notice::files_dont_match(t.id, t.display_name(), at));
+                    }
+                }
+                self.service_dont_match = dont_match.iter().map(|t| t.id).collect();
+                // Settled (lifted, resumed, removed): its notice goes by itself.
+                let settled: Vec<_> = self
+                    .bar
+                    .entries()
+                    .iter()
+                    .filter(|e| e.notice.about.is_some_and(|id| !self.service_dont_match.contains(&id)))
+                    .map(|e| e.id)
+                    .collect();
+                for id in settled {
+                    self.bar.dismiss(id);
+                }
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
                 let left = self.undos.observe(&snapshot.left);
@@ -610,7 +633,7 @@ pub fn trash_selected_files(s: &mut Phantom) {
     );
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
     let pending = crate::changes::acted(s, after, vec![id]);
-    command_then(&mut *s.service, Some(after), &[id], TorrentCommand::TrashFiles { files: selected }, move |s, _| {
+    command_then(&mut *s.service, Some(after), &[id], TorrentCommand::TrashFiles { files: selected }, move |s, _, _, _| {
         // The snapshot with its effect comes before its answer: its entry is on the stack now.
         let entry = s
             .undo
@@ -620,7 +643,7 @@ pub fn trash_selected_files(s: &mut Phantom) {
             .map(|entry| (entry.seq, entry.action));
         crate::changes::made(s, pending, entry.map(|(seq, _)| seq));
         if let Some((seq, action)) = entry {
-            tell_happened(s, Happened { seq }, action, &names);
+            tell_happened(s, Happened { seq }, action, &names, None);
         }
     });
 }
@@ -862,10 +885,11 @@ pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>, undos: &Und
 /// Sends `command` to each of `ids`; those that fail show together, as one entry in the error
 /// list: "Couldn't delete 2 of 5", each torrent with why.
 pub fn command(service: &mut dyn Service, ids: &[TorrentId], command: TorrentCommand) {
-    command_then(service, None, ids, command, |_, _| {});
+    command_then(service, None, ids, command, |_, _, _, _| {});
 }
 
-/// [`command`], then `done` with the torrents it did as asked. A Remove, Delete or Move to Trash
+/// [`command`], then `done` with the torrents it did as asked, those a Move or a Rename found
+/// where they are now, and those a Delete only took off the list (#358). A Remove, Delete or Move to Trash
 /// that failed in part tells of the entries it left on the undo stack past `after` (#200), so the
 /// notice goes with them once they're undone.
 fn command_then(
@@ -873,16 +897,17 @@ fn command_then(
     after: Option<u64>,
     ids: &[TorrentId],
     command: TorrentCommand,
-    done: impl FnOnce(&mut Phantom, Vec<TorrentId>) + Send + 'static,
+    done: impl FnOnce(&mut Phantom, Vec<TorrentId>, Vec<TorrentId>, Vec<(TorrentId, proto::Held)>) + Send + 'static,
 ) {
     let (action, total, all) = (command.action(), ids.len(), ids.to_vec());
     service.command(
         ids,
         command,
-        Box::new(move |s: &mut Phantom, failed: Vec<(TorrentId, client::Failure)>, _: &mut Tx| {
+        Box::new(move |s: &mut Phantom, commanded: client::Commanded, _: &mut Tx| {
+            let client::Commanded { failed, found, stayed } = commanded;
             let succeeded = all.into_iter().filter(|id| failed.iter().all(|(f, _)| f != id)).collect();
             let all_failed = failed.len();
-            done(s, succeeded);
+            done(s, succeeded, found, stayed);
             // Taken back by an Undo before it ended (#190): not a failure, and the Undo tells it.
             let failed: Vec<(TorrentId, client::Failure)> =
                 failed.into_iter().filter(|(_, e)| !matches!(e, client::Failure::Refused(proto::Refusal::Undone))).collect();
@@ -985,30 +1010,47 @@ pub fn remove_selected(s: &mut Phantom, delete: bool) {
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
     // The newest change from now: ⌘Z takes it even before a snapshot lists it (#255).
     let pending = crate::changes::acted(s, after, ids.clone());
-    command_then(&mut *s.service, Some(after), &ids, command, move |s, went| {
-        let names: Vec<String> = names.into_iter().filter(|(id, _)| went.contains(id)).map(|(_, name)| name).collect();
+    command_then(&mut *s.service, Some(after), &ids, command, move |s, went, _, stayed| {
+        // Each Delete's torrent by what the service did to its files (#358): those that stayed, held.
+        let kept: Vec<(String, proto::Held)> = names
+            .iter()
+            .filter(|(id, _)| went.contains(id))
+            .filter_map(|(id, name)| Some((name.clone(), stayed.iter().find(|(s, _)| s == id)?.1)))
+            .collect();
+        let listed = names.into_iter().filter(|(id, _)| went.contains(id));
+        let trashed: Vec<String> = listed.clone().filter(|(id, _)| stayed.iter().all(|(s, _)| s != id)).map(|(_, name)| name).collect();
+        let names: Vec<String> = listed.map(|(_, name)| name).collect();
         // The snapshot with its effect comes before its answer: its entry is on the stack now.
         let entry = s.undo.iter().find(|u| u.seq > after && u.torrents.iter().any(|t| went.contains(&t.id))).map(|u| u.seq);
         crate::changes::made(s, pending, entry);
         if let (false, Some(seq)) = (names.is_empty(), entry) {
-            tell_happened(s, Happened { seq }, action, &names);
+            tell_happened(s, Happened { seq }, action, &names, Some((&trashed, &kept)));
         }
     });
     s.table.clear_selection();
 }
 
 /// Renames torrent `id` to `name` on disk (#331): one step on the undo stack. What it did is told
-/// in the status bar under its new name, its notice with an Undo of it; a refusal, as any
-/// command's failure.
+/// in the status bar under its new name, its notice with an Undo of it; one that found it there,
+/// its files renamed by hand, says so (#358); a refusal, as any command's failure.
 pub fn rename(s: &mut Phantom, id: TorrentId, name: proto::FileName) {
     let after = s.undo.iter().map(|u| u.seq).max().unwrap_or(0);
     // The newest change from now: ⌘Z takes it even before a snapshot lists it (#255).
     let pending = crate::changes::acted(s, after, vec![id]);
     let (was, now) = (s.torrents.iter().find(|t| t.id == id).map(|t| t.display_name().to_owned()), name.to_string());
-    command_then(&mut *s.service, Some(after), &[id], TorrentCommand::Rename { name }, move |s, went| {
+    command_then(&mut *s.service, Some(after), &[id], TorrentCommand::Rename { name }, move |s, went, found, _| {
         let entry = s.undo.iter().find(|u| u.seq > after && u.torrents.iter().any(|t| went.contains(&t.id))).map(|u| u.seq);
         crate::changes::made(s, pending, entry);
-        if let (true, Some(seq)) = (went.contains(&id), entry) {
+        if let (true, Some(seq)) = (found.contains(&id), entry) {
+            if let Some(was) = &was {
+                s.undos.remember(seq, vec![was.clone(), now.clone()]);
+            }
+            let found = found_listed(s, &[id]);
+            let undo = undo_of(Happened { seq });
+            let reveal = found.iter().map(|(_, at)| crate::notice::NoticeAction::reveal(at));
+            let notice = Notice::new(display::found(1)).long().with_listing(display::found_listing(&found));
+            s.bar.tell(Notice { of: vec![seq], ..notice.with_actions(std::iter::once(undo).chain(reveal).collect()) });
+        } else if let (true, Some(seq)) = (went.contains(&id), entry) {
             // "old → new"; its undo lists them the other way round.
             let listed = match &was {
                 Some(was) => {
@@ -1017,7 +1059,7 @@ pub fn rename(s: &mut Phantom, id: TorrentId, name: proto::FileName) {
                 }
                 None => now,
             };
-            tell_happened(s, Happened { seq }, proto::UndoAction::Rename, &[listed]);
+            tell_happened(s, Happened { seq }, proto::UndoAction::Rename, &[listed], None);
         }
     });
 }
@@ -1050,9 +1092,42 @@ impl Happened {
     }
 }
 
+/// Each of `ids` a Move or a Rename found where it is now (#358): its name, and where it is.
+pub(crate) fn found_listed(s: &Phantom, ids: &[TorrentId]) -> Vec<(String, PathBuf)> {
+    let at = |t: &TorrentInfo| t.location.as_ref().map(|l| l.to_path_buf());
+    s.torrents.iter().filter(|t| ids.contains(&t.id)).filter_map(|t| Some((t.display_name().to_owned(), at(t)?))).collect()
+}
+
 /// Tells that `happened`, to the torrents `names`: what its files are now, and Undo, which takes
 /// back that Remove or Delete and then tells what came back in its place.
-fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction, names: &[String]) {
+fn tell_happened(
+    s: &mut Phantom,
+    happened: Happened,
+    action: proto::UndoAction,
+    names: &[String],
+    deleted: Option<(&[String], &[(String, proto::Held)])>,
+) {
+    let undo = undo_of(happened.clone());
+    let count = match action {
+        proto::UndoAction::TrashFiles { count } => count,
+        proto::UndoAction::Remove | proto::UndoAction::Delete | proto::UndoAction::Rename => names.len(),
+    };
+    // Its undo names the files too.
+    if matches!(action, proto::UndoAction::TrashFiles { .. }) {
+        s.undos.remember(happened.seq, names.to_vec());
+    }
+    let listing = match deleted {
+        // Each torrent of a Delete by what was done to its files (#358).
+        Some((trashed, kept)) if action == proto::UndoAction::Delete => display::deleted_listing(trashed, kept),
+        _ => display::happened_listing(action, count, names),
+    };
+    let notice = Notice::new(display::happened(action, names.len())).long().with_listing(listing);
+    s.bar.tell(Notice { of: vec![happened.seq], ..notice.with_actions(vec![undo]) });
+}
+
+/// The Undo of the notice of `happened`: on while it's the top of the stack, ⌘Z beside it while ⌘Z
+/// would take it, and why it's off when it is.
+fn undo_of(happened: Happened) -> crate::notice::NoticeAction {
     let off = happened.clone();
     let mut undo = crate::notice::NoticeAction::new(display::undo(), {
         let happened = happened.clone();
@@ -1069,17 +1144,8 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
         (next == Some(seq)).then(|| crate::shortcuts::hint(crate::commands::InApp::Undo))
     }));
     undo.off = Some(Rc::new(move |s: &Phantom| off.off(&s.undo, &s.undos).map(|why| display::undo_off(&why))));
-    let count = match action {
-        proto::UndoAction::TrashFiles { count } => count,
-        proto::UndoAction::Remove | proto::UndoAction::Delete | proto::UndoAction::Rename => names.len(),
-    };
     undo.undo = true;
-    // Its undo names the files too.
-    if matches!(action, proto::UndoAction::TrashFiles { .. }) {
-        s.undos.remember(happened.seq, names.to_vec());
-    }
-    let notice = Notice::new(display::happened(action, names.len())).long().with_listing(display::happened_listing(action, count, names));
-    s.bar.tell(Notice { of: vec![happened.seq], ..notice.with_actions(vec![undo]) });
+    undo
 }
 
 pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {

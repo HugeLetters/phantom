@@ -24,6 +24,11 @@
 //! are in exactly one destination once it's done. Nothing is reached through a symbolic link, as in
 //! the Trash's code, and nothing is erased that isn't the torrent's own copy: what Replace and Use
 //! existing get rid of goes to the Trash.
+//!
+//! A torrent moved or renamed by hand is [`found_in`] the folder or under the name it has now
+//! (#358): its plan keeps every file of it there, as Use existing keeps one, so nothing is staged,
+//! landed or removed, and nothing is made in either place; [`pointing`] is the plan that moves
+//! nothing back, a found Rename's undo.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, Write};
@@ -169,10 +174,24 @@ impl Plan {
         self.items.iter().any(|i| i.kept)
     }
 
+    /// Whether it neither moves a file nor takes one that's there already: it only points elsewhere.
+    pub fn moves_none(&self) -> bool {
+        self.items.iter().all(|i| !i.kept && i.source.is_none())
+    }
+
     /// The files that don't move, by index: not in the old destination (deleted by hand), nor
     /// kept from the new one.
     pub fn missing(&self) -> Vec<usize> {
         self.items.iter().filter(|i| !i.kept && i.staged.is_none()).map(|i| i.index).collect()
+    }
+
+    /// The plan of a torrent [`found_in`] where it is now (#358) moves nothing and removes nothing:
+    /// none of its files was at its old paths as it was found, and one put back there since (in the
+    /// instant before the plan looked) stays where it is, the person's.
+    pub fn moves_nothing(&mut self) {
+        for item in &mut self.items {
+            item.source = None;
+        }
     }
 
     /// Records what [`stage`] staged of each file.
@@ -345,6 +364,57 @@ pub fn plan(
     })
 }
 
+/// Whether the torrent whose `files` (each by index, with its path inside its destination and its
+/// full length) is found in `to` under `name` (none: its own), its files moved or renamed there by
+/// hand (#358): nothing at any of their paths in `from`, its own folder (or its one file) in `to`,
+/// each of its files there a real file reached through real folders, no longer than its own (a
+/// check sets each file's length, which would cut a longer one short) and of no other hard link
+/// (writing it would change that other name's file too), and one at least. What's
+/// there, as a clash finds it: the files a Move takes as they are, as Use existing does.
+pub fn found_in(from: &Path, to: &Path, name: Option<&str>, files: &[(usize, PathBuf, u64)]) -> Option<Vec<Found>> {
+    if files.is_empty() || files.iter().any(|(_, path, _)| meta(&from.join(path)).is_some()) {
+        return None;
+    }
+    let news: Vec<(PathBuf, u64)> = files.iter().map(|(_, path, len)| (new_path(path, name), *len)).collect();
+    let top = meta(&to.join(news[0].0.components().next()?))?;
+    let own_folder = news.iter().any(|(path, _)| path.components().count() > 1);
+    if !(if own_folder { top.file_type().is_dir() } else { top.file_type().is_file() }) {
+        return None;
+    }
+    let mut there = Vec::new();
+    for (path, len) in &news {
+        let new = to.join(path);
+        match (meta(&new), reached(to, path)) {
+            (None, _) => {}
+            (Some(_), Some(m)) if super::trashed::its_own(&m, *len) => there.extend(found(&new, &m)),
+            (Some(_), _) => return None,
+        }
+    }
+    (!there.is_empty()).then_some(there)
+}
+
+/// A move of the torrent `hash`'s `files` from `from` into `to`, under `name` there, that moves
+/// nothing (#358): the undo of a Rename that found its torrent points it back at the name it had,
+/// its files staying where the person put them.
+pub fn pointing(from: &Path, to: &Path, name: Option<&str>, hash: &str, files: &[(usize, PathBuf)]) -> Plan {
+    let items = files.iter().map(|(index, path)| Item {
+        index: *index,
+        path: path.clone(),
+        renamed: Some(new_path(path, name)).filter(|new| new != path),
+        kept: false,
+        source: None,
+        replaces: None,
+        staged: None,
+    });
+    Plan {
+        from: from.to_owned(),
+        to: to.to_owned(),
+        staging: to.join(format!(".phantom-moving-{hash}")),
+        renames: true,
+        items: items.collect(),
+    }
+}
+
 /// Where the folder `path` is: its inode if it's on disk, else its nearest ancestor on disk's and the
 /// rest folded as `name_free` folds a name (Unicode composed, lower case), so the same place in
 /// another spelling is the same.
@@ -422,7 +492,7 @@ fn at_path(path: &Path, why: impl FnOnce(AbsolutePath) -> NotMoved) -> NotMoved 
 }
 
 /// Whether `file` is a real file inside `root`, reached through real folders only.
-fn reached(root: &Path, inside: &Path) -> Option<std::fs::Metadata> {
+pub(super) fn reached(root: &Path, inside: &Path) -> Option<std::fs::Metadata> {
     let folders = inside.ancestors().skip(1).filter(|a| !a.as_os_str().is_empty());
     for folder in folders {
         if !meta(&root.join(folder)).is_some_and(|m| m.file_type().is_dir()) {
@@ -477,13 +547,17 @@ pub fn stage(
     between: &dyn Fn() -> bool,
 ) -> Result<Vec<(usize, Ino)>, Stop> {
     let fail = |e: &std::io::Error, at: &Path| Stop::Failed(not_moved(e, &plan.to, at));
+    let moving: Vec<(&Item, Ino, u64)> =
+        plan.items.iter().filter(|i| !i.kept).filter_map(|i| i.source.map(|(ino, len)| (i, ino, len))).collect();
+    // Nothing to move (a torrent found where it is now, #358): nothing is made there either.
+    if moving.is_empty() {
+        return Ok(Vec::new());
+    }
     match meta(&plan.staging) {
         Some(m) if m.file_type().is_dir() => {}
         Some(_) => return Err(Stop::Failed(at_path(&plan.staging, |path| NotMoved::NotAFolder { path }))),
         None => std::fs::create_dir(&plan.staging).map_err(|e| fail(&e, &plan.to))?,
     }
-    let moving: Vec<(&Item, Ino, u64)> =
-        plan.items.iter().filter(|i| !i.kept).filter_map(|i| i.source.map(|(ino, len)| (i, ino, len))).collect();
     let total = if plan.renames { 0 } else { moving.iter().map(|(_, _, len)| len).sum() };
     let mut done = 0;
     let mut staged = Vec::new();
@@ -630,7 +704,10 @@ pub fn land(plan: &Plan, trash: &Trash, between: &dyn Fn(&Path) -> bool) -> Resu
     if blocked.is_none() {
         let moved = plan.items.iter().filter(|i| !i.kept && i.staged.is_some());
         let mut parents: BTreeSet<PathBuf> = moved.filter_map(|i| plan.new(i).parent().map(Path::to_owned)).collect();
-        parents.insert(plan.staging.clone());
+        // None moved, none staged: no staging folder was made (#358).
+        if !parents.is_empty() {
+            parents.insert(plan.staging.clone());
+        }
         blocked = parents.iter().find_map(|dir| sync_dir(dir).err().map(|e| not_moved(&e, &plan.to, dir)));
     }
     let Some(why) = blocked else { return Ok(landed) };
@@ -885,9 +962,11 @@ pub fn restore(plan: &Plan, trash: &Trash) -> Restored {
     restored
 }
 
-/// The folders of the torrent's own folder in the old destination left with nothing but litter go.
+/// The folders of the torrent's own folder in the old destination left with nothing but litter go:
+/// of the files that moved, so one that moves nothing (#358) leaves the old destination as it is.
 fn tidy_old(plan: &Plan) {
-    let own: BTreeSet<PathBuf> = plan.items.iter().filter_map(|i| i.path.components().next()).map(|c| plan.from.join(c)).collect();
+    let moved = plan.items.iter().filter(|i| i.source.is_some());
+    let own: BTreeSet<PathBuf> = moved.filter_map(|i| i.path.components().next()).map(|c| plan.from.join(c)).collect();
     for folder in own.into_iter().filter(|f| meta(f).is_some_and(|m| m.file_type().is_dir())) {
         trash::tidy(&folder);
     }

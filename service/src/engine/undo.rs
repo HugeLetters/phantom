@@ -108,6 +108,10 @@ pub struct Renaming {
     pub to: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub was: Option<String>,
+    /// Written ahead once it starts: it found the torrent under its new name, its files renamed
+    /// there by hand (#358), so its undo points it back, moving nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub found: bool,
 }
 
 impl Running {
@@ -200,8 +204,15 @@ pub enum Back {
     /// A Rename (#331): the torrent never left the list, and its undo renames it back to `name` on
     /// disk, where it is then, as a Rename does: never over anything at that name. It does so only
     /// while the torrent has the name `now` that this Rename gave it: one renamed since (and that
-    /// newer Rename's undo refused) is refused as moved.
-    Renamed { name: String, now: String },
+    /// newer Rename's undo refused) is refused as moved. `found`: the Rename found it under `now`,
+    /// its files renamed there by hand (#358), so its undo points it back at `name` and moves
+    /// nothing, its files staying where the person put them.
+    Renamed {
+        name: String,
+        now: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        found: bool,
+    },
 }
 
 /// What a torrent is added again from.

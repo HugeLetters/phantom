@@ -20,14 +20,15 @@ use proto::{Named, NotBack, Priority, TorrentCommand, TorrentId, TorrentInfo, Un
 use tokio::sync::oneshot;
 use tracing::warn;
 
-use super::super::Failure;
 use super::super::undo::machine::{self as stack, Arrival, Command, Do, Observed, Phase, What};
 use super::super::undo::{self, Back, Running, Seen};
+use super::super::{Commanded, Failure};
 use super::undoing::name_of;
 use super::{Actor, Event, Refusal, State, lib};
 
-/// A command's client: it hears, once each torrent's step did as asked or failed, those that failed.
-pub(super) type Reply = oneshot::Sender<Vec<(TorrentId, Failure)>>;
+/// A command's client: it hears, once each torrent's step did as asked or failed, those that failed,
+/// and those a Move or a Rename found where they are now (#358).
+pub(super) type Reply = oneshot::Sender<Commanded>;
 pub(super) type UndoReply = oneshot::Sender<Result<Undone, Failure>>;
 
 /// Undo's machine as the actor drives it: the stack and the lanes, the parts the actor carries out,
@@ -68,6 +69,8 @@ pub struct Carried {
 struct Batch {
     reply: Reply,
     failed: Vec<(TorrentId, Failure)>,
+    found: Vec<TorrentId>,
+    stayed: Vec<(TorrentId, proto::Held)>,
     left: usize,
     /// Every part has arrived: it's answered once `left` is none.
     closed: bool,
@@ -130,7 +133,7 @@ pub(super) enum Outcome {
 
 /// An answer to hand a client, once what it did is published.
 pub(super) enum Answer {
-    Step(Reply, Vec<(TorrentId, Failure)>),
+    Step(Reply, Commanded),
     Undo(UndoReply, Result<Undone, Failure>),
 }
 
@@ -159,7 +162,7 @@ impl Steps {
     pub(super) fn batch(&mut self, reply: Reply, failed: Vec<(TorrentId, Failure)>) -> u64 {
         let batch = self.next_batch;
         self.next_batch += 1;
-        self.batches.insert(batch, Batch { reply, failed, left: 0, closed: false });
+        self.batches.insert(batch, Batch { reply, failed, found: Vec::new(), stayed: Vec::new(), left: 0, closed: false });
         batch
     }
 
@@ -175,7 +178,7 @@ impl Steps {
         match self.batches.get(&batch) {
             Some(b) if b.closed && b.left == 0 => {
                 let b = self.batches.remove(&batch).expect("just found");
-                vec![Answer::Step(b.reply, b.failed)]
+                vec![Answer::Step(b.reply, Commanded { failed: b.failed, found: b.found, stayed: b.stayed })]
             }
             Some(_) | None => Vec::new(),
         }
@@ -482,6 +485,22 @@ impl Steps {
         id
     }
 
+    /// Step `seq`'s part on torrent `id` found it where it is now, moving nothing (#358): its batch
+    /// hears so with its answer.
+    pub(super) fn found(&mut self, seq: u64, id: TorrentId) {
+        if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
+            b.found.push(id);
+        }
+    }
+
+    /// Step `seq`'s part on torrent `id`, a Delete, left its files where they are (#358): its batch
+    /// hears so with its answer.
+    pub(super) fn stayed(&mut self, seq: u64, id: TorrentId, held: proto::Held) {
+        if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
+            b.stayed.push((id, held));
+        }
+    }
+
     /// Step `seq`'s part on torrent `id`: its batch hears `answer`, once each of its parts did. One
     /// that waited behind an undo that failed hears it was undone; a Cancel check judged on what
     /// clients saw that finds no check at its turn is done, as asked.
@@ -525,7 +544,7 @@ impl Actor {
                 };
                 failed.extend(refused.map(|why| (id, Failure::torrent(id, why))));
             }
-            drop(reply.send(failed));
+            drop(reply.send(Commanded { failed, found: Vec::new(), stayed: Vec::new() }));
             return self.run_steps().await;
         }
         let (mut doing, mut failed) = (Vec::new(), Vec::new());
@@ -562,7 +581,7 @@ impl Actor {
                     _ => Vec::new(),
                 };
                 let renaming = match &command {
-                    TorrentCommand::Rename { name } => Some(undo::Renaming { to: name.to_string(), was: None }),
+                    TorrentCommand::Rename { name } => Some(undo::Renaming { to: name.to_string(), was: None, found: false }),
                     _ => None,
                 };
                 let parts: BTreeMap<TorrentId, Running> = doing
@@ -730,7 +749,7 @@ impl Actor {
         self.publish();
         for answer in answers {
             match answer {
-                Answer::Step(reply, failed) => drop(reply.send(failed)),
+                Answer::Step(reply, commanded) => drop(reply.send(commanded)),
                 Answer::Undo(reply, answer) => drop(reply.send(answer)),
             }
         }

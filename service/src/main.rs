@@ -523,20 +523,20 @@ impl Service {
                 Response::Added(self.running().await?.engine.add(source, paused, destination).await?)
             }
             Request::Torrents { ids, command } => {
-                let failed = match self.cancel_while_restarting(&ids, &command).await {
-                    Some(failed) => failed,
-                    None => self.running().await?.engine.commands(ids, command).await?,
+                let engine::Commanded { failed, found, stayed } = match self.cancel_while_restarting(&ids, &command).await {
+                    Some(failed) => engine::Commanded { failed, found: Vec::new(), stayed: Vec::new() },
+                    None => self.running().await?.engine.commanded(ids, command).await?,
                 };
                 let failed = failed.into_iter().map(|(id, failure)| proto::TorrentFailed { id, failure: failure.into() }).collect();
-                Response::Commanded { failed }
+                Response::Commanded { failed, found, stayed }
             }
             Request::Moves { to, moves } => {
                 // The engine let go of once they're sent: a restart for new settings waits for
                 // every handle, and a batch is answered only once its last Move is over.
                 let answer = self.running().await?.engine.send_moves(to, moves).await?;
-                let failed = answer.await?;
+                let engine::Commanded { failed, found, stayed } = answer.await?;
                 let failed = failed.into_iter().map(|(id, failure)| proto::TorrentFailed { id, failure: failure.into() }).collect();
-                Response::Commanded { failed }
+                Response::Commanded { failed, found, stayed }
             }
             Request::Clashes { ids, to } => Response::Clashes { clashing: self.running().await?.engine.clashes(ids, to).await? },
             Request::FreeName { id, to } => Response::FreeName { name: self.running().await?.engine.free_name(id, to).await? },

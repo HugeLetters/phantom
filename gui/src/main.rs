@@ -150,6 +150,7 @@ fn t(id: u64, name: &str, status: Status, progress: u64, size: u64, down: u64, u
         trackers: Vec::new(),
         location: None,
         actions: proto::Actions::default(),
+        held: None,
     }
 }
 
@@ -259,6 +260,17 @@ fn archive(inside: &str) -> proto::AbsolutePath {
 /// `Full` the disk fills halfway.
 fn moves() -> MemoryService {
     demo_service().moves_take(3.0).holding(format!("{ARCHIVE}/Clash")).move_failing(format!("{ARCHIVE}/Full"), proto::NotMoved::DiskFull)
+}
+
+/// [`demo_service`] with Big Buck Bunny's folder renamed in Finder to "Big Buck Bunny" (#358).
+fn found_by_hand() -> MemoryService {
+    demo_service().moved_by_hand(4, "/Users/me/Downloads/Big Buck Bunny")
+}
+
+/// [`found_by_hand`], the files in its folder of their names and lengths but other bytes: found,
+/// none of its pieces is there (#358).
+fn found_on_others() -> MemoryService {
+    demo_service().moved_by_hand_onto_others(4, "/Users/me/Downloads/Big Buck Bunny")
 }
 
 fn slow_adds() -> MemoryService {
@@ -656,6 +668,26 @@ fn spec() -> AppSpec<Phantom> {
             ("renames", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("4");
+            }),
+            // Found (#358): Big Buck Bunny's folder renamed in Finder to "Big Buck Bunny", so it's
+            // Missing files (`found-missing`, selected; `found-renames`, for a script to rename it
+            // there); `found` has Rename… to that name done, the torrent found there.
+            ("found-missing", |s| {
+                listed(s, found_by_hand());
+                s.table.select("4");
+            }),
+            ("found-renames", |s| s.service = Box::new(found_by_hand())),
+            ("found", |s| {
+                listed(s, found_by_hand());
+                s.table.select("4");
+                model::rename(s, 4, proto::FileName::new("Big Buck Bunny").expect("a name"));
+            }),
+            // Found on files that aren't its own (#358): Rename… done, and once its check found none
+            // of its pieces there, it's stopped with "Files don't match" (a few seconds in).
+            ("files-dont-match", |s| {
+                listed(s, found_on_others());
+                s.table.select("4");
+                model::rename(s, 4, proto::FileName::new("Big Buck Bunny").expect("a name"));
             }),
             ("rename", |s| {
                 listed(s, demo_service());

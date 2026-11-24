@@ -25,6 +25,11 @@ pub fn pieces(saved: &[u8]) -> u64 {
     saved.iter().map(|byte| u64::from(byte.count_ones())).sum()
 }
 
+/// Whether any piece is both in the saved bits and in `real` (by index).
+pub fn any_in(saved: &[u8], real: &[bool]) -> bool {
+    real.iter().enumerate().any(|(piece, &real)| real && saved.get(piece / 8).is_some_and(|byte| byte & (0x80 >> (piece % 8)) != 0))
+}
+
 /// The saved bits without the pieces in `ranges` (each `[start, end)`): those past the end are none.
 pub fn cleared(mut saved: Vec<u8>, ranges: impl IntoIterator<Item = (u32, u32)>) -> Vec<u8> {
     for (start, end) in ranges {
@@ -76,6 +81,14 @@ pub fn forget(path: &Path) {
     }
 }
 
+/// Saves at `path` that a torrent of `pieces` pieces has none of them: librqbit, added with it, reads
+/// nothing and has nothing.
+pub fn none(path: &Path, pieces: u32) -> std::io::Result<()> {
+    let tmp = path.with_extension("bitv.tmp");
+    std::fs::write(&tmp, vec![0u8; (pieces as usize).div_ceil(8)])?;
+    std::fs::rename(tmp, path)
+}
+
 /// How many pieces a torrent of `piece_length`-byte pieces holds, at least, with `progress_bytes`
 /// of it had: every piece but the last is full length.
 pub fn pieces_in(progress_bytes: u64, piece_length: u32) -> u64 {
@@ -109,6 +122,13 @@ pub async fn wait_for(wanted: &[(PathBuf, u64)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_a_piece_that_is_saved_and_real() {
+        assert!(any_in(&[0b0100_0000], &[false, true]));
+        assert!(!any_in(&[0b0100_0000], &[true, false, true]));
+        assert!(!any_in(&[], &[true]));
+    }
 
     #[test]
     fn counts_the_set_bits() {

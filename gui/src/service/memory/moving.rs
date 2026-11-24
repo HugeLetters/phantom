@@ -7,7 +7,8 @@
 //! starts, the Moves to Trash of it leave the stack, moved (the shared rule, `lifecycle::undo`). A folder
 //! [`holding`](MemoryService::holding) a file of the torrent's already clashes, refused until the
 //! person chooses; one a move [`fails into`](MemoryService::move_failing) fails it halfway, and it's
-//! back where it was.
+//! back where it was. One [`moved by hand`](MemoryService::moved_by_hand) into the folder is found
+//! there (#358, `found.rs`): nothing moves.
 
 use std::path::PathBuf;
 
@@ -104,13 +105,21 @@ impl MemoryService {
             return refused(TorrentRefusal::IntoItself);
         }
         if let Some(new_name) = new_name
-            && let Err(why) = self.name_free(id, to, new_name)
+            && let Err(why) = self.name_free(id, to, new_name, false)
         {
             return refused(why);
         }
         if self.anothers(id, to, new_name).is_some() {
             let path = AbsolutePath::new(to.join(new_name.unwrap_or(&name))).expect("absolute");
             return refused(TorrentRefusal::AnothersFiles { path });
+        }
+        // Found there, moved by hand (#358): nothing moves; it's pointed there and checked.
+        if new_name.is_none() && clash.is_none() && self.found_at(id, &to.join(&name)) {
+            self.decide(lifecycle::undo::Observed::Moving(id));
+            self.destinations.insert(id, to.to_path_buf());
+            self.take_found(id);
+            self.found(seq, id);
+            return Some(None);
         }
         // What the folder holds is at the torrent's own name, not a new one.
         let taken = new_name.is_none() && self.holding.contains(&**to);
@@ -149,7 +158,7 @@ impl MemoryService {
         };
         for n in 2..=proto::FileName::MAX_NUMBER {
             let free = proto::FileName::numbered(stem, n, extension).ok_or_else(gone)?;
-            match self.name_free(id, to, &free) {
+            match self.name_free(id, to, &free, false) {
                 Ok(()) => {}
                 Err(TorrentRefusal::NameTaken { .. } | TorrentRefusal::NameOfAnother { .. }) => continue,
                 Err(why) => return Err(Failure::Refused(Refusal::Torrent { id, why })),
@@ -295,6 +304,7 @@ mod tests {
             trackers: Vec::new(),
             location: None,
             actions: proto::Actions::default(),
+            held: None,
         }
     }
 

@@ -214,7 +214,7 @@ impl Actor {
             return self.resume_undo(seq, of, entry).await;
         }
         // A Rename's renames it back, as a Rename does (#331): nothing to put back from the Trash.
-        if let Back::Renamed { name, now } = &entry.back {
+        if let Back::Renamed { name, now, .. } = &entry.back {
             let name = name.clone();
             // Renamed since: it isn't under the name this Rename gave it.
             if self.torrents.get(&id).and_then(|t| t.record.disk_name()).as_deref() != Some(now.as_str()) {
@@ -564,6 +564,7 @@ impl Actor {
             lib: lib::Lib::Out,
             polled,
             there: Default::default(),
+            hold: Default::default(),
             meter: seeding::Meter::new(record.round),
             record,
             #[cfg(test)]
@@ -648,7 +649,11 @@ impl Actor {
                             name: self.torrents.get(&r.id).map_or(r.name, super::undoing::name_of),
                             info_hash: r.info_hash,
                             id: r.id,
-                            back: Back::Renamed { name: was, now: r.renaming.as_ref().map(|n| n.to.clone()).unwrap_or_default() },
+                            back: Back::Renamed {
+                                name: was,
+                                now: r.renaming.as_ref().map(|n| n.to.clone()).unwrap_or_default(),
+                                found: r.renaming.as_ref().is_some_and(|n| n.found),
+                            },
                             put_back: Vec::new(),
                             listed: None,
                         })),

@@ -13,7 +13,7 @@ use lifecycle::undo::{self, Arrival, Do, Observed, Part, Phase, What, view};
 use lifecycle::{Event, Phase as Lifecycle, State};
 use proto::{Named, NotBack, Priority, Refusal, TorrentCommand, TorrentId, TorrentInfo, UndoAction, Undoable, Undone};
 
-use client::Failure;
+use client::{Commanded, Failure};
 
 use super::{FilesTrashed, Left, MemoryService};
 use crate::service::{Done, Incoming, answer};
@@ -58,7 +58,11 @@ fn cant_undo(failure: &Failure) -> (proto::CantUndo, Vec<proto::AbsolutePath>) {
 pub(super) struct Batch {
     left: usize,
     failed: Vec<(TorrentId, Failure)>,
-    done: Done<Vec<(TorrentId, Failure)>>,
+    /// Those a Move or a Rename found where they are now (#358).
+    found: Vec<TorrentId>,
+    /// Those a Delete only took off the list, their files staying (#358).
+    stayed: Vec<(TorrentId, proto::Held)>,
+    done: Done<Commanded>,
 }
 
 impl MemoryService {
@@ -71,7 +75,7 @@ impl MemoryService {
         ids: &[TorrentId],
         command: TorrentCommand,
         moves: &BTreeMap<TorrentId, proto::MoveOf>,
-        done: Done<Vec<(TorrentId, Failure)>>,
+        done: Done<Commanded>,
     ) {
         // A Move of several is told as each torrent's own, in order, with the choice made for it.
         let own = |command: &TorrentCommand, id: &TorrentId| match (command, moves.get(id)) {
@@ -101,7 +105,7 @@ impl MemoryService {
                     Some((id, Failure::Refused(Refusal::Torrent { id, why })))
                 })
                 .collect();
-            self.ready.push((answer(done, failed), 0.0));
+            self.ready.push((answer(done, Commanded { failed, found: Vec::new(), stayed: Vec::new() }), 0.0));
             self.changed = true;
             return;
         }
@@ -137,7 +141,7 @@ impl MemoryService {
         }
         let batch = self.next_batch;
         self.next_batch += 1;
-        self.batches.insert(batch, Batch { left: doing.len(), failed: refused, done });
+        self.batches.insert(batch, Batch { left: doing.len(), failed: refused, found: Vec::new(), stayed: Vec::new(), done });
         let action = match &command {
             TorrentCommand::Remove => Some((UndoAction::Remove, Vec::new())),
             TorrentCommand::Delete => Some((UndoAction::Delete, Vec::new())),
@@ -214,11 +218,27 @@ impl MemoryService {
 
     fn batch_ended(&mut self, batch: usize) {
         if self.batches.get(&batch).is_some_and(|b| b.left == 0)
-            && let Some(Batch { failed, done, .. }) = self.batches.remove(&batch)
+            && let Some(Batch { failed, found, stayed, done, .. }) = self.batches.remove(&batch)
         {
             let after = self.stale_answers * super::STALE[self.commands % super::STALE.len()];
             self.commands += 1;
-            self.ready.push((answer(done, failed), after));
+            self.ready.push((answer(done, Commanded { failed, found, stayed }), after));
+        }
+    }
+
+    /// Step `seq`'s part on torrent `id` found it where it is now, moving nothing (#358): its batch
+    /// hears so with its answer, as the engine's.
+    pub(super) fn found(&mut self, seq: u64, id: TorrentId) {
+        if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
+            b.found.push(id);
+        }
+    }
+
+    /// Step `seq`'s part on torrent `id`, a Delete, left its files where they are (#358): its batch
+    /// hears so with its answer, as the engine's.
+    pub(super) fn stayed(&mut self, seq: u64, id: TorrentId, held: proto::Held) {
+        if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
+            b.stayed.push((id, held));
         }
     }
 
@@ -273,6 +293,11 @@ impl MemoryService {
             What::Action(parts) => match parts.get(&id) {
                 Some(Part::Doing(run)) => match run.action {
                     UndoAction::Remove => return self.removed(seq, id),
+                    // Held (#358): its files aren't verified as its own, so it only leaves the list.
+                    UndoAction::Delete if self.dont_match.contains(&id) => {
+                        self.stayed(seq, id, proto::Held::DontMatch);
+                        return self.removed(seq, id);
+                    }
                     UndoAction::Delete => {
                         self.event(id, Event::Command(proto::Action::Delete));
                         // Without info it has no files: it leaves, as on a Remove.
@@ -481,9 +506,14 @@ impl MemoryService {
             let failed = refused(proto::TorrentRefusal::NotRenamed { name: named(), why: proto::NotMoved::Cancelled });
             return self.ended(seq, id, Observed::Failed(seq, id), failed, aborted);
         }
+        let destination = self.destinations.get(&id).cloned().unwrap_or_else(super::downloads);
+        let found = self.found_at(id, &destination.join(&name));
         let (how, failed) = match self.rename(id, &name) {
             Ok(Some(was)) => {
-                let left = Left { renamed: Some(was), ..self.keep(id, UndoAction::Rename) };
+                if found {
+                    self.found(seq, id);
+                }
+                let left = Left { renamed: Some(was), found, ..self.keep(id, UndoAction::Rename) };
                 (Observed::Finished(seq, id, Some(left)), None)
             }
             Ok(None) => (Observed::Finished(seq, id, None), None),

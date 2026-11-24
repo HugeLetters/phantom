@@ -159,6 +159,11 @@ pub struct Saved {
     /// one past the point where `destination` names the new one, and restores one before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moving: Option<Moving>,
+    /// A Move or a Rename found it where it is now (#358): held stopped, librqbit's storage of it
+    /// touching nothing there, until a check finds any of its pieces there. Saved with the
+    /// destination it's found at, so a start after a crash checks it again, held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<proto::Held>,
 }
 
 /// A missing file, as the record keeps it.
@@ -209,6 +214,42 @@ pub struct Moving {
     /// before (none: its info's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub names: Option<Names>,
+    /// [`Record::held`] on the other side of `placed`: what it's held as once the record names the
+    /// new destination, and, from there, what it was before, which a move going back gives it again.
+    /// They change places in the save that changes the destination (#358).
+    #[serde(default = "Hold::not_saved", skip_serializing_if = "Hold::is_none")]
+    pub held: Hold,
+}
+
+/// Whether a torrent is held at a place (#358), and how: its record's, or what a move gives it at
+/// the place it goes to. There's no way to make one that isn't held but the three here, so every way
+/// out of a hold is one of: [`Record::lift`], with the proof its files were opened as checked; a place
+/// nothing of the torrent is at ([`Hold::nothing_there`]), swapped in as the record names that place
+/// ([`Record::swap_hold`]); and what was saved so.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(transparent)]
+pub struct Hold(Option<proto::Held>);
+
+impl Hold {
+    /// What a record saved without one has: none.
+    fn not_saved() -> Self {
+        Self(None)
+    }
+
+    fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// Of a torrent found at the place it goes to: held there, to be checked.
+    pub fn found() -> Self {
+        Self(Some(proto::Held::Checking))
+    }
+
+    /// Of a torrent pointed at a place where nothing of it is (a found Rename's undo, a move of one
+    /// with no file left to take): there's nothing there to keep from it.
+    pub fn nothing_there() -> Self {
+        Self(None)
+    }
 }
 
 /// The names on disk a move takes a torrent from and to ([`Record::on_disk`]'s: none is its info's).
@@ -248,6 +289,8 @@ pub struct Record {
     pub stash: Option<Stash>,
     pub letting_go: letgo::State,
     pub moving: Option<Moving>,
+    /// Private: only [`Record::lift`] and [`Record::swap_hold`] end a hold.
+    held: Hold,
 }
 
 /// The files a torrent gets (those Normal).
@@ -356,6 +399,7 @@ impl Record {
             stash,
             letting_go,
             moving,
+            held,
         } = saved;
         let gets = match normal {
             Some(only) => Gets::Only(only),
@@ -381,6 +425,7 @@ impl Record {
             stash,
             letting_go,
             moving,
+            held: Hold(held),
         }
     }
 
@@ -413,7 +458,39 @@ impl Record {
             stash: None,
             letting_go: letgo::State::Holding,
             moving: None,
+            held: Hold(None),
         }
+    }
+
+    /// How it's held (#358), if it is.
+    pub fn held(&self) -> Option<proto::Held> {
+        self.held.0
+    }
+
+    /// Its hold, for a move that takes its files along to give it at the place they go to.
+    pub fn hold(&self) -> Hold {
+        self.held
+    }
+
+    /// Held as `how` from now, if it's held: one that isn't is never held but by being found
+    /// ([`Record::swap_hold`]).
+    pub fn held_as(&mut self, how: proto::Held) {
+        if self.held.0.is_some() {
+            self.held.0 = Some(how);
+        }
+    }
+
+    /// Not held any more: its files were opened to write and found to be those its check read
+    /// (`lifted` is the proof, which only the storage that did so gives).
+    pub fn lift(&mut self, lifted: super::trashed::Lifted) {
+        let _: super::trashed::Lifted = lifted;
+        self.held.0 = None;
+    }
+
+    /// Changes its hold for `other`, a move's ([`Moving::held`]): only as the record names the
+    /// move's other place, in the same save.
+    pub fn swap_hold(&mut self, other: &mut Hold) {
+        std::mem::swap(&mut self.held, other);
     }
 
     /// As it's kept.
@@ -439,6 +516,7 @@ impl Record {
             stash: self.stash.clone(),
             letting_go: self.letting_go.clone(),
             moving: self.moving.clone(),
+            held: self.held.0,
         }
     }
 

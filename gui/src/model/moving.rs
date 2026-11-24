@@ -362,7 +362,15 @@ fn send(s: &mut Phantom, asking: Asking) {
     s.service.moves(
         to,
         moves,
-        Box::new(move |s: &mut Phantom, failed: Vec<(TorrentId, Failure)>, _: &mut Tx| {
+        Box::new(move |s: &mut Phantom, commanded: client::Commanded, _: &mut Tx| {
+            let client::Commanded { failed, found, .. } = commanded;
+            // Found where they are now, moving nothing (#358): told, with where each is.
+            let found = super::found_listed(s, &found);
+            if !found.is_empty() {
+                let reveal = found.iter().filter(|_| found.len() == 1).map(|(_, at)| crate::notice::NoticeAction::reveal(at)).collect();
+                let notice = Notice::new(display::found(found.len())).brief().with_listing(display::found_listing(&found));
+                s.bar.tell(notice.with_actions(reveal));
+            }
             // Taken back by an Undo before it ended: not a failure, and the Undo tells it.
             let failed: Vec<(TorrentId, Failure)> =
                 failed.into_iter().filter(|(_, e)| !matches!(e, Failure::Refused(Refusal::Undone))).collect();

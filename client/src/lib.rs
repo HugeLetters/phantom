@@ -104,6 +104,22 @@ impl std::error::Error for Failure {
     }
 }
 
+/// How a command of several torrents went (`Response::Commanded`): those that didn't do as asked,
+/// with why, and those a Move or a Rename found where they are now, moving nothing (#358).
+#[derive(Debug, Default)]
+pub struct Commanded {
+    pub failed: Vec<(TorrentId, Failure)>,
+    pub found: Vec<TorrentId>,
+    /// Those a Delete only took off the list, their files staying where they are: held (#358).
+    pub stayed: Vec<(TorrentId, proto::Held)>,
+}
+
+impl Commanded {
+    fn of(failed: Vec<proto::TorrentFailed>, found: Vec<TorrentId>, stayed: Vec<(TorrentId, proto::Held)>) -> Self {
+        Self { failed: failed.into_iter().map(|f| (f.id, f.failure.into())).collect(), found, stayed }
+    }
+}
+
 /// `path` from the root: a relative one against the current directory, as the person giving it
 /// means. The protocol only carries absolute paths.
 pub fn absolute(path: &Path) -> Result<AbsolutePath> {
@@ -189,6 +205,13 @@ impl Client {
         Ok(self.snapshot_here(Vec::new())?.torrents)
     }
 
+    /// Every snapshot from now on, on this connection, which becomes the stream: the client goes on
+    /// with a fresh one to the same service.
+    pub fn snapshots(&mut self) -> Result<Subscription, Failure> {
+        let fresh = Self { service_version: self.service_version.clone(), ..Self::connect_raw()? };
+        std::mem::replace(self, fresh).subscribe(Vec::new())
+    }
+
     /// The first snapshot on this connection, which becomes a stream: so the client goes on with a
     /// fresh one to the same service, opened first so the service never sees it without one.
     fn snapshot_here(&mut self, watching: Vec<TorrentId>) -> Result<Snapshot, Failure> {
@@ -205,18 +228,18 @@ impl Client {
 
     /// `command` for each of `ids` in one request (a Remove or a Delete of several is one undo
     /// step): those that didn't do as asked, with why.
-    pub fn commands(&mut self, ids: &[TorrentId], command: TorrentCommand) -> Result<Vec<(TorrentId, Failure)>, Failure> {
+    pub fn commands(&mut self, ids: &[TorrentId], command: TorrentCommand) -> Result<Commanded, Failure> {
         match self.call(&Request::Torrents { ids: ids.to_vec(), command })? {
-            Response::Commanded { failed } => Ok(failed.into_iter().map(|f| (f.id, f.failure.into())).collect()),
+            Response::Commanded { failed, found, stayed } => Ok(Commanded::of(failed, found, stayed)),
             other => Err(unexpected(other)),
         }
     }
 
     /// `moves` into `to` in one request, a step each in the order given (they run one after another
     /// in it, #270), each with its own choice for a clash: those that didn't move, with why.
-    pub fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>) -> Result<Vec<(TorrentId, Failure)>, Failure> {
+    pub fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>) -> Result<Commanded, Failure> {
         match self.call(&Request::Moves { to, moves })? {
-            Response::Commanded { failed } => Ok(failed.into_iter().map(|f| (f.id, f.failure.into())).collect()),
+            Response::Commanded { failed, found, stayed } => Ok(Commanded::of(failed, found, stayed)),
             other => Err(unexpected(other)),
         }
     }
@@ -239,7 +262,7 @@ impl Client {
 
     /// `command` for torrent `id`.
     pub fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
-        match self.commands(&[id], command)?.into_iter().next() {
+        match self.commands(&[id], command)?.failed.into_iter().next() {
             Some((_, failure)) => Err(failure),
             None => Ok(()),
         }
