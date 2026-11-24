@@ -26,7 +26,6 @@ use proto::{FileName, Held};
 use super::*;
 
 const NAMES: [&str; 3] = ["a.bin", "b.bin", "c.bin"];
-const PIECES: usize = 6;
 const EVERY: Duration = Duration::from_millis(40);
 
 /// What's at a file's path, put there by hand.
@@ -395,7 +394,9 @@ impl World {
             Step::CancelCheck => self.command(TorrentCommand::CancelCheck).await,
             Step::Resume => {
                 let dont_match = before.listed && before.held == Some(Held::DontMatch);
-                self.chosen = dont_match && self.reads.load(Ordering::SeqCst) >= PIECES && !self.gate.is_held();
+                // Every piece of the files there was read: two each.
+                let there = 2 * self.kinds.iter().filter(|k| **k != Kind::Gone).count();
+                self.chosen = dont_match && self.reads.load(Ordering::SeqCst) >= there && !self.gate.is_held();
                 self.command(TorrentCommand::Resume).await;
             }
             Step::Pause => {
@@ -600,7 +601,7 @@ fn files_swapped_across_a_crash_or_a_restart_or_after_a_refused_resume_stay_held
     // 1: put right but one linked, checked, a crash, all replaced.
     let mut steps: Vec<Step> = swap(Own).collect();
     steps.extend([Step::Link { file: 2, on: true }, Step::Check, Step::Crash, Step::Link { file: 2, on: false }]);
-    steps.extend(swap(Zeros));
+    steps.extend(swap(Other));
     replay(false, other, steps);
     // 2: replaced while Phantom is closed is as replaced before it starts; then Resume.
     let mut steps: Vec<Step> = vec![Step::Restart];
