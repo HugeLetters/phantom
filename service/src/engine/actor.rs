@@ -942,15 +942,17 @@ impl Actor {
             let wants_changed = next.wants != torrent.lifecycle.wants;
             torrent.meter.wants_changed(torrent.lifecycle.wants, next.wants);
             torrent.lifecycle = next;
-            // Partly deleted or its destination gone, it isn't Missing files any more: a file it was
-            // missing has none of it counted, whatever was said of it last (saved as the service
-            // stopped, say) (#290, #366).
-            if matches!(torrent.lifecycle.phase, Phase::DeleteFailed { .. } | Phase::DestinationUnavailable { .. }) {
-                for i in missing(&before) {
-                    if let Some(p) = torrent.polled.file_progress.get_mut(i) {
-                        *p = 0;
-                    }
+            // A file that was missing, or returning to a check, has its bytes unreadable: what
+            // librqbit said of it last (kept through a check, or saved as the service stopped) isn't
+            // counted while it's shown, until its check ends (#290, #366). Only shown: what librqbit
+            // said stays as it was, as it's saved and what's decided from (is a file there still
+            // the torrent's own).
+            match &torrent.lifecycle.phase {
+                Phase::CheckDue { .. } | Phase::DeleteFailed { .. } | Phase::DestinationUnavailable { .. } => {
+                    torrent.polled.uncounted.extend(unreadable(&before));
                 }
+                Phase::Checking { .. } | Phase::Unchecked { .. } | Phase::Deleting { .. } | Phase::Moving { .. } => {}
+                _ => torrent.polled.uncounted.clear(),
             }
             // What Delete left is kept across restarts, and librqbit's storage for it touches
             // nothing meanwhile: restoring it would make the trashed files again, empty. What a
@@ -1273,12 +1275,11 @@ impl Actor {
         if torrent.lib.torrent().is_some_and(|h| matches!(h.stats().state, TorrentStatsState::Initializing { .. })) {
             return None;
         }
-        let disk = files::disk_of(&expected(torrent));
         // Gone while its files were looked at, every one seemed missing: it's the destination that is.
-        if let Some(reason) = files::unavailable(&torrent.record.destination) {
-            return Some(Observation::DestinationGone { reason });
-        }
-        Some(Observation::Files(disk))
+        Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent))) {
+            Ok(disk) => Observation::Files(disk),
+            Err(reason) => Observation::DestinationGone { reason },
+        })
     }
 
     /// A command that isn't a step, on its torrent's lane.
@@ -1635,6 +1636,7 @@ impl Actor {
         // Nothing is known of what an unchecked torrent has.
         let progress = if torrent.lifecycle.phase.unchecked() { &[] } else { torrent.polled.file_progress.as_slice() };
         let mut files = files(record, progress, &missing(&torrent.lifecycle.phase));
+        uncount(&mut files, torrent);
         // One in the Trash for an undo, nothing at its path: librqbit reads it where it went, for its
         // undo, but it shows none of it (#276), as it would download it all set Normal.
         let in_trash = self.guard.trashed().in_trash(&record.info_hash);
@@ -1911,6 +1913,22 @@ fn missing(phase: &Phase) -> BTreeSet<usize> {
     }
 }
 
+/// The files of `phase`'s torrent whose bytes can't be read: those missing, and those it had
+/// missing that a check was to look at again.
+fn unreadable(phase: &Phase) -> BTreeSet<usize> {
+    match phase {
+        Phase::CheckDue { returning } | Phase::Checking { returning } => returning.keys().copied().collect(),
+        phase => missing(phase),
+    }
+}
+
+/// `files` as shown: none counted of those whose bytes can't be read now.
+fn uncount(files: &mut [File], torrent: &Torrent) {
+    for f in files.iter_mut().filter(|f| torrent.polled.uncounted.contains(&f.index)) {
+        f.progress_bytes = 0;
+    }
+}
+
 /// What [`trash::plan`] decides from, for the torrent: from its record alone, without the disk.
 pub(super) struct ToTrash {
     pub(super) location: PathBuf,
@@ -2004,6 +2022,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, priorities: &BTreeMap<usize, Priorit
     // Size and progress from the files you're getting: librqbit counts whole pieces, which
     // spill into neighbouring files that may be Off.
     let mut files = files(&t.record, &stats.file_progress, &missing(&t.lifecycle.phase));
+    uncount(&mut files, t);
     shown_as(&mut files, priorities);
     let normal = || files.iter().filter(|f| f.priority == Priority::Normal);
     let size_bytes = normal().map(|f| f.size_bytes).sum();
@@ -2049,6 +2068,10 @@ struct Polled {
     /// What librqbit last said it has of each file, by index: kept through a check, during which
     /// it says nothing per file.
     file_progress: Vec<u64>,
+    /// Files whose bytes can't be read now (missing as their destination went, or as a delete
+    /// failed): shown with none counted, whatever `file_progress` says of them. Never saved, nor
+    /// decided from: `file_progress` is what librqbit said (#366).
+    uncounted: BTreeSet<usize>,
     uploaded_bytes: u64,
     download_bytes_per_sec: u64,
     upload_bytes_per_sec: u64,
@@ -2072,6 +2095,7 @@ impl Polled {
             finished: stats.finished,
             checked_bytes: stats.progress_bytes,
             file_progress: file_progress.clone(),
+            uncounted: last.uncounted.clone(),
             uploaded_bytes: stats.uploaded_bytes,
             download_bytes_per_sec: live.map_or(0, |l| l.download_speed.as_bytes()),
             upload_bytes_per_sec: live.map_or(0, |l| l.upload_speed.as_bytes()),
