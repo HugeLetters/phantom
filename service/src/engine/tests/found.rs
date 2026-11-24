@@ -740,10 +740,8 @@ async fn files_that_do_not_match_stay_held_across_a_restart_until_they_do() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_held_torrent_whose_check_is_cancelled_stays_held() {
     let f = found_and_held(false, other_bytes).await;
-    // As the check waits to read: what's asked of it waits for that.
-    let cancelling = f.engine.sent(f.id, TorrentCommand::CancelCheck).await;
+    f.engine.command(f.id, TorrentCommand::CancelCheck).await.unwrap();
     f.gate.hold(false);
-    cancelling.await.unwrap();
     let t = find(&f.engine, f.id).await;
     assert_eq!((t.status, t.held), (Status::Unchecked, Some(proto::Held::Checking)));
     f.engine.stop().await;
@@ -762,7 +760,12 @@ async fn a_held_torrent_whose_check_is_cancelled_stays_held() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_remove_while_held_leaves_the_files_and_its_undo_brings_it_back_held() {
     for others in [false, true] {
-        let f = found_and_held(false, |album| if others { other_bytes(album) }).await;
+        let f = found_and_held(false, |album| {
+            if others {
+                other_bytes(album)
+            }
+        })
+        .await;
         f.engine.command(f.id, TorrentCommand::Remove).await.unwrap();
         assert!(f.untouched(), "others {others}: removed");
         f.engine.undo().await.unwrap();
@@ -809,7 +812,12 @@ async fn a_delete_while_held_moves_the_files_as_they_are_and_its_undo_brings_it_
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_while_held_takes_the_files_as_they_are_and_it_is_held_there() {
     for others in [false, true] {
-        let f = found_and_held(false, |album| if others { other_bytes(album) }).await;
+        let f = found_and_held(false, |album| {
+            if others {
+                other_bytes(album)
+            }
+        })
+        .await;
         let elsewhere = f.dir.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         let moving = f.engine.sent(f.id, move_to(&elsewhere)).await;
@@ -911,6 +919,13 @@ async fn the_hold_is_not_lifted_under_a_move_to_trash() {
     gate.hold(false);
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(find(&engine, id).await.held, Some(proto::Held::Checking), "under the Move to Trash");
+    let started = engine
+        .inspect(move |a| {
+            let handle = a.torrents[&id].lib.torrent().expect("in librqbit");
+            matches!(handle.stats().state, librqbit::TorrentStatsState::Live)
+        })
+        .await;
+    assert!(!started, "never started while held");
     super::super::trash::hold(&trash, false);
     trashing.await.unwrap();
     until_held(&engine, id, None).await;
