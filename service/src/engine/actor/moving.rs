@@ -519,9 +519,9 @@ impl Actor {
         // Found (#358): held from where the record names the new place, till it's checked there. Pointed
         // back where nothing of it is, it's held no more; moved with its files, it's as it was.
         let held = match found {
-            true => Some(proto::Held::Checking),
-            false if plan.moves_none() => None,
-            false => torrent.record.held,
+            true => super::super::store::Hold::found(),
+            false if plan.moves_none() => super::super::store::Hold::nothing_there(),
+            false => torrent.record.hold(),
         };
         torrent.record.moving =
             Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced: !replaced.is_empty(), names, held });
@@ -726,11 +726,14 @@ impl Actor {
     /// already, or why the save failed.
     fn placed(&mut self, id: TorrentId, change: impl FnOnce(&mut moving::Plan), placed: bool) -> anyhow::Result<bool> {
         let torrent = self.torrents.get_mut(&id).context("moving, not in the list")?;
-        let moving = torrent.record.moving.as_mut().context("moving without a plan")?;
-        change(&mut moving.plan);
-        if moving.placed != placed {
-            std::mem::swap(&mut torrent.record.held, &mut moving.held);
+        // The hold goes with the place: the move's other one has the other.
+        let mut held = torrent.record.moving.as_ref().context("moving without a plan")?.held;
+        if torrent.record.moving.as_ref().is_some_and(|m| m.placed != placed) {
+            torrent.record.swap_hold(&mut held);
         }
+        let moving = torrent.record.moving.as_mut().context("moving without a plan")?;
+        moving.held = held;
+        change(&mut moving.plan);
         moving.placed = placed;
         let to = if placed { &moving.plan.to } else { &moving.plan.from };
         torrent.record.destination = AbsolutePath::new(to.clone()).map_err(|p| anyhow::anyhow!("a move to {}", p.display()))?;

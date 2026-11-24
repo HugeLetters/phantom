@@ -81,6 +81,14 @@ pub fn forget(path: &Path) {
     }
 }
 
+/// Saves at `path` that a torrent of `pieces` pieces has none of them: librqbit, added with it, reads
+/// nothing and has nothing.
+pub fn none(path: &Path, pieces: u32) -> std::io::Result<()> {
+    let tmp = path.with_extension("bitv.tmp");
+    std::fs::write(&tmp, vec![0u8; (pieces as usize).div_ceil(8)])?;
+    std::fs::rename(tmp, path)
+}
+
 /// How many pieces a torrent of `piece_length`-byte pieces holds, at least, with `progress_bytes`
 /// of it had: every piece but the last is full length.
 pub fn pieces_in(progress_bytes: u64, piece_length: u32) -> u64 {

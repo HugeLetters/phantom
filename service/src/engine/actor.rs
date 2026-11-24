@@ -71,7 +71,7 @@ use super::snapshot::{Published, Snapshot};
 use super::space;
 use super::store::{Gets, Info, Record, Store};
 use super::trash::{self, Trash, Trashed};
-use super::trashed::Lift;
+use super::trashed::{Check, Touches};
 use super::undo;
 use super::{Failure, Prepared, default_folder};
 
@@ -1027,7 +1027,7 @@ impl Actor {
                 (lib::Do::Start, Some(_)) if matches!(torrent.record.letting_go, machine::letgo::State::Gone { .. }) => return Ok(()),
                 // Found and held (#358): stopped, its files untouched, until its check found its pieces
                 // there or the person resumes it once it found none (`judge_held`).
-                (lib::Do::Start, Some(_)) if torrent.record.held.is_some() => return Ok(()),
+                (lib::Do::Start, Some(_)) if torrent.record.held().is_some() => return Ok(()),
                 (lib::Do::Start, Some(handle)) => {
                     self.session.unpause(&handle).await?;
                     // librqbit's upload counter starts again with the torrent.
@@ -1068,14 +1068,34 @@ impl Actor {
             }
             self.save();
         }
+        let lift = self.torrents.get_mut(&id).and_then(|t| t.hold.lifting.take());
         let record = &self.torrents[&id].record;
         let saved = bitv::path(&self.session_folder(), &record.info_hash);
-        // Held for its check (#358): what librqbit saved is of files as another storage read them, so
-        // it isn't taken for a check of those opened now.
-        let held = record.held == Some(proto::Held::Checking);
-        let checks = checks || held;
+        // How its storage touches its files (#358). Held, it touches nothing, and what librqbit saved
+        // of its pieces is never taken: that's of files as another storage read them (before a
+        // restart, an undo, a move), which may be others now. It's checked in full, by a storage whose
+        // check is the only thing its hold is lifted on; or, its files known not to match, added with
+        // none of its pieces and nothing read, until the person has it checked.
+        let found = record.held() == Some(proto::Held::Checking);
+        let (touches, check) = match (lift, record.held()) {
+            (Some(lift), _) => (Touches::Lifted(lift), None),
+            (None, Some(proto::Held::DontMatch)) if !checks => (Touches::Nothing(None), None),
+            (None, Some(proto::Held::Checking | proto::Held::DontMatch)) => {
+                let check = Check::new();
+                (Touches::Nothing(Some(check.clone())), Some(check))
+            }
+            (None, None) => (Touches::Its, None),
+        };
+        let checks = checks || check.is_some();
         if checks {
             bitv::forget(&saved);
+        } else if let Touches::Nothing(None) = touches {
+            let pieces = record.info.as_ref().and_then(|i| i.files.iter().map(|f| f.pieces.end).max()).unwrap_or(0);
+            // Not written, librqbit checks it in full: of no check of Phantom's, it proves nothing either.
+            if let Err(e) = bitv::none(&saved, pieces) {
+                warn!(id, error = %e, "couldn't save a held torrent as having none of its pieces: it's checked");
+                bitv::forget(&saved);
+            }
         }
         // A check finds what's on disk: nothing is left to let go of (#234), a file gone for good
         // having none of its pieces once it's checked.
@@ -1085,9 +1105,10 @@ impl Actor {
         }
         // Nothing saved, librqbit checks it all: a check like any.
         let resumes = !checks && saved.exists();
-        let lift = self.torrents.get_mut(&id).and_then(|t| t.hold.lifting.take());
-        let added = self.add_from_record(&self.torrents[&id].record, lift).await;
+        let added = self.add_from_record(&self.torrents[&id].record, touches).await;
         let torrent = self.torrents.get_mut(&id).expect("being added");
+        // What a check of another storage found is no evidence of this one's files.
+        torrent.hold.checked(added.as_ref().ok().zip(check));
         match added {
             Ok(handle) => {
                 #[cfg(test)]
@@ -1113,7 +1134,7 @@ impl Actor {
                 // the next poll.
                 if checks {
                     // One that was to come back with what it had is checked all the same.
-                    let seen = if held { Observation::Checking } else { Observation::AddedAgain };
+                    let seen = if found { Observation::Checking } else { Observation::AddedAgain };
                     torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(seen)).expect("never refused");
                 }
                 Ok(())
@@ -1128,15 +1149,14 @@ impl Actor {
         }
     }
 
-    /// librqbit's torrent for `record`, added stopped, its hold lifted if `lift`.
-    async fn add_from_record(&self, record: &Record, lift: Option<Arc<Lift>>) -> Result<Arc<ManagedTorrent>> {
+    /// librqbit's torrent for `record`, added stopped, its storage touching its files as `touches` says.
+    async fn add_from_record(&self, record: &Record, touches: Touches) -> Result<Arc<ManagedTorrent>> {
         let info = record.info.as_ref().context("a torrent without info isn't added")?;
         let folder = record.output_folder().context("a torrent with info has its folder")?;
         // Its folder and priorities known, the files set Off aren't made (#67).
         let normal: Vec<usize> = record.normal().into_iter().collect();
         let one_file = info.single().then(|| record.on_disk.as_ref().map(PathBuf::from)).flatten();
-        let storage =
-            self.guard.for_add(record.destination.clone(), folder.clone(), &normal, one_file).held(record.held.is_some()).lifting(lift);
+        let storage = self.guard.for_add(record.destination.clone(), folder.clone(), &normal, one_file).touching(touches);
         let opts = AddTorrentOptions {
             paused: true,
             overwrite: true,
@@ -1281,7 +1301,7 @@ impl Actor {
         }
         // Found, its check over and not judged yet (#358): a file that isn't there was never made,
         // and is as its hold is lifted.
-        if torrent.record.held == Some(proto::Held::Checking) && torrent.lifecycle.phase == Phase::Ready {
+        if torrent.record.held() == Some(proto::Held::Checking) && torrent.lifecycle.phase == Phase::Ready {
             return None;
         }
         Some(Observation::Files(on_disk(torrent)))
@@ -1293,7 +1313,12 @@ impl Actor {
         // poll or once the watcher notices.
         self.poll_torrent(id).await;
         self.size_check(id).await;
+        // "Download over them" (#358): the person's choice, of the files as they were last checked.
+        let choice = matches!(command, TorrentCommand::Resume).then(|| self.choice(id)).flatten();
         self.event(id, Event::Command(command.action())).await?;
+        if let Some(choice) = choice {
+            self.pressed(id, choice).await;
+        }
         match command {
             TorrentCommand::Remove
             | TorrentCommand::Delete
@@ -1514,12 +1539,14 @@ impl Actor {
         // Where its files are, from its record, librqbit having it or not. Held (#358), none: they were
         // never verified as the torrent's (the check is under way, or found none of its pieces), and
         // are the person's, so it's only taken off the list.
-        let goes = self.torrents.get(&id).filter(|t| t.record.held.is_none()).and_then(|t| to_trash(&t.record));
-        if let Some(held) = self.torrents.get(&id).filter(|t| to_trash(&t.record).is_some()).and_then(|t| t.record.held) {
-            self.steps.stayed(seq, id, held);
-        }
+        let goes = self.torrents.get(&id).filter(|t| t.record.held().is_none()).and_then(|t| to_trash(&t.record));
+        let stays = self.torrents.get(&id).filter(|t| to_trash(&t.record).is_some()).and_then(|t| t.record.held());
         if let Err(e) = self.event(id, Event::Command(proto::Action::Delete)).await {
             return self.step_ended(seq, id, steps::Over::Failed, Err(e));
+        }
+        // Told once it's taken off the list: a Delete refused took nothing off it.
+        if let Some(held) = stays {
+            self.steps.stayed(seq, id, held);
         }
         let (Some(goes), Some(torrent)) = (goes, self.torrents.get(&id).filter(|t| matches!(t.lifecycle.phase, Phase::Deleting { .. })))
         else {
@@ -1765,7 +1792,7 @@ impl Actor {
             self.guard.trashed().let_go(&hash, &closing);
         }
         // Held (#358), nothing is made there: the add that lifts the hold makes it.
-        let held = self.torrents.get(&id).is_some_and(|t| t.record.held.is_some());
+        let held = self.torrents.get(&id).is_some_and(|t| t.record.held().is_some());
         for (i, path, len) in made.into_iter().filter(|_| !held) {
             if let Err(e) = super::trashed::make_again(&destination, &path, len) {
                 warn!(id, file = i, error = %e, "couldn't make a file set Normal again at its path");
@@ -1972,7 +1999,7 @@ fn expected(torrent: &Torrent) -> Vec<Expected> {
 /// isn't its to write: it's Missing files then too, as the lift never writes into it.
 fn on_disk(torrent: &Torrent) -> files::Disk {
     let mut disk = files::disk_of(&expected(torrent));
-    if torrent.record.held.is_some() {
+    if torrent.record.held().is_some() {
         let destination = &torrent.record.destination;
         let reach =
             |path: &std::path::Path| path.strip_prefix(destination).ok().and_then(|inside| super::moving::reached(destination, inside));
@@ -1980,7 +2007,7 @@ fn on_disk(torrent: &Torrent) -> files::Disk {
             found.at = found.at.filter(|_| reach(&found.file.path).is_some_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) == 1));
         }
         // Only while pieces are found or not judged: with none found it's "Files don't match", stopped.
-        let off = (torrent.record.held == Some(proto::Held::Checking))
+        let off = (torrent.record.held() == Some(proto::Held::Checking))
             .then(|| files(&torrent.record, &progress(torrent), &BTreeSet::new()))
             .into_iter()
             .flatten()
@@ -2094,7 +2121,7 @@ fn torrent_info(id: TorrentId, t: &Torrent, priorities: &BTreeMap<usize, Priorit
         trackers: t.record.trackers.clone(),
         location: t.record.location().and_then(|path| AbsolutePath::new(path).ok()),
         actions: lifecycle.actions(),
-        held: t.record.held,
+        held: t.record.held(),
     })
 }
 

@@ -49,6 +49,14 @@ async fn reading_engine(dir: &Path) -> (Engine, Arc<super::super::files::Gate>, 
     (engine, gate.clone(), reads, Opens(gate))
 }
 
+/// [`reading_engine`]'s, `hook` run wherever its storage can be held.
+async fn hooked_engine(dir: &Path, hook: super::super::trashed::Hook) -> (Engine, Arc<super::super::files::Gate>, Opens) {
+    let gate = Arc::new(super::super::files::Gate::default());
+    let guard = super::super::files::Guard::default().with_gate(super::super::files::At::Read, gate.clone()).with_hook(hook);
+    let engine = super::letgo::engine_guarded(dir, guard, Default::default()).await;
+    (engine, gate.clone(), Opens(gate))
+}
+
 /// The torrent's folder renamed in Finder, then Rename… to that name, running or paused: found.
 /// Nothing is moved, made or written there (each file is the same file, unchanged, while the
 /// check reads it), the record names it there, it's checked in full, and it's back to what it
@@ -617,8 +625,13 @@ impl Found {
 
 /// [`Found`], running or `paused` before, `changed` making what's at "Album" otherwise before it's found.
 async fn found_and_held(paused: bool, changed: impl Fn(&Path)) -> Found {
+    found_and_held_at(paused, changed, Arc::new(|_| {})).await
+}
+
+/// [`found_and_held`]'s, `hook` run wherever its engine's storage can be held.
+async fn found_and_held_at(paused: bool, changed: impl Fn(&Path), hook: super::super::trashed::Hook) -> Found {
     let dir = temp();
-    let (engine, gate, _reads, opens) = reading_engine(dir.path()).await;
+    let (engine, gate, opens) = hooked_engine(dir.path(), hook).await;
     let downloads = dir.path().join("downloads");
     let id = add(&engine, &downloads, complete_torrent(dir.path()).await, paused).await.unwrap().id;
     wait_for(&engine, id, if paused { Status::Done { reached: None } } else { Status::Seeding }).await;
@@ -1563,7 +1576,13 @@ async fn another_file_that_shares_only_a_zero_piece_does_not_match() {
     tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
     assert_eq!(find(&engine, id).await.held, Some(proto::Held::DontMatch), "across a crash");
     assert_eq!((tree(&album), bytes_in(&album)), before);
-    // Resume is the way out, and the zero piece it matched is kept as good as any.
+    // Resume is the way out: after the crash it's checked first, nothing having read these files in
+    // this run, and stopped again; chosen again, the zero piece it matched is kept as good as any.
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    let t = find(&engine, id).await;
+    assert_eq!((t.status, t.held), (Status::Paused, Some(proto::Held::DontMatch)), "checked first");
+    assert_eq!((tree(&album), bytes_in(&album)), before);
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     until_held(&engine, id, None).await;
     wait_for(&engine, id, Status::Downloading).await;
@@ -1601,4 +1620,140 @@ async fn a_piece_across_files_and_the_short_last_piece_count_by_their_own_bytes(
     until_held(&engine, id, Some(proto::Held::DontMatch)).await;
     assert_eq!((tree(&album), bytes_in(&album)), before);
     engine.stop().await;
+}
+
+// The third review of #361: what "Files don't match" keeps across a restart or a refused Resume, and a
+// lift whose destination goes away.
+
+/// A torrent found with other bytes, its check over: "Files don't match", stopped.
+async fn found_not_matching() -> Found {
+    let f = found_and_held(false, other_bytes).await;
+    f.gate.hold(false);
+    until_held(&f.engine, f.id, Some(proto::Held::DontMatch)).await;
+    wait_for(&f.engine, f.id, Status::Paused).await;
+    f
+}
+
+/// Its files put right but one hard-linked, it's checked (Missing files, held, the pieces found
+/// saved); then a crash, and all three files replaced: the start takes nothing an earlier check saved
+/// for these files. Not lifted, not Done, nothing touched.
+#[tokio::test(flavor = "multi_thread")]
+async fn pieces_an_earlier_check_saved_are_not_taken_for_files_swapped_across_a_crash() {
+    let f = found_not_matching().await;
+    complete_torrent(&f.dir.path().join("again")).await;
+    for n in ["a.bin", "b.bin", "c.bin"] {
+        std::fs::copy(f.dir.path().join("again/downloads/pack").join(n), f.album.join(n)).unwrap();
+    }
+    let link = f.dir.path().join("linked");
+    std::fs::hard_link(f.album.join("c.bin"), &link).unwrap();
+    f.engine.command(f.id, TorrentCommand::Check).await.unwrap();
+    wait_for(&f.engine, f.id, Status::MissingFiles).await;
+    f.engine.kill().await;
+    std::fs::remove_file(&link).unwrap();
+    for n in ["a.bin", "b.bin", "c.bin"] {
+        swap(&f, n, &[7; 2 * PIECE]);
+    }
+    let before = (tree(&f.album), bytes_in(&f.album));
+    let e = engine(f.dir.path()).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let t = find(&e, f.id).await;
+    assert!(t.held.is_some(), "lifted on pieces no check found in these files: {:?}", t.status);
+    assert_eq!(t.content.map(|c| c.progress_bytes), Some(0), "none of them is the torrent's");
+    assert_eq!((tree(&f.album), bytes_in(&f.album)), before);
+    e.stop().await;
+}
+
+/// "Files don't match", then its files replaced while Phantom was closed: Resume after the start
+/// doesn't download over files no check read. They're checked first, and it's stopped again, for the
+/// person to choose again; that second Resume downloads over them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_after_a_restart_checks_first_and_downloads_over_nothing_it_did_not_read() {
+    let f = found_not_matching().await;
+    f.engine.stop().await;
+    for n in ["a.bin", "b.bin", "c.bin"] {
+        swap(&f, n, &[7; 2 * PIECE]);
+    }
+    let before = (tree(&f.album), bytes_in(&f.album));
+    let e = engine(f.dir.path()).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let t = find(&e, f.id).await;
+    assert_eq!((t.status, t.held), (Status::Paused, Some(proto::Held::DontMatch)), "as it was, nothing read");
+    e.command(f.id, TorrentCommand::Resume).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let t = find(&e, f.id).await;
+    assert_eq!((t.status, t.held), (Status::Paused, Some(proto::Held::DontMatch)), "checked, not downloaded over");
+    assert_eq!((tree(&f.album), bytes_in(&f.album)), before);
+    // Now of the files a check of this run read.
+    e.command(f.id, TorrentCommand::Resume).await.unwrap();
+    until_held(&e, f.id, None).await;
+    wait_for(&e, f.id, Status::Downloading).await;
+    e.stop().await;
+}
+
+/// "Download over them" refused, a file being longer than its own (Missing files): it isn't carried
+/// out later, unasked, on other files put there, in the same run or after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_resume_is_not_carried_out_later_on_other_files() {
+    for restart in [false, true] {
+        let f = found_not_matching().await;
+        append(&f);
+        let _ = f.engine.command(f.id, TorrentCommand::Resume).await;
+        wait_for(&f.engine, f.id, Status::MissingFiles).await;
+        let again;
+        let e = if restart {
+            f.engine.stop().await;
+            again = engine(f.dir.path()).await;
+            &again
+        } else {
+            &f.engine
+        };
+        for n in ["a.bin", "b.bin", "c.bin"] {
+            swap(&f, n, &[7; 2 * PIECE]);
+        }
+        let before = bytes_in(&f.album);
+        for _ in 0..60 {
+            assert!(find(e, f.id).await.held.is_some(), "restart {restart}: unheld, downloading over files nobody chose");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let t = find(e, f.id).await;
+        assert_eq!((t.status, t.held), (Status::Paused, Some(proto::Held::DontMatch)), "restart {restart}");
+        assert_eq!(bytes_in(&f.album), before, "restart {restart}");
+        e.stop().await;
+    }
+}
+
+/// The destination out of reach just as the hold is lifted (a drive unplugged): its storage would
+/// open nothing, so it isn't lifted. Back, with a longer file at one of its paths, that file isn't cut.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_destination_gone_as_the_hold_is_lifted_leaves_it_held() {
+    let dir_of = Arc::new(std::sync::Mutex::new(None::<(PathBuf, PathBuf)>));
+    let away_at = dir_of.clone();
+    let f = found_and_held_at(
+        false,
+        |_| {},
+        Arc::new(move |at| {
+            if at == super::super::files::At::Lifting
+                && let Some((from, to)) = away_at.lock().unwrap().take()
+            {
+                std::fs::rename(from, to).unwrap();
+            }
+        }),
+    )
+    .await;
+    let downloads = f.dir.path().join("downloads");
+    let away = f.dir.path().join("away");
+    *dir_of.lock().unwrap() = Some((downloads.clone(), away.clone()));
+    f.gate.hold(false);
+    until(&f.engine, f.id, |s| matches!(s, Status::DestinationUnavailable { .. } | Status::Error { .. })).await;
+    assert!(dir_of.lock().unwrap().is_none(), "it went as the hold was lifted");
+    assert!(find(&f.engine, f.id).await.held.is_some(), "lifted without the files being looked at");
+    // Back with another, longer file at c.bin.
+    std::fs::write(f.dir.path().join("mine"), vec![7u8; 2 * PIECE + 500]).unwrap();
+    std::fs::rename(f.dir.path().join("mine"), away.join("Album/c.bin")).unwrap();
+    std::fs::rename(&away, &downloads).unwrap();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let t = find(&f.engine, f.id).await;
+    assert_eq!(std::fs::metadata(f.album.join("c.bin")).unwrap().len(), 2 * PIECE as u64 + 500, "cut: {:?}", t.status);
+    assert!(t.held.is_some(), "lifted over a file that isn't its own: {:?}", t.status);
+    f.engine.stop().await;
 }

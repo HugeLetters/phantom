@@ -54,7 +54,7 @@ pub use lifecycle::disk::{Disk, Expected, Found, Gone, Stamp};
 
 #[cfg(test)]
 pub use super::trashed::At;
-use super::trashed::{Layout, Lift, Trashed};
+use super::trashed::{Layout, Touches, Trashed};
 
 /// Size-checks `files` now: each, and what's at its path.
 pub fn disk_of(files: &[Expected]) -> Disk {
@@ -294,15 +294,10 @@ impl Guard {
         Self { layout: Some((destination, Layout::new(folder, Some(normal)).one_file_as(one_file))), ..self.clone() }
     }
 
-    /// For an add of a torrent found where it is now and `held` while it's checked (#358): its
-    /// storage touches nothing there ([`Layout::held_as`]).
-    pub fn held(self, held: bool) -> Self {
-        Self { layout: self.layout.map(|(destination, layout)| (destination, layout.held_as(held))), ..self }
-    }
-
-    /// For an add that lifts a hold: its storage opens only what the check read ([`Lift`]).
-    pub fn lifting(self, lift: Option<Arc<Lift>>) -> Self {
-        Self { layout: self.layout.map(|(destination, layout)| (destination, layout.lifting(lift))), ..self }
+    /// For an add whose storage touches its files as `touches` says: nothing, of a torrent found where
+    /// it is now and held (#358), or only what its check read, as its hold is lifted.
+    pub fn touching(self, touches: Touches) -> Self {
+        Self { layout: self.layout.map(|(destination, layout)| (destination, layout.touching(touches))), ..self }
     }
 
     /// Whether librqbit's storage for the torrent touches nothing (`true`) or its files. The
@@ -334,6 +329,10 @@ impl StorageFactory for Guard {
         let hash = shared.info_hash.as_string();
         let untouched = self.untouched_of(&hash);
         if untouched.is_on() {
+            // A hold is lifted only by a storage that opens the files its check read (#358).
+            if self.layout.as_ref().is_some_and(|(_, layout)| layout.lifts()) {
+                bail!("its files are kept untouched: its hold isn't lifted");
+            }
             return Ok(Box::new(UnavailableStorage));
         }
         let storage = self.create_touching(&hash, shared, metadata)?;
@@ -359,7 +358,12 @@ impl Guard {
             self.unguarded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             return Ok(Box::new(FilesystemStorageFactory::default().create(shared, metadata)?));
         };
-        if unavailable(&destination).is_some() {
+        if let Some(reason) = unavailable(&destination) {
+            // Nor by one that opens nothing: added so, it would be saved unheld with nothing looked at,
+            // and be any torrent once the destination is back (#361's third review, 4).
+            if layout.lifts() {
+                bail!("its destination is out of reach ({reason:?}): its hold isn't lifted");
+            }
             return Ok(Box::new(UnavailableStorage));
         }
         // Held, or its hold lifted, it makes neither the destination nor anything through it: what it

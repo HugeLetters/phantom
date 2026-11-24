@@ -78,6 +78,9 @@ pub enum At {
     Lift,
     /// The same, its files looked at and those not there about to be made.
     Make,
+    /// A hold about to be lifted: its files looked at by path, the torrent out of librqbit, its
+    /// storage not made yet.
+    Lifting,
 }
 
 /// A test's hold on librqbit's storage: it returns once what's at `At` may go on.
@@ -100,15 +103,6 @@ struct Torrent {
     any: AtomicBool,
     /// The files each storage of it has open, for [`Trashed::gone`] and [`Trashed::let_go`].
     open: Mutex<Vec<Weak<Vec<Slot>>>>,
-    /// Each file, by index, as the last storage of it that was held opened it, before reading any
-    /// (#358): `None`: it wasn't there. In memory only: after a restart a held torrent is opened, and
-    /// its pieces checked, again.
-    checked: Mutex<Vec<Option<Seen>>>,
-    /// Each piece, by index, that a read of the last held storage's check found a non-zero byte in
-    /// (#358): a piece of zeros that matches proves nothing, the person's other file (a disk image, a
-    /// preallocated file) may share it. Computed from what's read, as each held check reads it, never
-    /// kept: a crash makes the next start check again, held, and read it again.
-    real: Mutex<Vec<bool>>,
 }
 
 /// A file as it is now: any other file, or this one changed (written, grown, stamped, renamed, linked),
@@ -129,14 +123,101 @@ impl Seen {
     }
 }
 
+/// One check in full of a held torrent (#358), by the one storage that reads for it: the only
+/// evidence there is of what's at its place, and so the only thing a hold is ever lifted on
+/// (`actor/held.rs` has the whole rule). It holds each file as that storage opened it, before
+/// reading any, and each piece it read a non-zero byte in. In memory only, and of that one storage:
+/// nothing of it is saved, another storage of the torrent (added again, at another place, after a
+/// restart) has another or none, and one opened twice proves nothing.
+#[derive(Debug, Default)]
+pub struct Check {
+    /// What the storage opened, once it did.
+    opened: std::sync::OnceLock<Opening>,
+    /// Each piece, by index, a read found a non-zero byte in: a piece of zeros that matches proves
+    /// nothing, the person's other file (a disk image, a preallocated file) may share it.
+    real: Mutex<Vec<bool>>,
+    /// Opened a second time: what was read is of two openings, and tells nothing of either.
+    spoiled: AtomicBool,
+}
+
+/// What a held storage opened: where, and each file by index (none: padding) at its path, as it was
+/// then (`None`: not there). Two are equal only of the same files at the same paths, none changed
+/// between: what the person's choice to download over them is of.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Opening {
+    destination: PathBuf,
+    files: Vec<Option<(PathBuf, Option<Seen>)>>,
+}
+
+impl Check {
+    /// A check about to be made: of the storage it's given to ([`Touches::Nothing`]).
+    pub fn new() -> Arc<Self> {
+        Arc::default()
+    }
+
+    /// Noted by its storage as it opened its files: once.
+    fn open(&self, opening: Opening, pieces: usize) {
+        *self.real.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = vec![false; pieces];
+        if self.opened.set(opening).is_err() {
+            self.spoiled.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// What its storage opened, if it tells anything: opened, and only once.
+    pub fn opening(&self) -> Option<&Opening> {
+        self.opened.get().filter(|_| !self.spoiled.load(Ordering::SeqCst))
+    }
+
+    /// Whether its storage read anything at all: one that never opened its files (the destination out
+    /// of reach, the torrent's files kept untouched) checked nothing.
+    pub fn read(&self) -> bool {
+        self.opening().is_some()
+    }
+
+    /// Whether any piece in `saved` (librqbit's bits of this check, [`super::bitv`]) is one it read a
+    /// non-zero byte in.
+    pub fn found_in(&self, saved: &[u8]) -> bool {
+        self.read() && super::bitv::any_in(saved, &self.real.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
 /// The files a held torrent's check read, for the storage that lifts its hold (#358) to write only into
-/// those, unchanged.
+/// those, unchanged. Made only of a [`Check`] whose files are, by path, still as it opened them
+/// ([`Trashed::as_checked`]).
 #[derive(Debug)]
 pub struct Lift {
-    checked: Vec<Option<Seen>>,
+    checked: Opening,
     /// Its files were opened, as they were checked: opened again (librqbit does, past an error), they're
     /// the torrent's as any.
     done: AtomicBool,
+}
+
+/// A hold's files were opened to write and found, through what was opened, to be those its check read,
+/// unchanged, each the torrent's own: the only thing a record is saved unheld for
+/// ([`Record::lift`](super::store::Record::lift)). Only [`Lift::opened`] makes one, of a lift whose
+/// storage did that.
+#[derive(Debug)]
+pub struct Lifted(());
+
+impl Lift {
+    /// The proof that its storage opened its files as they were checked, if it did.
+    pub fn opened(&self) -> Option<Lifted> {
+        self.done.load(Ordering::SeqCst).then_some(Lifted(()))
+    }
+}
+
+/// What a torrent's storage may do to its files.
+#[derive(Clone, Default)]
+pub enum Touches {
+    /// They're its own: made, written, set to their lengths.
+    #[default]
+    Its,
+    /// Nothing: it's held (#358). Each file is opened only to read, if it's there; none is made, set to
+    /// a length or removed, and a write fails. With a [`Check`], what it opens and reads is that
+    /// check's; with none it proves nothing, whatever is read.
+    Nothing(Option<Arc<Check>>),
+    /// Its hold lifted: only the files its check read, unchanged, are opened to write.
+    Lifted(Arc<Lift>),
 }
 
 /// A held torrent's files now, as against those its check read ([`Trashed::as_checked`]).
@@ -207,6 +288,14 @@ impl Trashed {
     }
 
     /// Where librqbit's storage holds now.
+    /// Runs a test's hook, at `at`.
+    #[cfg(test)]
+    pub fn at(&self, at: At) {
+        if let Some(hook) = &self.hook {
+            hook(at);
+        }
+    }
+
     #[cfg(test)]
     pub fn hook(&self) -> Option<Hook> {
         self.hook.clone()
@@ -538,14 +627,18 @@ impl Trashed {
     }
 
     /// The `files` (by index, with their paths, their own lengths, and whether the torrent gets them) of
-    /// torrent `info_hash`, held, in `destination`, now, as against those its check read. Looked at
+    /// torrent `info_hash`, held, in `destination`, now, as against those `check` read. Looked at
     /// by path: the storage lifting the hold looks again, at the files it opened to write.
-    pub fn as_checked(&self, info_hash: &str, destination: &Path, files: &[(usize, PathBuf, u64, bool)]) -> AsChecked {
+    pub fn as_checked(&self, info_hash: &str, check: &Check, destination: &Path, files: &[(usize, PathBuf, u64, bool)]) -> AsChecked {
         let torrent = self.torrent(info_hash);
-        let checked = torrent.checked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        // Nothing opened, or at another place: the check says nothing of these.
+        let Some(checked) = check.opening().filter(|o| o.destination == destination) else { return AsChecked::Changed };
         let mut changed = false;
         for (index, path, len, normal) in files {
-            let was = checked.get(*index).copied().flatten();
+            let was = match checked.files.get(*index) {
+                Some(Some((at, was))) if at == path => *was,
+                _ => return AsChecked::Changed,
+            };
             let there = std::fs::symlink_metadata(path).is_ok();
             let reached = path.strip_prefix(destination).ok().and_then(|inside| super::moving::reached(destination, inside));
             let trashed = torrent.lock().away.contains_key(path);
@@ -560,13 +653,8 @@ impl Trashed {
         }
         match changed {
             true => AsChecked::Changed,
-            false => AsChecked::Same(Arc::new(Lift { checked, done: AtomicBool::new(false) })),
+            false => AsChecked::Same(Arc::new(Lift { checked: checked.clone(), done: AtomicBool::new(false) })),
         }
-    }
-
-    /// The pieces, by index, the last held check of torrent `info_hash` read a non-zero byte in.
-    pub fn real_pieces(&self, info_hash: &str) -> Vec<bool> {
-        self.torrent(info_hash).real.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// librqbit's storage of torrent `info_hash`'s files, laid out as `layout`, in `destination`.
@@ -687,34 +775,52 @@ pub struct Layout {
     normal: Option<Arc<BTreeSet<usize>>>,
     /// The name of a torrent of one file's file, renamed (#331): librqbit names it as its info does.
     one_file: Option<PathBuf>,
-    /// Found where it is now and held while it's checked (#358): nothing is made, written, set to a
-    /// length or removed, and each file is opened only to read, if it's there.
-    held: bool,
-    /// Its hold lifted: only the files its check read, unchanged, are opened to write.
-    lift: Option<Arc<Lift>>,
+    /// What its storage may do to its files: nothing while it's held (#358).
+    touches: Touches,
 }
 
 impl Layout {
     pub fn new(folder: PathBuf, normal: Option<&[usize]>) -> Self {
-        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), one_file: None, held: false, lift: None }
+        Self { folder, normal: normal.map(|n| Arc::new(n.iter().copied().collect())), one_file: None, touches: Touches::Its }
     }
 
-    /// Touching nothing, if it's `held` (#358): its files are only read where they are.
-    pub fn held_as(mut self, held: bool) -> Self {
-        self.held = held;
-        self
-    }
-
-    /// Its hold lifted: opening only what its check read.
-    pub fn lifting(mut self, lift: Option<Arc<Lift>>) -> Self {
-        self.lift = lift;
+    /// Its storage touching its files as `touches` says.
+    pub fn touching(mut self, touches: Touches) -> Self {
+        self.touches = touches;
         self
     }
 
     /// Whether its storage never makes the destination again as it opens its files: what's empty there
     /// is the person's, never to be taken out.
     pub fn careful(&self) -> bool {
-        self.held || self.lift.is_some()
+        !matches!(self.touches, Touches::Its)
+    }
+
+    /// Whether its storage lifts a hold, which it does only by opening the files its check read: it's
+    /// never given one that opens nothing.
+    pub fn lifts(&self) -> bool {
+        matches!(self.touches, Touches::Lifted(_))
+    }
+
+    /// Whether it's held: its storage touches nothing.
+    fn held(&self) -> bool {
+        matches!(self.touches, Touches::Nothing(_))
+    }
+
+    /// The hold it lifts, if any.
+    fn lift(&self) -> Option<&Arc<Lift>> {
+        match &self.touches {
+            Touches::Lifted(lift) => Some(lift),
+            Touches::Its | Touches::Nothing(_) => None,
+        }
+    }
+
+    /// The check its storage reads for, if any.
+    fn check(&self) -> Option<&Arc<Check>> {
+        match &self.touches {
+            Touches::Nothing(check) => check.as_ref(),
+            Touches::Its | Touches::Lifted(_) => None,
+        }
     }
 
     /// Its one file under `name` in its folder, whatever librqbit calls it: a torrent of one file
@@ -741,11 +847,11 @@ impl Layout {
 /// only sets the length of the files it gets), with the folders to it, but never the destination.
 /// Nothing is ever removed but what librqbit asks.
 ///
-/// Held (#358, [`Layout::held_as`]), it touches nothing: each file is opened only to read, if it's
+/// Held (#358, [`Touches::Nothing`]), it touches nothing: each file is opened only to read, if it's
 /// there; none is made, nor the folders to it; no length is set, and a write or a removal fails.
 /// librqbit's check then reads what's there, a file that isn't there having none of its pieces.
 ///
-/// Its hold lifted ([`Layout::lifting`]), the files are opened again, to write now, and each is looked
+/// Its hold lifted ([`Touches::Lifted`]), the files are opened again, to write now, and each is looked
 /// at through what was opened (`fstat`), before any is made, written or set to a length: it must be the
 /// file the check read, unchanged since (volume, inode, length, modification and change times), and
 /// still the torrent's to write ([`its_own`], reached through real folders), or the add fails and
@@ -770,8 +876,8 @@ pub(super) struct Files {
     parts: Option<PathBuf>,
     /// [`Trashed::parts_folders`].
     parts_folders: Arc<Mutex<()>>,
-    /// Where each file starts in the torrent and how long a piece is, while held: what tells the
-    /// pieces a read is in.
+    /// Where each file starts in the torrent and how long a piece is, while it reads for a [`Check`]:
+    /// what tells the pieces a read is in.
     layout_of_pieces: Option<(Vec<u64>, u64)>,
     #[cfg(test)]
     hook: Option<Hook>,
@@ -879,12 +985,12 @@ impl Files {
         }
     }
 
-    /// While held, notes the pieces `buf`, read from file `file` at `offset`, has a non-zero byte in.
+    /// Reading for a check, notes the pieces `buf`, read from file `file` at `offset`, has a non-zero byte in.
     fn note_real(&self, file: usize, offset: u64, buf: &[u8]) {
-        let Some((starts, piece)) = &self.layout_of_pieces else { return };
+        let (Some((starts, piece)), Some(check)) = (&self.layout_of_pieces, self.layout.check()) else { return };
         let Some(start) = starts.get(file) else { return };
         let at = start + offset;
-        let mut real = self.torrent.real.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut real = check.real.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut done = 0usize;
         while done < buf.len() {
             let piece_at = (at + done as u64) / piece;
@@ -901,7 +1007,7 @@ impl Files {
     /// Writes `bufs`, one after another, at `offset` into file `index`, made first if it isn't
     /// there; aside if it's in the Trash. Where it is is looked at once.
     fn write(&self, index: usize, offset: u64, bufs: &[&[u8]]) -> Result<()> {
-        if self.layout.held {
+        if self.layout.held() {
             bail!("file {index} is held: nothing is written into it until its check found its pieces");
         }
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -976,7 +1082,7 @@ impl Files {
     /// to read only while it's held.
     fn open_trashed(&self, index: usize, path: &Path) -> Opened {
         let Some(to) = self.torrent.in_trash(path) else { return Opened::NotThere };
-        let opened = match self.layout.held {
+        let opened = match self.layout.held() {
             true => to.parent().map_or_else(|| open(&to, false), |folder| open_inside(folder, &to, Access::Read)),
             false => open(&to, false),
         };
@@ -1010,13 +1116,19 @@ impl Files {
     /// The files (by index, each with its path and length; none for padding) as the hold of the torrent
     /// is lifted: each opened to write and looked at first, then those not there made.
     fn open_lifted(&self, lift: &Lift, files: &[Option<(PathBuf, u64)>]) -> Result<Vec<Opened>> {
+        // The check read these files, at this place: at another, it read none of them.
+        let at: Vec<Option<&PathBuf>> = files.iter().map(|f| f.as_ref().map(|(path, _)| path)).collect();
+        let checked: Vec<Option<&PathBuf>> = lift.checked.files.iter().map(|f| f.as_ref().map(|(path, _)| path)).collect();
+        if lift.checked.destination != self.destination || at != checked {
+            bail!("{:?} isn't where its files were checked", self.destination);
+        }
         let mut opened = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let Some((path, len)) = file else {
                 opened.push(Opened::NotThere);
                 continue;
             };
-            let was = lift.checked.get(index).copied().flatten();
+            let was = lift.checked.files.get(index).and_then(|f| f.as_ref()).and_then(|(_, was)| *was);
             opened.push(match open_inside(&self.destination, path, Access::Write) {
                 Ok(file) => {
                     let m = file.metadata().with_context(|| format!("looking at {path:?}"))?;
@@ -1291,12 +1403,12 @@ impl TorrentStorage for Files {
         }
         #[cfg(test)]
         self.at(At::Init);
-        if let Some(lift) = self.layout.lift.as_ref().filter(|l| !l.done.load(Ordering::SeqCst)) {
+        if let Some(lift) = self.layout.lift().cloned().filter(|l| !l.done.load(Ordering::SeqCst)) {
             let files = metadata.file_infos.iter();
             let paths: Vec<_> = files.map(|i| (!i.attrs.padding).then(|| (self.layout.at(&i.relative_filename), i.len))).collect();
             #[cfg(test)]
             self.at(At::Lift);
-            let opened = self.open_lifted(lift, &paths)?;
+            let opened = self.open_lifted(&lift, &paths)?;
             let slots = opened.into_iter().zip(paths);
             self.files = Arc::new(slots.map(|(file, at)| Slot { path: at.map(|(path, _)| path), file: RwLock::new(file) }).collect());
             self.torrent.opened(&self.files);
@@ -1311,9 +1423,9 @@ impl TorrentStorage for Files {
                 continue;
             }
             let path = self.layout.at(&info.relative_filename);
-            let file = if self.layout.held {
+            let file = if self.layout.held() {
                 let (file, seen) = self.open_held(index, &path)?;
-                checked[index] = seen;
+                checked[index] = Some((path.clone(), seen));
                 file
             } else if self.layout.is_off(index) {
                 self.open_off(index, &path)?
@@ -1330,11 +1442,10 @@ impl TorrentStorage for Files {
             files.push(Slot { path: Some(path), file: RwLock::new(file) });
         }
         self.files = Arc::new(files);
-        if self.layout.held {
-            *self.torrent.checked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = checked;
+        if let Some(check) = self.layout.check() {
             let lengths = metadata.lengths();
             let piece = u64::from(lengths.default_piece_length()).max(1);
-            *self.torrent.real.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = vec![false; lengths.total_pieces() as usize];
+            check.open(Opening { destination: self.destination.clone(), files: checked }, lengths.total_pieces() as usize);
             self.layout_of_pieces = Some((metadata.file_infos.iter().map(|i| i.offset_in_torrent).collect(), piece));
         }
         self.torrent.opened(&self.files);
@@ -1358,7 +1469,7 @@ impl TorrentStorage for Files {
     }
 
     fn remove_file(&self, index: usize, path: &Path) -> Result<()> {
-        if self.layout.held {
+        if self.layout.held() {
             bail!("file {index} is held: nothing of it is removed");
         }
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1368,7 +1479,7 @@ impl TorrentStorage for Files {
     }
 
     fn remove_directory_if_empty(&self, path: &Path) -> Result<()> {
-        if self.layout.held {
+        if self.layout.held() {
             return Ok(());
         }
         let path = self.layout.folder.join(path);
@@ -1384,7 +1495,7 @@ impl TorrentStorage for Files {
     fn ensure_file_length(&self, file: usize, len: u64) -> Result<()> {
         // Held: as its check ends, librqbit sets each file to its length, which would grow a short
         // one and stamp each with a new time. Set once the hold is lifted, as it's added again.
-        if self.layout.held {
+        if self.layout.held() {
             return Ok(());
         }
         // librqbit asks for the files it gets only. A file set Off but held, until a check applies it,
@@ -1405,7 +1516,7 @@ impl TorrentStorage for Files {
                     #[cfg(test)]
                     self.at(At::Length);
                     // Lifted, never cut short: what's past its own length came since it was checked.
-                    if self.layout.lift.is_some() {
+                    if self.layout.lifts() {
                         match f.metadata()?.len() {
                             now if now > len => bail!("file {file} got longer than its own"),
                             now if now == len => return Ok(()),
