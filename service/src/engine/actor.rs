@@ -942,6 +942,16 @@ impl Actor {
             let wants_changed = next.wants != torrent.lifecycle.wants;
             torrent.meter.wants_changed(torrent.lifecycle.wants, next.wants);
             torrent.lifecycle = next;
+            // Partly deleted or its destination gone, it isn't Missing files any more: a file it was
+            // missing has none of it counted, whatever was said of it last (saved as the service
+            // stopped, say) (#290, #366).
+            if matches!(torrent.lifecycle.phase, Phase::DeleteFailed { .. } | Phase::DestinationUnavailable { .. }) {
+                for i in missing(&before) {
+                    if let Some(p) = torrent.polled.file_progress.get_mut(i) {
+                        *p = 0;
+                    }
+                }
+            }
             // What Delete left is kept across restarts, and librqbit's storage for it touches
             // nothing meanwhile: restoring it would make the trashed files again, empty. What a
             // Delete under way is about to trash is saved by `delete`, and forgotten once it's over.
@@ -1263,7 +1273,12 @@ impl Actor {
         if torrent.lib.torrent().is_some_and(|h| matches!(h.stats().state, TorrentStatsState::Initializing { .. })) {
             return None;
         }
-        Some(Observation::Files(files::disk_of(&expected(torrent))))
+        let disk = files::disk_of(&expected(torrent));
+        // Gone while its files were looked at, every one seemed missing: it's the destination that is.
+        if let Some(reason) = files::unavailable(&torrent.record.destination) {
+            return Some(Observation::DestinationGone { reason });
+        }
+        Some(Observation::Files(disk))
     }
 
     /// A command that isn't a step, on its torrent's lane.
@@ -1328,7 +1343,7 @@ impl Actor {
         let partly_deleted = matches!(torrent.lifecycle.phase, Phase::DeleteFailed { .. });
         let polled = Polled::of(&stats, &torrent.polled);
         // Partly deleted, librqbit still holds the stopped torrent and says it has a file that was
-        // missing as the Delete began: what it said of each file stands as `trashed` left it, none
+        // missing as the Delete began: what it said of each file stands as `event` left it, none
         // of a file whose bytes can't be read (#290, #297).
         torrent.polled = match partly_deleted {
             true => Polled { file_progress: std::mem::take(&mut torrent.polled.file_progress), ..polled },
@@ -1549,18 +1564,7 @@ impl Actor {
             .into_iter()
             .map(|(path, why)| Kept { path: AbsolutePath::new(path).expect("librqbit's paths are absolute"), why })
             .collect();
-        let gone = self.torrents.get(&id).map(|t| missing(&t.lifecycle.phase)).unwrap_or_default();
-        let observed = self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await;
-        // Partly deleted, it isn't Missing files any more: a file it was missing has none of it
-        // counted, whatever was said of it last (saved as the service stopped, say) (#290).
-        if let Some(t) = self.torrents.get_mut(&id).filter(|t| matches!(t.lifecycle.phase, Phase::DeleteFailed { .. })) {
-            for i in gone {
-                if let Some(p) = t.polled.file_progress.get_mut(i) {
-                    *p = 0;
-                }
-            }
-        }
-        let (ended, answer) = match observed {
+        let (ended, answer) = match self.event(id, Event::Observed(Observation::Trashed { kept: kept.clone(), moved })).await {
             Err(e) => (self.end(seq, id, steps::Over::Failed), Err(e)),
             // Its step ends there, written ahead of its record going.
             Ok(()) => {

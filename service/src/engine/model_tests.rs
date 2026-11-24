@@ -1326,12 +1326,14 @@ impl Model {
     }
 
     /// With its destination unavailable, it's stopped in librqbit, remembering whether it was running; its missing files are
-    /// forgotten, as they're out of reach.
+    /// forgotten, as they're out of reach, and none of them is counted, as before it went (#366).
     fn destination_gone(&mut self, pack: usize) {
         self.unavailable[pack] = true;
         if let Some(p) = self.pack_torrent(pack) {
             p.unavailable = true;
-            p.missing.clear();
+            for f in std::mem::take(&mut p.missing).into_keys() {
+                p.have[f] = false;
+            }
             p.unchecked = false;
         }
     }
@@ -3708,4 +3710,24 @@ fn the_undo_of_a_move_to_trash_of_a_file_replaced_by_hand_checks_what_is_put_bac
     use Step::*;
     replay(&[Add { pack: Some(1), paused: false }, PutBack { pack: 1, file: 0 }, TrashFiles { id: 0, files: vec![0] }, Undo]);
     replay(&[Add { pack: Some(1), paused: false }, Overwrite { pack: 1, file: 0 }, TrashFiles { id: 0, files: vec![0] }, Undo]);
+}
+
+/// #366, found by a 256-case run: a file deleted by hand, a restart, then the destination gone. The
+/// deleted file's bytes can't be read: none of it is counted once it's Destination unavailable, as
+/// none was while it was Missing files.
+#[test]
+fn a_file_deleted_by_hand_isnt_counted_once_its_destination_is_gone_after_a_restart() {
+    use Step::*;
+    for (pack, paused) in [(0, false), (1, true)] {
+        replay(&[Add { pack: Some(pack), paused }, DeleteFile { pack, file: 0 }, Restart, DestinationGone { pack }]);
+    }
+}
+
+/// #366, the same without the restart: the deleted file counted again, as librqbit last said it had it.
+#[test]
+fn a_file_deleted_by_hand_isnt_counted_once_its_destination_is_gone() {
+    use Step::*;
+    for (pack, paused) in [(0, false), (1, true)] {
+        replay(&[Add { pack: Some(pack), paused }, DeleteFile { pack, file: 0 }, DestinationGone { pack }]);
+    }
 }
