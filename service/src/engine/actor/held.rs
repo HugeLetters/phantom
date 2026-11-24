@@ -185,9 +185,11 @@ impl Actor {
             Err(e) => {
                 warn!(id, error = ?e, "couldn't add a found torrent back to lift its hold");
                 torrent.record.held = held;
-                // As they were checked, it's an error as any add's; else checked again, held.
-                if !matches!(self.as_checked(id), AsChecked::Same(_)) {
-                    self.check_held_again(id).await;
+                // As they were checked, it's an error as any add's.
+                match self.as_checked(id) {
+                    AsChecked::Same(_) => {}
+                    AsChecked::Changed => self.check_held_again(id).await,
+                    AsChecked::NotIts => self.not_its(id).await,
                 }
             }
         }

@@ -1015,42 +1015,32 @@ async fn a_file_that_is_not_its_own_once_checked_is_missing_files_untouched() {
     }
 }
 
-/// Another file of c.bin's length put in its place, or its bytes changed in place, while it's checked:
-/// checked again, so nothing that isn't the torrent's is taken for its pieces.
+/// Another file of c.bin's length put in its place while it's checked: checked again, so nothing that
+/// isn't the torrent's is taken for its pieces.
 #[tokio::test(flavor = "multi_thread")]
-async fn files_changed_while_checked_are_checked_again() {
-    for swapped in [false, true] {
-        let f = found_and_held(false, |_| {}).await;
-        match swapped {
-            true => swap(&f, "c.bin", &[7; 2 * PIECE]),
-            false => {
-                let c = std::fs::OpenOptions::new().write(true).open(f.album.join("c.bin")).unwrap();
-                std::os::unix::fs::FileExt::write_all_at(&c, &[7; 2 * PIECE], 0).unwrap();
-                // As a copy that keeps its times does: only its change time tells.
-                let at = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-                c.set_modified(at).unwrap();
-            }
-        }
-        f.gate.hold(false);
-        wait_for(&f.engine, f.id, Status::Downloading).await;
-        until_held(&f.engine, f.id, None).await;
-        assert_eq!(find(&f.engine, f.id).await.content.unwrap().progress_bytes, 2 * FULL, "swapped {swapped}: none of c.bin");
-        f.engine.stop().await;
-    }
+async fn a_file_swapped_while_checked_is_checked_again() {
+    let f = found_and_held(false, |_| {}).await;
+    swap(&f, "c.bin", &[7; 2 * PIECE]);
+    f.gate.hold(false);
+    wait_for(&f.engine, f.id, Status::Downloading).await;
+    until_held(&f.engine, f.id, None).await;
+    assert_eq!(find(&f.engine, f.id).await.content.unwrap().progress_bytes, 2 * FULL, "none of c.bin");
+    f.engine.stop().await;
 }
 
 /// Changed as its files are opened to write, after the look before: the add fails, and it's checked
 /// again, held, as it finds them. Nothing of the person's is cut.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_changed_as_the_hold_is_lifted_is_left_as_it_is() {
-    for how in ["longer", "same", "linked", "gone", "link", "there"] {
+    for how in ["longer", "same", "linked", "gone", "link", "there", "there as made"] {
         let dir = temp();
         let downloads = dir.path().join("downloads");
         let album = downloads.join("Album");
         let once = std::sync::atomic::AtomicBool::new(false);
         let (folder, root) = (album.clone(), dir.path().to_owned());
         let guard = super::super::files::Guard::default().with_hook(Arc::new(move |at| {
-            if at != super::super::files::At::Lift || once.swap(true, Ordering::SeqCst) {
+            let when = if how == "there as made" { super::super::files::At::Make } else { super::super::files::At::Lift };
+            if at != when || once.swap(true, Ordering::SeqCst) {
                 return;
             }
             let (c, other) = (folder.join("c.bin"), root.join("other"));
@@ -1061,7 +1051,7 @@ async fn a_file_changed_as_the_hold_is_lifted_is_left_as_it_is() {
                 }
                 "linked" => std::fs::hard_link(&c, &other).unwrap(),
                 "gone" => std::fs::rename(&c, &other).unwrap(),
-                "there" => std::fs::write(&c, [7; 10]).unwrap(),
+                "there" | "there as made" => std::fs::write(&c, [7; 10]).unwrap(),
                 _ => {
                     std::fs::rename(&c, &other).unwrap();
                     std::os::unix::fs::symlink(&other, &c).unwrap();
@@ -1072,12 +1062,18 @@ async fn a_file_changed_as_the_hold_is_lifted_is_left_as_it_is() {
         let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
         wait_for(&engine, id, Status::Seeding).await;
         std::fs::rename(downloads.join("pack"), &album).unwrap();
-        if how == "there" {
+        if how.starts_with("there") {
             std::fs::remove_file(album.join("c.bin")).unwrap();
         }
         wait_for(&engine, id, Status::MissingFiles).await;
         engine.command(id, rename("Album")).await.unwrap();
         match how {
+            "gone" => {
+                wait_for(&engine, id, Status::MissingFiles).await;
+                tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+                assert_eq!(find(&engine, id).await.held, Some(proto::Held::Checking), "{how}");
+                assert!(!album.join("c.bin").exists(), "{how}: not made again");
+            }
             "longer" | "linked" | "link" => {
                 wait_for(&engine, id, Status::MissingFiles).await;
                 assert_eq!(find(&engine, id).await.held, Some(proto::Held::Checking), "{how}");
@@ -1090,6 +1086,11 @@ async fn a_file_changed_as_the_hold_is_lifted_is_left_as_it_is() {
                 wait_for(&engine, id, Status::Downloading).await;
                 until_held(&engine, id, None).await;
                 assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 2 * FULL, "{how}");
+                // One put there is checked before anything is made of it: added once more than else.
+                if how == "there as made" {
+                    let added = engine.inspect(move |a| a.torrents[&id].added).await;
+                    assert!(added >= 3, "{how}: held again, then lifted: {added}");
+                }
             }
         }
         engine.stop().await;
@@ -1355,4 +1356,92 @@ async fn a_file_trashed_while_held_is_read_where_it_went_after_a_restart() {
     assert_eq!(find(&engine, f.id).await.content.unwrap().progress_bytes, 3 * FULL);
     assert_eq!(bytes_in(&f.album), f.before.1);
     engine.stop().await;
+}
+
+/// Bytes appended once the lift looked at the file, before librqbit sets its length: never cut off.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_grown_as_its_length_is_set_is_not_cut() {
+    let dir = temp();
+    let downloads = dir.path().join("downloads");
+    let album = downloads.join("Album");
+    let lifting = std::sync::atomic::AtomicBool::new(false);
+    let c = album.join("c.bin");
+    let guard = super::super::files::Guard::default().with_hook(Arc::new(move |at| match at {
+        super::super::files::At::Lift => lifting.store(true, Ordering::SeqCst),
+        super::super::files::At::Change if lifting.swap(false, Ordering::SeqCst) => {
+            let mut c = std::fs::OpenOptions::new().append(true).open(&c).unwrap();
+            std::io::Write::write_all(&mut c, &[7; 500]).unwrap();
+        }
+        _ => {}
+    }));
+    let engine = super::letgo::engine_guarded(dir.path(), guard, Default::default()).await;
+    let id = add(&engine, &downloads, complete_torrent(dir.path()).await, true).await.unwrap().id;
+    wait_for(&engine, id, Status::Done { reached: None }).await;
+    std::fs::rename(downloads.join("pack"), &album).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    engine.command(id, rename("Album")).await.unwrap();
+    until_held(&engine, id, None).await;
+    wait_for(&engine, id, Status::MissingFiles).await;
+    assert_eq!(std::fs::metadata(album.join("c.bin")).unwrap().len(), 2 * PIECE as u64 + 500);
+    engine.stop().await;
+}
+
+/// Its check over and not judged yet (a Move to Trash runs on it), c.bin's bytes change: in place, its
+/// modification time put back, so only its change time tells; or, across a crash, as another file. The
+/// pieces found aren't taken for those bytes: it's checked again.
+#[tokio::test(flavor = "multi_thread")]
+async fn pieces_found_are_not_taken_for_bytes_changed_before_the_hold_is_judged() {
+    for crash in [false, true] {
+        let dir = temp();
+        let downloads = dir.path().join("downloads");
+        let gate = Arc::new(super::super::files::Gate::default());
+        let _opens = Opens(gate.clone());
+        let trash: super::super::trash::Gate = Default::default();
+        let opens_trash = OpensTrash(trash.clone());
+        let guard = super::super::files::Guard::default().with_gate(super::super::files::At::Read, gate.clone());
+        let engine_then = super::letgo::engine_guarded(dir.path(), guard, trash.clone()).await;
+        let id = add(&engine_then, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine_then, id, Status::Seeding).await;
+        let hash = find(&engine_then, id).await.info_hash;
+        let a = file_index(&engine_then, id, "a.bin").await;
+        std::fs::rename(downloads.join("pack"), downloads.join("Album")).unwrap();
+        wait_for(&engine_then, id, Status::MissingFiles).await;
+        gate.hold(true);
+        engine_then.command(id, rename("Album")).await.unwrap();
+        until(&engine_then, id, |s| matches!(s, Status::Checking)).await;
+        super::super::trash::hold(&trash, true);
+        let _trashing = engine_then.sent(id, TorrentCommand::TrashFiles { files: vec![a] }).await;
+        held_at_the_gate(&trash).await;
+        gate.hold(false);
+        for _ in 0..500 {
+            if super::letgo::saved_pieces(dir.path(), &hash) > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(super::letgo::saved_pieces(dir.path(), &hash) > 0, "its check is over, and saved");
+        let c = downloads.join("Album/c.bin");
+        let engine = match crash {
+            true => {
+                engine_then.kill().await;
+                drop(opens_trash);
+                std::fs::write(dir.path().join("mine"), vec![7; 2 * PIECE]).unwrap();
+                std::fs::rename(dir.path().join("mine"), &c).unwrap();
+                engine(dir.path()).await
+            }
+            false => {
+                let file = std::fs::OpenOptions::new().write(true).open(&c).unwrap();
+                let was = file.metadata().unwrap().modified().unwrap();
+                std::os::unix::fs::FileExt::write_all_at(&file, &[7; 2 * PIECE], 0).unwrap();
+                file.set_modified(was).unwrap();
+                super::super::trash::hold(&trash, false);
+                engine_then
+            }
+        };
+        until_held(&engine, id, None).await;
+        wait_for(&engine, id, Status::Downloading).await;
+        let c = file_index(&engine, id, "c.bin").await;
+        assert_eq!(engine.details(id).await.unwrap().files[c].progress_bytes, 0, "none of it is the torrent's");
+        engine.stop().await;
+    }
 }

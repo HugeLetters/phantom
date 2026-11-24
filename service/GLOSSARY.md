@@ -54,7 +54,8 @@ only the phase and is never refused.
 **Hold**:
 Why a found torrent is held, in its record: checking, or its files don't match. Saved with the
 destination it's found at; while there is one, librqbit's storage of the torrent only reads, and the
-torrent is never started.
+torrent is never started. It's saved as over only once the files opened to write were found to be
+the ones the check read.
 _Avoid_: lock
 
 **Size check**:

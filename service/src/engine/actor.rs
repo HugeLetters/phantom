@@ -368,8 +368,6 @@ impl Actor {
                 Some(reason) => Phase::DestinationUnavailable { reason },
                 // Whatever files went meanwhile: only a check says.
                 None if unchecked => Phase::Unchecked { gone: BTreeMap::new() },
-                // Found and held while it was checked (#358): checked again, held, whatever's there.
-                None if record.held == Some(proto::Held::Checking) => Phase::CheckDue { returning: BTreeMap::new() },
                 None if gone.is_empty() => Phase::Ready,
                 None => Phase::MissingFiles { gone },
             };
@@ -1074,7 +1072,8 @@ impl Actor {
         let saved = bitv::path(&self.session_folder(), &record.info_hash);
         // Held for its check (#358): what librqbit saved is of files as another storage read them, so
         // it isn't taken for a check of those opened now.
-        let checks = checks || record.held == Some(proto::Held::Checking);
+        let held = record.held == Some(proto::Held::Checking);
+        let checks = checks || held;
         if checks {
             bitv::forget(&saved);
         }
@@ -1113,7 +1112,9 @@ impl Actor {
                 // Added again, it checks; with nothing saved, its lifecycle hears librqbit check it at
                 // the next poll.
                 if checks {
-                    torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::AddedAgain)).expect("never refused");
+                    // One that was to come back with what it had is checked all the same.
+                    let seen = if held { Observation::Checking } else { Observation::AddedAgain };
+                    torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(seen)).expect("never refused");
                 }
                 Ok(())
             }

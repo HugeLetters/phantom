@@ -76,6 +76,8 @@ pub enum At {
     Init,
     /// A storage whose hold is lifted, its files about to be opened to write.
     Lift,
+    /// The same, its files looked at and those not there about to be made.
+    Make,
 }
 
 /// A test's hold on librqbit's storage: it returns once what's at `At` may go on.
@@ -698,8 +700,8 @@ impl Layout {
         self
     }
 
-    /// Whether its storage, as it opens its files, makes none of the person's nor the destination: none
-    /// is to be taken out again.
+    /// Whether its storage never makes the destination again as it opens its files: what's empty there
+    /// is the person's, never to be taken out.
     pub fn careful(&self) -> bool {
         self.held || self.lift.is_some()
     }
@@ -959,6 +961,8 @@ impl Files {
                 Err(e) => return Err(e).with_context(|| format!("opening {path:?}")),
             });
         }
+        #[cfg(test)]
+        self.at(At::Make);
         for (index, (opened, file)) in opened.iter_mut().zip(files).enumerate() {
             if let (Opened::NotThere, Some((path, _)), false) = (&*opened, file, self.layout.is_off(index)) {
                 let made = open_inside(&self.destination, path, Access::Make).with_context(|| format!("making {path:?}"))?;

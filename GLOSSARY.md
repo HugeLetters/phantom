@@ -273,10 +273,15 @@ _Avoid_: locate, relink, reconcile (in what people see)
 **Held**:
 A found torrent while it's checked where it was found (#358): it doesn't run, and nothing there
 changes (no file or folder made, written, grown or given a new time; a file that isn't there has
-none of its pieces). Any of its pieces found there ends the hold: each file it gets is then made or
-set to its length, and it's running or stopped as before. None found, it's stopped (Missing files
+none of its pieces). Any of its pieces found there (in a file set Off too) ends the hold, if its
+files are still the ones checked, unchanged, and each its own to write (a file, reached through no
+link, no longer than its own, with no other hard link): each file it gets is then made or
+set to its length, and it's running or stopped as before. Changed since, they're checked again
+(Unchecked after three times in a row); one gone, or not its own to write, it's Missing files,
+nothing made or cut, and still held. No piece found, it's stopped (Missing files
 if one it gets isn't there) and still held: **Files don't match**, a warning. Then Resume, the
-person's choice, ends the hold and downloads over them; a Check that finds its pieces ends it too.
+person's choice, ends the hold by the same rule and downloads over them; a Check that finds its
+pieces ends it too. A file set Off that isn't its own to write keeps it stopped the same way.
 Nothing else does: a Resume during the check waits for it, a cancelled check, a restart or a crash
 leaves it held. A Move or a Rename of it takes its hold along; a Delete moves what's at its files'
 paths to the Trash, as ever; the undo of a Remove or a Delete brings it back held.
