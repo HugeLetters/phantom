@@ -2099,9 +2099,8 @@ fn a_click_on_a_files_priority_with_no_pane_open_while_an_add_is_on_its_way_leav
 /// no list) nowhere (#364).
 #[test]
 fn a_removed_torrent_leaves_the_focus_on_the_list_if_one_is_left() {
-    let focused = |rt: &Runtime<Phantom>| -> Vec<String> {
-        rt.elements().into_iter().filter(|e| e.focused && !e.exiting).map(|e| e.path).collect()
-    };
+    let focused =
+        |rt: &Runtime<Phantom>| -> Vec<String> { rt.elements().into_iter().filter(|e| e.focused && !e.exiting).map(|e| e.path).collect() };
     let mut rt = app(with_an_album());
     tap(&mut rt, "rows/1");
     settle(&mut rt);
