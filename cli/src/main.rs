@@ -385,7 +385,7 @@ fn moves(client: &mut Client, ids: &[TorrentId], to: proto::AbsolutePath, choice
 }
 
 /// Each torrent of `found` a Move or a Rename found where it is now (#358), where that is and how
-/// its check there went: once none is held for it any more.
+/// its check there went: once each is over, or can't go on by itself.
 fn print_found(client: &mut Client, found: &[TorrentId]) -> Result<()> {
     if found.is_empty() {
         return Ok(());
@@ -393,7 +393,7 @@ fn print_found(client: &mut Client, found: &[TorrentId]) -> Result<()> {
     let mut snapshots = client.snapshots()?;
     let torrents = loop {
         let torrents: Vec<proto::TorrentInfo> = snapshots.receive()?.torrents.into_iter().filter(|t| found.contains(&t.id)).collect();
-        if !torrents.iter().any(|t| t.held == Some(proto::Held::Checking)) {
+        if !torrents.iter().any(being_checked) {
             break torrents;
         }
     };
@@ -403,6 +403,14 @@ fn print_found(client: &mut Client, found: &[TorrentId]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the check of a found torrent goes on: not one cancelled, or whose files can't be read,
+/// which is held till it's checked again.
+fn being_checked(t: &proto::TorrentInfo) -> bool {
+    use proto::Status as S;
+    let ended = matches!(t.status, S::Unchecked | S::MissingFiles | S::DestinationUnavailable { .. } | S::Error { .. });
+    t.held == Some(proto::Held::Checking) && !ended
 }
 
 /// The CLI's own fix for a refusal, after the shared words.

@@ -83,6 +83,10 @@ impl MemoryService {
         let found = self.found_at(id, &destination.join(was));
         self.name_free(id, &destination, was, found)?;
         self.take_name(id, was);
+        // Held where it was found, it's held no more; its files there are still others.
+        if self.dont_match.remove(&id) {
+            self.others_by_hand.insert(id);
+        }
         if found {
             self.take_found(id);
             return Ok(None);

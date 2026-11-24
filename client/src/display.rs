@@ -606,15 +606,18 @@ pub fn found_listing(found: &[(String, std::path::PathBuf)]) -> Listing {
 }
 
 /// What the CLI prints of torrent `id`, which a Move or a Rename found where it is now (#358), once
-/// its check there is over: back as it was, or, `held` because none of its pieces is there, stopped
-/// with its files untouched.
+/// its check there is over: back as it was, or `held`, stopped with its files untouched (none of its
+/// pieces is there, or its check was cancelled or couldn't go on).
 pub fn found_line(id: proto::TorrentId, name: &str, at: &std::path::Path, held: Option<proto::Held>) -> String {
     let at = at.display();
     match held {
         Some(proto::Held::DontMatch) => format!(
             "Found {name} at {at}, but its files don't match: it's stopped and nothing was written; `phantom resume {id}` downloads over them"
         ),
-        Some(proto::Held::Checking) | None => format!("Found {name} at {at}: nothing moved, it's checked there and back as it was"),
+        Some(proto::Held::Checking) => {
+            format!("Found {name} at {at}, but it isn't checked: it's stopped and nothing was written; `phantom check {id}` checks it")
+        }
+        None => format!("Found {name} at {at}: nothing moved, it's checked there and back as it was"),
     }
 }
 
@@ -1771,6 +1774,10 @@ mod tests {
     fn a_found_torrent_s_line_says_how_its_check_went() {
         let at = std::path::Path::new("/Films/Album");
         assert_eq!(found_line(3, "Album", at, None), "Found Album at /Films/Album: nothing moved, it's checked there and back as it was");
+        assert_eq!(
+            found_line(3, "Album", at, Some(proto::Held::Checking)),
+            "Found Album at /Films/Album, but it isn't checked: it's stopped and nothing was written; `phantom check 3` checks it"
+        );
         assert_eq!(
             found_line(3, "Album", at, Some(proto::Held::DontMatch)),
             "Found Album at /Films/Album, but its files don't match: it's stopped and nothing was written; `phantom resume 3` downloads over them"

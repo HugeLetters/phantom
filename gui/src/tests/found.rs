@@ -151,3 +151,25 @@ fn a_found_torrent_whose_files_do_not_match_stays_stopped_with_a_warning() {
     let t = find_torrent(&rt, 1);
     assert_eq!((t.status.clone(), t.held), (Status::Downloading, None), "downloads over them");
 }
+
+/// ⌘Z on that Rename: pointed back, it's Missing files under its old name, and no longer held.
+#[test]
+fn undo_of_a_found_rename_whose_files_do_not_match_points_it_back() {
+    let renamed = format!("{DOWNLOADS}/Album (2024)");
+    let mut rt = app(seeding_album().moved_by_hand_onto_others(1, &renamed));
+    wait(&mut rt, 0.5);
+    tap(&mut rt, "rows/1");
+    settle(&mut rt);
+    row_pick(&mut rt, 1, "Rename…");
+    rt.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
+    rt.paste("Album (2024)");
+    rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    settle(&mut rt);
+    wait(&mut rt, 3.0);
+    assert_eq!(find_torrent(&rt, 1).held, Some(proto::Held::DontMatch));
+    rt.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
+    settle(&mut rt);
+    wait(&mut rt, 1.0);
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.status.clone(), t.held), (Status::MissingFiles, None));
+}
