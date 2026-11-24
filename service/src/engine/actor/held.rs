@@ -61,8 +61,11 @@ impl Actor {
         if files::unavailable(&torrent.record.destination).is_some() {
             return;
         }
-        // Every file's, set Off too: librqbit's own progress leaves those out.
-        let any = handle.stats().file_progress.iter().any(|had| *had > 0);
+        // A piece the check found, in any file (set Off too), with a non-zero byte in what it read: a
+        // piece of zeros may be another file's. What the check saved is this check's, as a held add
+        // always checks in full; what it read is noted as it reads, so a crash checks again.
+        let saved = std::fs::read(bitv::path(&self.session_folder(), &torrent.record.info_hash)).unwrap_or_default();
+        let any = bitv::any_in(&saved, &self.guard.trashed().real_pieces(&torrent.record.info_hash));
         let resumed = held == Held::DontMatch && torrent.lifecycle.wants == Wants::Run;
         if std::mem::replace(&mut self.torrents.get_mut(&id).expect("just found").hold.judging, true) {
             return;

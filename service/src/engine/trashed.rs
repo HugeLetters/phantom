@@ -104,6 +104,11 @@ struct Torrent {
     /// (#358): `None`: it wasn't there. In memory only: after a restart a held torrent is opened, and
     /// its pieces checked, again.
     checked: Mutex<Vec<Option<Seen>>>,
+    /// Each piece, by index, that a read of the last held storage's check found a non-zero byte in
+    /// (#358): a piece of zeros that matches proves nothing, the person's other file (a disk image, a
+    /// preallocated file) may share it. Computed from what's read, as each held check reads it, never
+    /// kept: a crash makes the next start check again, held, and read it again.
+    real: Mutex<Vec<bool>>,
 }
 
 /// A file as it is now: any other file, or this one changed (written, grown, stamped, renamed, linked),
@@ -559,6 +564,11 @@ impl Trashed {
         }
     }
 
+    /// The pieces, by index, the last held check of torrent `info_hash` read a non-zero byte in.
+    pub fn real_pieces(&self, info_hash: &str) -> Vec<bool> {
+        self.torrent(info_hash).real.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
     /// librqbit's storage of torrent `info_hash`'s files, laid out as `layout`, in `destination`.
     pub(super) fn storage(&self, info_hash: &str, layout: Layout, destination: PathBuf) -> Files {
         Files {
@@ -568,6 +578,7 @@ impl Trashed {
             torrent: self.torrent(info_hash),
             parts: self.parts_of(info_hash),
             parts_folders: self.parts_folders.clone(),
+            layout_of_pieces: None,
             #[cfg(test)]
             hook: self.hook.clone(),
             #[cfg(test)]
@@ -759,6 +770,9 @@ pub(super) struct Files {
     parts: Option<PathBuf>,
     /// [`Trashed::parts_folders`].
     parts_folders: Arc<Mutex<()>>,
+    /// Where each file starts in the torrent and how long a piece is, while held: what tells the
+    /// pieces a read is in.
+    layout_of_pieces: Option<(Vec<u64>, u64)>,
     #[cfg(test)]
     hook: Option<Hook>,
     /// A test's hold on its reads, with its torrent's info hash.
@@ -820,6 +834,67 @@ impl Files {
             Some(file) if !looked || !moved(slot, file) => Place::InPlace(file),
             _ if trashed => Place::Trashed(file),
             _ => Place::Elsewhere,
+        }
+    }
+
+    /// Reads `buf` from file `file` at `offset`, wherever it stands.
+    fn read_exact(&self, file: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        #[cfg(test)]
+        self.at(At::Read);
+        #[cfg(test)]
+        if let Some((reads_of, hash)) = &self.reads_of {
+            reads_of(hash);
+        }
+        let slot = self.slot(file)?;
+        let opened = slot.file.read().unwrap();
+        #[cfg(test)]
+        self.at(At::Reading);
+        // Nothing to read: librqbit asks so of the file a piece starts right after, whether it's
+        // there or not (one let go of, say), and a failed read would drop the peer that asked.
+        if buf.is_empty() {
+            return Ok(());
+        }
+        match (self.place(slot, &opened), &*opened) {
+            (Place::InPlace(f), _) => Ok(f.read_exact_at(buf, offset)?),
+            // In the Trash: as it went, with what was written meanwhile over it, which may reach past
+            // its end (a stub).
+            (Place::Trashed(Some(f)), _) => {
+                let read = read_up_to(f, offset, buf)?;
+                match read_kept(self.torrent.lock().kept.get(&file), offset, buf, read) {
+                    true => Ok(()),
+                    false => bail!("file {file} in the Trash ends before {}", offset + buf.len() as u64),
+                }
+            }
+            (Place::Trashed(None), _) => match read_kept(self.torrent.lock().kept.get(&file), offset, buf, 0) {
+                true => Ok(()),
+                false => bail!("file {file} is in the Trash, and couldn't be opened there"),
+            },
+            // Moved, and no undo will put it back (#223's review, S1): read where it went all the
+            // same, as a read changes nothing, so a peer that asks for one of its pieces isn't
+            // dropped. A write makes it again at its path.
+            (Place::Elsewhere, Opened::File(f)) => Ok(f.read_exact_at(buf, offset)?),
+            (Place::Elsewhere, Opened::NotThere) => bail!("file {file} isn't on disk"),
+            (Place::Elsewhere, Opened::Taken) => bail!("file {file} was handed on"),
+        }
+    }
+
+    /// While held, notes the pieces `buf`, read from file `file` at `offset`, has a non-zero byte in.
+    fn note_real(&self, file: usize, offset: u64, buf: &[u8]) {
+        let Some((starts, piece)) = &self.layout_of_pieces else { return };
+        let Some(start) = starts.get(file) else { return };
+        let at = start + offset;
+        let mut real = self.torrent.real.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut done = 0usize;
+        while done < buf.len() {
+            let piece_at = (at + done as u64) / piece;
+            let end = (((piece_at + 1) * piece - at).min(buf.len() as u64)) as usize;
+            if buf[done..end].iter().any(|b| *b != 0)
+                && let Some(had) = real.get_mut(piece_at as usize)
+            {
+                *had = true;
+            }
+            done = end;
         }
     }
 
@@ -1257,50 +1332,19 @@ impl TorrentStorage for Files {
         self.files = Arc::new(files);
         if self.layout.held {
             *self.torrent.checked.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = checked;
+            let lengths = metadata.lengths();
+            let piece = u64::from(lengths.default_piece_length()).max(1);
+            *self.torrent.real.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = vec![false; lengths.total_pieces() as usize];
+            self.layout_of_pieces = Some((metadata.file_infos.iter().map(|i| i.offset_in_torrent).collect(), piece));
         }
         self.torrent.opened(&self.files);
         Ok(())
     }
 
     fn pread_exact(&self, file: usize, offset: u64, buf: &mut [u8]) -> Result<()> {
-        use std::os::unix::fs::FileExt;
-        #[cfg(test)]
-        self.at(At::Read);
-        #[cfg(test)]
-        if let Some((reads_of, hash)) = &self.reads_of {
-            reads_of(hash);
-        }
-        let slot = self.slot(file)?;
-        let opened = slot.file.read().unwrap();
-        #[cfg(test)]
-        self.at(At::Reading);
-        // Nothing to read: librqbit asks so of the file a piece starts right after, whether it's
-        // there or not (one let go of, say), and a failed read would drop the peer that asked.
-        if buf.is_empty() {
-            return Ok(());
-        }
-        match (self.place(slot, &opened), &*opened) {
-            (Place::InPlace(f), _) => Ok(f.read_exact_at(buf, offset)?),
-            // In the Trash: as it went, with what was written meanwhile over it, which may reach past
-            // its end (a stub).
-            (Place::Trashed(Some(f)), _) => {
-                let read = read_up_to(f, offset, buf)?;
-                match read_kept(self.torrent.lock().kept.get(&file), offset, buf, read) {
-                    true => Ok(()),
-                    false => bail!("file {file} in the Trash ends before {}", offset + buf.len() as u64),
-                }
-            }
-            (Place::Trashed(None), _) => match read_kept(self.torrent.lock().kept.get(&file), offset, buf, 0) {
-                true => Ok(()),
-                false => bail!("file {file} is in the Trash, and couldn't be opened there"),
-            },
-            // Moved, and no undo will put it back (#223's review, S1): read where it went all the
-            // same, as a read changes nothing, so a peer that asks for one of its pieces isn't
-            // dropped. A write makes it again at its path.
-            (Place::Elsewhere, Opened::File(f)) => Ok(f.read_exact_at(buf, offset)?),
-            (Place::Elsewhere, Opened::NotThere) => bail!("file {file} isn't on disk"),
-            (Place::Elsewhere, Opened::Taken) => bail!("file {file} was handed on"),
-        }
+        self.read_exact(file, offset, buf)?;
+        self.note_real(file, offset, buf);
+        Ok(())
     }
 
     fn pwrite_all(&self, file: usize, offset: u64, buf: &[u8]) -> Result<()> {
@@ -1396,6 +1440,7 @@ impl TorrentStorage for Files {
             torrent: self.torrent.clone(),
             parts: self.parts.clone(),
             parts_folders: self.parts_folders.clone(),
+            layout_of_pieces: self.layout_of_pieces.clone(),
             #[cfg(test)]
             hook: self.hook.clone(),
             #[cfg(test)]

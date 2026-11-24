@@ -1445,3 +1445,96 @@ async fn pieces_found_are_not_taken_for_bytes_changed_before_the_hold_is_judged(
         engine.stop().await;
     }
 }
+
+// A piece of zeros proves nothing: only a matching piece with real (non-zero) content lifts the hold.
+
+/// A .torrent of `files` (name, bytes) under `dir/downloads/pack`, which it writes there.
+async fn torrent_of(dir: &Path, files: &[(&str, &[u8])]) -> AddSource {
+    let pack = dir.join("downloads/pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    for (name, bytes) in files {
+        std::fs::write(pack.join(name), bytes).unwrap();
+    }
+    let options = librqbit::CreateTorrentOptions { name: None, trackers: vec!["http://127.0.0.1:1/announce".into()], piece_length: Some(PIECE as u32) };
+    let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
+    AddSource::TorrentFile(librqbit::create_torrent(&pack, options, &spawner).await.unwrap().as_bytes().unwrap().to_vec())
+}
+
+/// A torrent of `files`, complete, its folder renamed in Finder to "Album" with `there` in it instead
+/// (a file of the same name, other bytes), then found by Rename…. Returns once it's judged.
+async fn found_with(files: &[(&str, &[u8])], there: &[(&str, &[u8])]) -> (TempDir, Engine, u64, PathBuf) {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let id = add(&engine, &downloads, torrent_of(dir.path(), files).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let album = downloads.join("Album");
+    std::fs::rename(downloads.join("pack"), &album).unwrap();
+    for (name, bytes) in there {
+        std::fs::write(album.join(name), bytes).unwrap();
+    }
+    wait_for(&engine, id, Status::MissingFiles).await;
+    assert_eq!(engine.commanded(vec![id], rename("Album")).await.unwrap().found, vec![id]);
+    (dir, engine, id, album)
+}
+
+/// Another file that shares only a zero piece with the torrent: no real piece matches, so it's "Files
+/// don't match", stopped, and nothing there changed (bytes, lengths, times). Across a restart too: the
+/// check is made again, held, and says the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_file_that_shares_only_a_zero_piece_does_not_match() {
+    let (zero, real, other) = (vec![0u8; PIECE], vec![7u8; PIECE], vec![9u8; PIECE]);
+    let theirs = [zero.clone(), other.clone()].concat();
+    let ours = [zero, real.clone()].concat();
+    let (dir, engine, id, album) = found_with(&[("a.bin", &ours), ("b.bin", &real)], &[("a.bin", &theirs), ("b.bin", &other)]).await;
+    let before = (tree(&album), bytes_in(&album));
+    until_held(&engine, id, Some(proto::Held::DontMatch)).await;
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    let t = find(&engine, id).await;
+    assert_eq!((t.status, t.held), (Status::Paused, Some(proto::Held::DontMatch)));
+    assert_eq!((tree(&album), bytes_in(&album)), before, "nothing changed");
+    engine.kill().await;
+    let engine = super::engine(dir.path()).await;
+    until(&engine, id, |s| matches!(s, Status::Paused)).await;
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    assert_eq!(find(&engine, id).await.held, Some(proto::Held::DontMatch), "across a crash");
+    assert_eq!((tree(&album), bytes_in(&album)), before);
+    // Resume is the way out, and the zero piece it matched is kept as good as any.
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    until_held(&engine, id, None).await;
+    wait_for(&engine, id, Status::Downloading).await;
+    assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, PIECE as u64);
+    engine.stop().await;
+}
+
+/// The torrent's own content, with zero pieces and one real one: it lifts, with all of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_torrents_own_content_with_zero_pieces_and_a_real_one_lifts_with_all_of_them() {
+    let (a, b) = ([vec![0u8; PIECE], vec![7u8; PIECE]].concat(), vec![0u8; PIECE]);
+    let (_dir, engine, id, _album) = found_with(&[("a.bin", &a), ("b.bin", &b)], &[]).await;
+    until_held(&engine, id, None).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 3 * PIECE as u64);
+    engine.stop().await;
+}
+
+/// A piece across two files counts if either part is real; the short last piece counts as any.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piece_across_files_and_the_short_last_piece_count_by_their_own_bytes() {
+    let half = PIECE / 2;
+    // a.bin | b.bin: piece 0 is half zeros, half real; piece 1 is the short last one: zeros.
+    let (a, b) = (vec![0u8; half], [vec![7u8; half], vec![0u8; 100]].concat());
+    let (_dir, engine, id, _album) = found_with(&[("a.bin", &a), ("b.bin", &b)], &[]).await;
+    until_held(&engine, id, None).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    engine.stop().await;
+
+    // The same where the person's file has zeros in the same pieces and others elsewhere: only zeros match.
+    let (a, b) = (vec![0u8; half], vec![0u8; half + 100]);
+    let torn = [vec![7u8; half], vec![1u8; 100]].concat();
+    let (_dir, engine, id, album) = found_with(&[("a.bin", &a), ("b.bin", &torn)], &[("a.bin", &a), ("b.bin", &b)]).await;
+    let before = (tree(&album), bytes_in(&album));
+    until_held(&engine, id, Some(proto::Held::DontMatch)).await;
+    assert_eq!((tree(&album), bytes_in(&album)), before);
+    engine.stop().await;
+}
