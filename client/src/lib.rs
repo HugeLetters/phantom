@@ -110,11 +110,13 @@ impl std::error::Error for Failure {
 pub struct Commanded {
     pub failed: Vec<(TorrentId, Failure)>,
     pub found: Vec<TorrentId>,
+    /// Those a Delete only took off the list, their files staying where they are: held (#358).
+    pub stayed: Vec<TorrentId>,
 }
 
 impl Commanded {
-    fn of(failed: Vec<proto::TorrentFailed>, found: Vec<TorrentId>) -> Self {
-        Self { failed: failed.into_iter().map(|f| (f.id, f.failure.into())).collect(), found }
+    fn of(failed: Vec<proto::TorrentFailed>, found: Vec<TorrentId>, stayed: Vec<TorrentId>) -> Self {
+        Self { failed: failed.into_iter().map(|f| (f.id, f.failure.into())).collect(), found, stayed }
     }
 }
 
@@ -228,7 +230,7 @@ impl Client {
     /// step): those that didn't do as asked, with why.
     pub fn commands(&mut self, ids: &[TorrentId], command: TorrentCommand) -> Result<Commanded, Failure> {
         match self.call(&Request::Torrents { ids: ids.to_vec(), command })? {
-            Response::Commanded { failed, found } => Ok(Commanded::of(failed, found)),
+            Response::Commanded { failed, found, stayed } => Ok(Commanded::of(failed, found, stayed)),
             other => Err(unexpected(other)),
         }
     }
@@ -237,7 +239,7 @@ impl Client {
     /// in it, #270), each with its own choice for a clash: those that didn't move, with why.
     pub fn moves(&mut self, to: AbsolutePath, moves: Vec<proto::MoveOf>) -> Result<Commanded, Failure> {
         match self.call(&Request::Moves { to, moves })? {
-            Response::Commanded { failed, found } => Ok(Commanded::of(failed, found)),
+            Response::Commanded { failed, found, stayed } => Ok(Commanded::of(failed, found, stayed)),
             other => Err(unexpected(other)),
         }
     }

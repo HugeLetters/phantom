@@ -788,25 +788,57 @@ async fn a_remove_while_held_leaves_the_files_and_its_undo_brings_it_back_held()
     }
 }
 
-/// Deleted while it's held, as the person asked: its files go to the Trash as they are, what's the
-/// person's stays, and ⌘Z brings them back, held.
+/// Deleted while its files don't match, or while they're still checked: nothing was verified as the
+/// torrent's, so it's only taken off the list. Nothing goes to the Trash, nothing is written or removed
+/// at its paths, and the answer says its files stayed. ⌘Z brings it back held, stopped.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_delete_while_held_moves_the_files_as_they_are_and_its_undo_brings_it_back_held() {
-    let f = found_and_held(false, |album| {
-        other_bytes(album);
-        std::fs::write(album.join("mine.txt"), b"mine").unwrap();
-    })
-    .await;
-    let deleting = f.engine.sent(f.id, TorrentCommand::Delete).await;
-    deleting.await.unwrap();
-    assert_eq!(bytes_in(&f.album).into_keys().collect::<Vec<_>>(), [PathBuf::from("mine.txt")]);
-    f.engine.undo().await.unwrap();
-    until(&f.engine, f.id, |s| matches!(s, Status::Checking)).await;
-    assert_eq!(find(&f.engine, f.id).await.held, Some(proto::Held::Checking));
+async fn a_delete_of_files_not_verified_leaves_them_and_its_undo_brings_it_back_held() {
+    for checking in [false, true] {
+        let f = found_and_held(false, |album| {
+            other_bytes(album);
+            std::fs::write(album.join("mine.txt"), b"mine").unwrap();
+        })
+        .await;
+        if !checking {
+            f.gate.hold(false);
+            until_held(&f.engine, f.id, Some(proto::Held::DontMatch)).await;
+            wait_for(&f.engine, f.id, Status::Paused).await;
+        }
+        let answer = f.engine.commanded(vec![f.id], TorrentCommand::Delete).await.unwrap();
+        assert!(answer.failed.is_empty(), "checking {checking}");
+        assert_eq!(answer.stayed, vec![f.id], "checking {checking}: its files stayed");
+        assert!(f.engine.listing().await.is_empty(), "checking {checking}: off the list");
+        assert!(f.untouched(), "checking {checking}: nothing written or removed");
+        assert!(!f.dir.path().join("trash").exists() || std::fs::read_dir(f.dir.path().join("trash")).unwrap().next().is_none(), "nothing in the Trash");
+        f.engine.undo().await.unwrap();
+        if checking {
+            // Still checked, as it was.
+            until(&f.engine, f.id, |s| matches!(s, Status::Checking)).await;
+            assert_eq!(find(&f.engine, f.id).await.held, Some(proto::Held::Checking));
+            f.gate.hold(false);
+        }
+        until_held(&f.engine, f.id, Some(proto::Held::DontMatch)).await;
+        wait_for(&f.engine, f.id, Status::Paused).await;
+        assert!(f.untouched(), "checking {checking}: back as they were");
+        f.engine.stop().await;
+    }
+}
+
+/// Several deleted in one press: each goes by its own state. The held one's files stay, the ordinary
+/// one's go to the Trash, and the answer says which stayed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_of_several_goes_by_each_ones_own_state() {
+    let f = found_and_held(false, other_bytes).await;
     f.gate.hold(false);
     until_held(&f.engine, f.id, Some(proto::Held::DontMatch)).await;
-    wait_for(&f.engine, f.id, Status::Paused).await;
-    assert!(f.untouched(), "back as they were");
+    let plain = complete_torrent_in(f.dir.path(), "plain", 5).await;
+    let other = add_to(&f.engine, plain, false, &f.dir.path().join("plain")).await.unwrap().id;
+    wait_for(&f.engine, other, Status::Seeding).await;
+    let answer = f.engine.commanded(vec![f.id, other], TorrentCommand::Delete).await.unwrap();
+    assert!(answer.failed.is_empty());
+    assert_eq!(answer.stayed, vec![f.id]);
+    assert!(f.untouched());
+    assert!(!f.dir.path().join("plain/pack/a.bin").exists(), "the other one's files went to the Trash");
     f.engine.stop().await;
 }
 

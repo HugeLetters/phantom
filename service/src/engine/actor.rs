@@ -1511,8 +1511,13 @@ impl Actor {
         // As any command: decided on librqbit and the disk as they are now.
         self.poll_torrent(id).await;
         self.size_check(id).await;
-        // Where its files are, from its record, librqbit having it or not.
-        let goes = self.torrents.get(&id).and_then(|t| to_trash(&t.record));
+        // Where its files are, from its record, librqbit having it or not. Held (#358), none: they were
+        // never verified as the torrent's (the check is under way, or found none of its pieces), and
+        // are the person's, so it's only taken off the list.
+        let goes = self.torrents.get(&id).filter(|t| t.record.held.is_none()).and_then(|t| to_trash(&t.record));
+        if self.torrents.get(&id).is_some_and(|t| t.record.held.is_some() && to_trash(&t.record).is_some()) {
+            self.steps.stayed(seq, id);
+        }
         if let Err(e) = self.event(id, Event::Command(proto::Action::Delete)).await {
             return self.step_ended(seq, id, steps::Over::Failed, Err(e));
         }

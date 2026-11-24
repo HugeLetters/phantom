@@ -668,6 +668,9 @@ impl From<anyhow::Error> for Failure {
 pub struct Commanded {
     pub failed: Vec<(TorrentId, Failure)>,
     pub found: Vec<TorrentId>,
+    /// Those whose Delete left their files where they were: held (#358), their files aren't verified,
+    /// so they aren't the torrent's to trash.
+    pub stayed: Vec<TorrentId>,
 }
 
 /// A command for one torrent: its failure, if it failed.

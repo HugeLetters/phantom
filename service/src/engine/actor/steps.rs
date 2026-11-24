@@ -70,6 +70,7 @@ struct Batch {
     reply: Reply,
     failed: Vec<(TorrentId, Failure)>,
     found: Vec<TorrentId>,
+    stayed: Vec<TorrentId>,
     left: usize,
     /// Every part has arrived: it's answered once `left` is none.
     closed: bool,
@@ -161,7 +162,7 @@ impl Steps {
     pub(super) fn batch(&mut self, reply: Reply, failed: Vec<(TorrentId, Failure)>) -> u64 {
         let batch = self.next_batch;
         self.next_batch += 1;
-        self.batches.insert(batch, Batch { reply, failed, found: Vec::new(), left: 0, closed: false });
+        self.batches.insert(batch, Batch { reply, failed, found: Vec::new(), stayed: Vec::new(), left: 0, closed: false });
         batch
     }
 
@@ -177,7 +178,7 @@ impl Steps {
         match self.batches.get(&batch) {
             Some(b) if b.closed && b.left == 0 => {
                 let b = self.batches.remove(&batch).expect("just found");
-                vec![Answer::Step(b.reply, Commanded { failed: b.failed, found: b.found })]
+                vec![Answer::Step(b.reply, Commanded { failed: b.failed, found: b.found, stayed: b.stayed })]
             }
             Some(_) | None => Vec::new(),
         }
@@ -492,6 +493,14 @@ impl Steps {
         }
     }
 
+    /// Step `seq`'s part on torrent `id`, a Delete, left its files where they are (#358): its batch
+    /// hears so with its answer.
+    pub(super) fn stayed(&mut self, seq: u64, id: TorrentId) {
+        if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
+            b.stayed.push(id);
+        }
+    }
+
     /// Step `seq`'s part on torrent `id`: its batch hears `answer`, once each of its parts did. One
     /// that waited behind an undo that failed hears it was undone; a Cancel check judged on what
     /// clients saw that finds no check at its turn is done, as asked.
@@ -535,7 +544,7 @@ impl Actor {
                 };
                 failed.extend(refused.map(|why| (id, Failure::torrent(id, why))));
             }
-            drop(reply.send(Commanded { failed, found: Vec::new() }));
+            drop(reply.send(Commanded { failed, found: Vec::new(), stayed: Vec::new() }));
             return self.run_steps().await;
         }
         let (mut doing, mut failed) = (Vec::new(), Vec::new());
