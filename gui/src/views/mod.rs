@@ -17,7 +17,7 @@ pub(crate) mod toolbar;
 
 use client::display;
 use proto::TorrentInfo;
-use rune::{Cx, Drag, El, Phase, Tx, col, row};
+use rune::{Cx, Drag, El, Phase, Tx, col, el, row};
 
 pub(crate) use details::{Shape as PaneShape, details_pane};
 
@@ -50,7 +50,11 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         let files = torrent.content.map(|_| s.pane.details.as_ref().filter(|d| d.id == torrent.id).map_or(1, |d| d.files.len()));
         let pane = layout::pane(room, details::content(torrent, files), s.prefs.dragged(), s.torrents.len());
         let shape = PaneShape { header: pane.header, width };
-        body = body.child(divider(ui, room, pane.height)).child((look.screens.details)(s, ui, torrent, shape).h(pane.height));
+        // Keyed by the torrent: another one's pane takes this marker away, and the focus that was
+        // in the pane (its files, its Rename field, Copy on Info) goes to the list's selected row
+        // instead of nowhere (#364). Focus elsewhere, and a pane that stays, are left alone.
+        let marker = el().key(format!("pane-of-{}", torrent.id)).w(0.0).h(0.0).focus_return("table");
+        body = body.child(divider(ui, room, pane.height)).child((look.screens.details)(s, ui, torrent, shape).h(pane.height).child(marker));
         // Under the rename field, while what was typed in it isn't a name, until the next keystroke.
         if let Some(why) = s.rename.note().filter(|_| s.rename.editing(torrent.id)) {
             ui.tooltip_under("rename-note", details::RENAME_FIELD, &client::display::name_problem(why), &mut overlays);
