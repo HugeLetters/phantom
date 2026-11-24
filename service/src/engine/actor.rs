@@ -973,11 +973,16 @@ impl Actor {
             // leaves nothing to undo.
             let undoable = matches!(torrent.lifecycle.phase, Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted);
             let (wants, round) = (torrent.lifecycle.wants, torrent.meter.round);
-            // Before librqbit is made to match, which can drop the pieces it saved.
-            let learnt = torrent.lifecycle.phase != before && torrent.keep_known();
+            // Before librqbit is made to match, which can drop the pieces it saved. Saved at every
+            // change, not only when it learnt something: a save that failed then is made up for, as
+            // the store writes what differs from its last successful one (#370).
+            let phase_changed = torrent.lifecycle.phase != before;
+            if phase_changed {
+                torrent.keep_known();
+            }
             let record = &mut torrent.record;
             if wants_changed
-                || learnt
+                || phase_changed
                 || record.unchecked != unchecked
                 || record.delete_failed != kept
                 || (!deleting && !record.deleting.is_empty())
@@ -1803,10 +1808,10 @@ impl Torrent {
     }
 
     /// Puts what's known of its files in its record: those missing, and what librqbit has of each.
-    /// Whether that changed it. Saved as it's learnt, not only at a stop, as taking it out of librqbit
+    /// Saved as it's learnt, not only at a stop, as taking it out of librqbit
     /// drops the pieces it saved, and a start after a crash would then take any file at a missing
     /// one's path for the torrent's own (#370).
-    pub(super) fn keep_known(&mut self) -> bool {
+    pub(super) fn keep_known(&mut self) {
         let phase = &self.lifecycle.phase;
         let missing = match phase {
             Phase::MissingFiles { gone: files }
@@ -1828,9 +1833,7 @@ impl Torrent {
             // librqbit says nothing while it checks, nor the last poll of one away at a start.
             _ => Some(progress(self)).filter(|p| !p.is_empty()).unwrap_or_else(|| self.record.had.clone()),
         };
-        let changed = missing != self.record.missing || had != self.record.had;
         (self.record.missing, self.record.had) = (missing, had);
-        changed
     }
 }
 

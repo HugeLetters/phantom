@@ -239,3 +239,151 @@ async fn a_persons_own_file_put_back_is_the_torrents_again_whatever_a_crash_cut_
     .await;
     interrupted(At::Away, B, Put::Own, When::Before, false, false).await;
 }
+
+/// A save that fails as a file goes missing is made up for at the next phase change: taking the
+/// torrent out of librqbit then deletes its pieces, the only other place that's known.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_save_that_failed_as_a_file_went_missing_is_made_up_for_before_its_pieces_go() {
+    let dir = temp();
+    let dir = dir.path();
+    let (here, away) = (dir.join("downloads"), dir.join("away"));
+    let engine = engine(dir).await;
+    let id = add(&engine, &here, complete_torrent(dir).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let path = file(dir, "b.bin");
+    engine
+        .inspect(move |a| {
+            a.store.fail_next_save_after(0);
+            std::fs::remove_file(&path).unwrap();
+        })
+        .await;
+    wait_for(&engine, id, Status::MissingFiles).await;
+    std::fs::rename(&here, &away).unwrap();
+    until(&engine, id, |s| matches!(s, Status::DestinationUnavailable { .. })).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    engine.kill().await;
+    drop(engine);
+    std::fs::rename(&away, &here).unwrap();
+    std::fs::write(file(dir, "b.bin"), other()).unwrap();
+    let engine = super::engine(dir).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    engine.stop().await;
+}
+
+/// What the saved record of the only torrent says is missing, by file index.
+fn saved_missing(dir: &Path) -> std::collections::BTreeMap<usize, super::super::store::Missing> {
+    super::super::store::saved_in(&dir.join("data")).into_values().next().unwrap().missing
+}
+
+/// Seeding, then `b.bin` goes: Missing files, saved as that. The torrent's id and `b.bin`'s index.
+async fn missing_b(engine: &Engine, dir: &Path) -> (u64, usize) {
+    let id = add(engine, &dir.join("downloads"), complete_torrent(dir).await, false).await.unwrap().id;
+    wait_for(engine, id, Status::Seeding).await;
+    std::fs::remove_file(file(dir, "b.bin")).unwrap();
+    wait_for(engine, id, Status::MissingFiles).await;
+    let b = index_of(engine, id, "b.bin").await;
+    assert_eq!(saved_missing(dir).keys().copied().collect::<Vec<_>>(), [b], "saved as it was learnt");
+    (id, b)
+}
+
+/// A Delete under way keeps what was missing: a crash then, or an Undo, brings the torrent back
+/// knowing it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_delete_under_way_keeps_what_was_missing() {
+    let dir = temp();
+    let dir = dir.path();
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    let engine = engine_with(dir, SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let (id, b) = missing_b(&engine, dir).await;
+    super::super::trash::hold(&gate, true);
+    let deleting = tokio::spawn(engine.command_later(id, TorrentCommand::Delete));
+    held_at_the_gate(&gate).await;
+    assert_eq!(saved_missing(dir).keys().copied().collect::<Vec<_>>(), [b]);
+    super::super::trash::hold(&gate, false);
+    let _ = deleting.await;
+    engine.stop().await;
+}
+
+/// A Move under way keeps what was missing, as a crash in it is the start's to judge.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_under_way_keeps_what_was_missing() {
+    let dir = temp();
+    let dir = dir.path();
+    let engine = engine(dir).await;
+    let (id, b) = missing_b(&engine, dir).await;
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    engine
+        .inspect({
+            let gate = gate.clone();
+            move |a| a.move_hold = super::super::actor::moving::Hold { gate: Some(gate), copies: true, ..Default::default() }
+        })
+        .await;
+    super::super::trash::hold(&gate, true);
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let answer = tokio::spawn(
+        engine.command_later(id, TorrentCommand::Move { to: AbsolutePath::new(&elsewhere).unwrap(), clash: None, name: None }),
+    );
+    until(&engine, id, |s| matches!(s, Status::Moving { done, .. } if *done > 0)).await;
+    assert_eq!(saved_missing(dir).keys().copied().collect::<Vec<_>>(), [b]);
+    super::super::trash::hold(&gate, false);
+    let _ = answer.await;
+    engine.stop().await;
+}
+
+/// A Move that takes the file put at the missing one's new path ends with its files to be checked
+/// there, none missing. That's saved as it ends, not only once librqbit has the torrent again: a
+/// crash between would find it still missing the file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_that_takes_the_file_put_at_the_new_path_saves_nothing_missing_as_it_ends() {
+    let dir = temp();
+    let dir = dir.path();
+    let gate = Arc::new(super::super::files::Gate::default());
+    let _held = Opens(gate.clone());
+    let engine = engine_gated_at(dir, super::super::files::At::Length, &gate).await;
+    let (id, _) = missing_b(&engine, dir).await;
+    let elsewhere = dir.join("elsewhere");
+    std::fs::create_dir_all(elsewhere.join("pack")).unwrap();
+    std::fs::write(elsewhere.join("pack/b.bin"), other()).unwrap();
+    let to = AbsolutePath::new(&elsewhere).unwrap();
+    let TorrentRefusal::Clash { files: found } =
+        refusal(engine.command(id, TorrentCommand::Move { to: to.clone(), clash: None, name: None }).await).1
+    else {
+        panic!("a clash")
+    };
+    gate.hold(true);
+    let answered = proto::Answered { choice: proto::Clash::UseExisting, found };
+    let answer = tokio::spawn(engine.command_later(id, TorrentCommand::Move { to, clash: Some(answered), name: None }));
+    for _ in 0..1000 {
+        if gate.waiting() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(gate.waiting(), "librqbit's add waits at the gate: {:?}", find(&engine, id).await.status);
+    assert_eq!(saved_missing(dir), Default::default());
+    gate.hold(false);
+    let _ = answer.await;
+    engine.stop().await;
+}
+
+/// A clean stop in Missing files saves nothing of what was at the missing path: the next start
+/// takes what's there then for what was there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_clean_stop_forgets_what_was_seen_at_a_missing_path() {
+    let dir = temp();
+    let dir = dir.path();
+    let engine = engine(dir).await;
+    let (_, b) = missing_b(&engine, dir).await;
+    // A size check has looked at the path by now.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    engine
+        .inspect(move |a| assert_ne!(a.torrents.values().next().unwrap().record.missing[&b].seen, super::super::files::Seen::NotYet))
+        .await;
+    engine.stop().await;
+    assert_eq!(saved_missing(dir)[&b].seen, super::super::files::Seen::NotYet);
+}
