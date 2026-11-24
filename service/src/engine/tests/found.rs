@@ -1804,3 +1804,26 @@ async fn a_crash_as_the_hold_is_lifted_before_its_files_are_looked_at_leaves_it_
     assert_eq!((tree(&f.album), bytes_in(&f.album)), before);
     e.stop().await;
 }
+
+/// Held, its files all gone from where it was found, then moved to a folder where nothing of it is:
+/// there's nothing there to keep from it, so it isn't held there (Missing files, as any torrent
+/// pointed at a place without its files), and nothing is made. Where it was is left as it is.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_torrent_with_no_file_left_moved_where_nothing_of_it_is_is_not_held_there() {
+    let f = found_not_matching().await;
+    for n in ["a.bin", "b.bin", "c.bin"] {
+        std::fs::remove_file(f.album.join(n)).unwrap();
+    }
+    wait_for(&f.engine, f.id, Status::MissingFiles).await;
+    let elsewhere = f.dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    // Moved, and told it went without its files.
+    let _ = f.engine.command(f.id, move_to(&elsewhere)).await;
+    moved(&f.engine, f.id).await;
+    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    let t = find(&f.engine, f.id).await;
+    assert_eq!((t.status, t.held, t.location), (Status::MissingFiles, None, at(elsewhere.join("Album"))));
+    assert!(tree(&elsewhere).is_empty(), "nothing made there: {:?}", tree(&elsewhere));
+    assert!(tree(&f.album).is_empty(), "nor where it was");
+    f.engine.stop().await;
+}

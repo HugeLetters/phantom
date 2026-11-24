@@ -2003,3 +2003,38 @@ mod tests {
         assert!(!needs_check(&[], &[1], |_| 0, &unread), "but it isn't back");
     }
 }
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+
+    fn opening(at: &str) -> Opening {
+        Opening { destination: at.into(), files: vec![None] }
+    }
+
+    /// A check proves something only of the one opening of its storage: unopened, it read nothing and
+    /// found nothing, whatever librqbit saved; opened twice, it's of neither.
+    #[test]
+    fn a_check_tells_only_of_one_opening() {
+        let check = Check::new();
+        assert!(!check.read() && !check.found_in(&[0xff]) && check.read_to_the_end().is_none());
+        check.open(opening("/a"), 2);
+        check.real.lock().unwrap()[1] = true;
+        assert!(check.read() && check.found_in(&[0b0100_0000]) && !check.found_in(&[0b1000_0000]));
+        assert!(check.read_to_the_end().is_none(), "not until its check ended");
+        check.end();
+        assert_eq!(check.read_to_the_end(), Some(&opening("/a")));
+        check.open(opening("/a"), 2);
+        assert!(!check.read() && !check.found_in(&[0xff]) && check.read_to_the_end().is_none(), "opened twice");
+    }
+
+    /// Only the storage that opened a lift's files as they were checked gives the proof a record is
+    /// saved unheld with.
+    #[test]
+    fn a_lift_is_proven_only_once_its_storage_opened_its_files() {
+        let lift = Lift { checked: opening("/a"), done: AtomicBool::new(false) };
+        assert!(lift.opened().is_none());
+        lift.done.store(true, Ordering::SeqCst);
+        assert!(lift.opened().is_some());
+    }
+}
