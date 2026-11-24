@@ -947,13 +947,7 @@ impl Actor {
             // counted while it's shown, until its check ends (#290, #366). Only shown: what librqbit
             // said stays as it was, as it's saved and what's decided from (is a file there still
             // the torrent's own).
-            match &torrent.lifecycle.phase {
-                Phase::CheckDue { .. } | Phase::DeleteFailed { .. } | Phase::DestinationUnavailable { .. } => {
-                    torrent.polled.uncounted.extend(unreadable(&before));
-                }
-                Phase::Checking { .. } | Phase::Unchecked { .. } | Phase::Deleting { .. } | Phase::Moving { .. } => {}
-                _ => torrent.polled.uncounted.clear(),
-            }
+            track_uncounted(&mut torrent.polled.uncounted, &before, &torrent.lifecycle.phase);
             // What Delete left is kept across restarts, and librqbit's storage for it touches
             // nothing meanwhile: restoring it would make the trashed files again, empty. What a
             // Delete under way is about to trash is saved by `delete`, and forgotten once it's over.
@@ -1922,6 +1916,17 @@ fn unreadable(phase: &Phase) -> BTreeSet<usize> {
     }
 }
 
+/// Updates `uncounted` as a torrent's phase goes from `before` to `next`: files that can't be read
+/// are added as it's set aside, kept while a check is yet to end, forgotten once none is.
+pub(super) fn track_uncounted(uncounted: &mut BTreeSet<usize>, before: &Phase, next: &Phase) {
+    match next {
+        Phase::CheckDue { .. } | Phase::DeleteFailed { .. } | Phase::DestinationUnavailable { .. } => uncounted.extend(unreadable(before)),
+        // An Error is no check's end: a file's bytes are as unreadable as they were.
+        Phase::Checking { .. } | Phase::Unchecked { .. } | Phase::Deleting { .. } | Phase::Moving { .. } | Phase::Error { .. } => {}
+        _ => uncounted.clear(),
+    }
+}
+
 /// `files` as shown: none counted of those whose bytes can't be read now.
 fn uncount(files: &mut [File], torrent: &Torrent) {
     for f in files.iter_mut().filter(|f| torrent.polled.uncounted.contains(&f.index)) {
@@ -2069,8 +2074,9 @@ struct Polled {
     /// it says nothing per file.
     file_progress: Vec<u64>,
     /// Files whose bytes can't be read now (missing as their destination went, or as a delete
-    /// failed): shown with none counted, whatever `file_progress` says of them. Never saved, nor
-    /// decided from: `file_progress` is what librqbit said (#366).
+    /// failed): shown with none counted, whatever `file_progress` says of them. Never saved as what
+    /// librqbit has (`undo.json` holds the row as shown, which only draws the step), nor decided
+    /// from: `file_progress` is what librqbit said (#366).
     uncounted: BTreeSet<usize>,
     uploaded_bytes: u64,
     download_bytes_per_sec: u64,
@@ -2124,6 +2130,31 @@ impl Actor {
         let t = self.torrents.get_mut(&id)?;
         (t.polled.download_bytes_per_sec, t.polled.upload_bytes_per_sec, t.polled.live_peers) = (rate, rate, 1);
         self.listed(id).map(|t| (t.download_bytes_per_sec, t.upload_bytes_per_sec, t.live_peers))
+    }
+}
+
+#[cfg(test)]
+mod uncounted_tests {
+    use super::*;
+
+    /// A missing file whose check fails (librqbit erroring as the drive goes) and whose destination
+    /// then goes: it stays uncounted, as no check ended (#366's review).
+    #[test]
+    fn an_error_without_a_check_ending_keeps_the_files_uncounted() {
+        let expected = files::Expected { index: 0, path: "/gone/b.bin".into(), size_bytes: 10, progress_bytes: 10 };
+        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected]).files[&0]))]);
+        let error = Phase::Error { failure: Broke::Librqbit { detail: "drive gone".into() } };
+        let away =
+            Phase::DestinationUnavailable { reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() } };
+        let mut uncounted = BTreeSet::new();
+        let mut steps = vec![(Phase::MissingFiles { gone: gone.clone() }, Phase::CheckDue { returning: gone.clone() })];
+        steps.push((steps[0].1.clone(), Phase::Checking { returning: gone }));
+        steps.push((steps[1].1.clone(), error.clone()));
+        steps.push((error, away));
+        for (before, next) in &steps {
+            track_uncounted(&mut uncounted, before, next);
+        }
+        assert_eq!(uncounted, BTreeSet::from([1]));
     }
 }
 

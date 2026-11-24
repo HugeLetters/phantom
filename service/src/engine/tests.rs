@@ -1596,6 +1596,7 @@ async fn another_file_put_where_one_was_missing_across_a_stop_while_its_destinat
         wait_for(&engine, id, Status::MissingFiles).await;
         std::fs::rename(&here, &away).unwrap();
         until(&engine, id, |s| matches!(s, Status::DestinationUnavailable { .. })).await;
+        assert_eq!(files_on(&engine, id).await[1].1, 0, "the missing file isn't counted while away");
         engine.stop().await;
         id
     };
