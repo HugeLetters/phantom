@@ -51,6 +51,12 @@ check finds (the files it's getting and what's on disk at each, or its destinati
 What it means (files missing, set Off or put back) is the torrent's rules' to decide. It changes
 only the phase and is never refused.
 
+**Hold**:
+Why a found torrent is held, in its record: checking, or its files don't match. Saved with the
+destination it's found at; while there is one, librqbit's storage of the torrent only reads, and the
+torrent is never started.
+_Avoid_: lock
+
 **Size check**:
 Phantom's cheap, automatic look at a torrent's files: does each file it's getting still exist,
 with a plausible size? Reads no data; the file watcher and a regular sweep run it, and it's how

@@ -260,17 +260,27 @@ at its path where it was (it's Missing files there), and where it's going its ow
 one file, for a torrent of one file) is there, every file of it there is a file no longer than its
 own (reached through real folders, no link) with no other hard link, at least one is, and it isn't
 another listed torrent's place. Then nothing moves: the Move makes, writes over or removes nothing
-in either place, and the torrent is pointed there and checked in full, then runs or stays stopped
-as before. The status bar says "Found", with its name and where it is in the list (and Reveal in
-Finder); `phantom move` and `phantom rename` print it. Not found (files of it still where it was, a
+in either place, and the torrent is pointed there, **held** and checked in full. The status bar says
+"Found", with its name and where it is in the list (and Reveal in Finder); `phantom move` and
+`phantom rename` wait for the check and print how it went. Not found (files of it still where it was, a
 file there longer than its own or with another hard link, or none of its files there), it's a Move
 or a Rename as ever: a Move
 asks about the files there as a clash, a Rename finds the name taken. A found Rename is one step
 of Undo, which points it back at its old name, moving nothing, Missing files again (or found there,
-if the person put it back); a found Move isn't undone, as a Move isn't. What's found is taken as
-the torrent's: the check sets each file it gets to its own length, and one wanted running
-downloads over what isn't its own.
+if the person put it back); a found Move isn't undone, as a Move isn't.
 _Avoid_: locate, relink, reconcile (in what people see)
+
+**Held**:
+A found torrent while it's checked where it was found (#358): it doesn't run, and nothing there
+changes (no file or folder made, written, grown or given a new time; a file that isn't there has
+none of its pieces). Any of its pieces found there ends the hold: each file it gets is then made or
+set to its length, and it's running or stopped as before. None found, it's stopped (Missing files
+if one it gets isn't there) and still held: **Files don't match**, a warning. Then Resume, the
+person's choice, ends the hold and downloads over them; a Check that finds its pieces ends it too.
+Nothing else does: a Resume during the check waits for it, a cancelled check, a restart or a crash
+leaves it held. A Move or a Rename of it takes its hold along; a Delete moves what's at its files'
+paths to the Trash, as ever; the undo of a Remove or a Delete brings it back held.
+_Avoid_: quarantine, locked
 
 **Rename…**:
 Give a torrent a new name on disk where it is (in the row menu and the palette, for one torrent;
