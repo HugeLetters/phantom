@@ -363,7 +363,7 @@ fn send(s: &mut Phantom, asking: Asking) {
         to,
         moves,
         Box::new(move |s: &mut Phantom, commanded: client::Commanded, _: &mut Tx| {
-            let client::Commanded { failed, found } = commanded;
+            let client::Commanded { failed, found, .. } = commanded;
             // Found where they are now, moving nothing (#358): told, with where each is.
             let found = super::found_listed(s, &found);
             if !found.is_empty() {

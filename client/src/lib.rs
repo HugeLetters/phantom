@@ -111,11 +111,11 @@ pub struct Commanded {
     pub failed: Vec<(TorrentId, Failure)>,
     pub found: Vec<TorrentId>,
     /// Those a Delete only took off the list, their files staying where they are: held (#358).
-    pub stayed: Vec<TorrentId>,
+    pub stayed: Vec<(TorrentId, proto::Held)>,
 }
 
 impl Commanded {
-    fn of(failed: Vec<proto::TorrentFailed>, found: Vec<TorrentId>, stayed: Vec<TorrentId>) -> Self {
+    fn of(failed: Vec<proto::TorrentFailed>, found: Vec<TorrentId>, stayed: Vec<(TorrentId, proto::Held)>) -> Self {
         Self { failed: failed.into_iter().map(|f| (f.id, f.failure.into())).collect(), found, stayed }
     }
 }

@@ -591,6 +591,41 @@ pub fn happened_listing(action: UndoAction, count: usize, names: &[String]) -> L
     Listing::new(&names_listed(names), note)
 }
 
+/// What a Delete lists of torrents it only took off the list (#358), their files left where they are:
+/// each name, then why they stay, as a Delete's note says where the files of the others are.
+/// `kept` are those held, in the order of the list, with their `names`; `trashed` the names of those
+/// whose files are in the Trash. A group of each kind, in that order, each with its own note.
+pub fn deleted_listing(trashed: &[String], kept: &[(String, proto::Held)]) -> Listing {
+    let mut groups = Vec::new();
+    if !trashed.is_empty() {
+        let note = if trashed.len() == 1 { "Its files are in the Trash." } else { "Their files are in the Trash." };
+        groups.extend(Listing::new(&names_listed(trashed), note).groups);
+    }
+    for held in [proto::Held::DontMatch, proto::Held::Checking] {
+        let names: Vec<String> = kept.iter().filter(|(_, h)| *h == held).map(|(n, _)| n.clone()).collect();
+        if names.is_empty() {
+            continue;
+        }
+        groups.extend(Listing::new(&names_listed(&names), &files_stay(held, names.len())).groups);
+    }
+    Listing { groups }
+}
+
+/// What the CLI prints of a torrent a Delete only took off the list (#358): its files stay.
+pub fn stayed_line(name: &str, held: proto::Held) -> String {
+    format!("{name}: taken off the list only. {}", files_stay(held, 1))
+}
+
+/// Why the files of `count` torrents a Delete only took off the list stay where they are (#358).
+pub fn files_stay(held: proto::Held, count: usize) -> String {
+    match (held, count) {
+        (proto::Held::DontMatch, 1) => "Its files don't match and stay.".into(),
+        (proto::Held::DontMatch, _) => "Their files don't match and stay.".into(),
+        (proto::Held::Checking, 1) => "Its files aren't checked yet and stay.".into(),
+        (proto::Held::Checking, _) => "Their files aren't checked yet and stay.".into(),
+    }
+}
+
 /// What a Move or a Rename that found its torrents where they are now tells (#358), as the bar's
 /// line: "Found", "Found 3 torrents". Their names and where they are are the list's.
 pub fn found(torrents: usize) -> String {
@@ -605,20 +640,57 @@ pub fn found_listing(found: &[(String, std::path::PathBuf)]) -> Listing {
     Listing { groups: found.iter().map(|(name, at)| vec![Line::Name(name.clone()), Line::Path(at.display().to_string())]).collect() }
 }
 
-/// What the CLI prints of torrent `id`, which a Move or a Rename found where it is now (#358), once
-/// its check there is over: back as it was, or `held`, stopped with its files untouched (none of its
-/// pieces is there, or its check was cancelled or couldn't go on).
-pub fn found_line(id: proto::TorrentId, name: &str, at: &std::path::Path, held: Option<proto::Held>) -> String {
-    let at = at.display();
-    match held {
-        Some(proto::Held::DontMatch) => format!(
-            "Found {name} at {at}, but its files don't match: it's stopped and nothing was written; `phantom resume {id}` downloads over them"
-        ),
-        Some(proto::Held::Checking) => {
-            format!("Found {name} at {at}, but it isn't checked: it's stopped and nothing was written; `phantom check {id}` checks it")
+/// A torrent a Move or a Rename found where it is now (#358), which the CLI waits on.
+#[derive(Debug, Clone)]
+pub struct Waiting {
+    pub id: proto::TorrentId,
+    pub name: String,
+    pub at: std::path::PathBuf,
+}
+
+/// What the CLI prints at once for a found torrent, before its check ends.
+pub fn found_now(w: &Waiting) -> String {
+    format!("Found {} at {}, checking…", w.name, w.at.display())
+}
+
+/// What the CLI prints once the wait for `w` ends, or `None` while its check goes on: `now` is its
+/// status and hold in the latest snapshot, `None` if it's no longer listed. Every outcome ends it.
+pub fn found_outcome(w: &Waiting, now: Option<(&proto::Status, Option<proto::Held>)>) -> Option<String> {
+    use proto::{Held, Status};
+    let (name, id) = (&w.name, w.id);
+    let line = match now {
+        None => format!("{name}: removed before its check ended"),
+        Some((Status::Checking, Some(Held::Checking))) => return None,
+        Some((_, None)) => format!("{name}: its files match; nothing moved, and it's back as it was"),
+        Some((_, Some(Held::DontMatch))) => {
+            format!("{name}: its files don't match; it's stopped and nothing was written. `phantom resume {id}` downloads over them")
         }
-        None => format!("Found {name} at {at}: nothing moved, it's checked there and back as it was"),
-    }
+        Some((Status::MissingFiles, Some(Held::Checking))) => format!(
+            "{name}: files of it are missing or aren't its own to write; it's stopped and nothing was written. Once they are put right it's checked again"
+        ),
+        Some((_, Some(Held::Checking))) => {
+            format!("{name}: not checked; it's stopped and nothing was written. `phantom check {id}` checks it")
+        }
+    };
+    Some(line)
+}
+
+/// What the CLI prints of `w` when the service stops before its check ends.
+pub fn found_lost(w: &Waiting) -> String {
+    format!(
+        "{}: the service stopped before its check ended; it's held, nothing was written, and it's checked again when the service starts",
+        w.name
+    )
+}
+
+/// The "Files don't match" notice's button that checks the torrent again (#358).
+pub fn check_again() -> &'static str {
+    "Check again"
+}
+
+/// Its button that resumes the torrent, downloading over the files there (#358): Resume's own rules.
+pub fn download_over_them() -> &'static str {
+    "Download over them"
 }
 
 /// What the status bar says of a torrent found where it is now (#358) whose check found none of
@@ -1760,6 +1832,25 @@ mod tests {
         assert_eq!(happened_listing(UndoAction::Delete, 2, &one).plain(), "Album\nTheir files are in the Trash.");
     }
 
+    /// A Delete's list says, of each kind of torrent, where its files are: in the Trash, or where they
+    /// were (held, #358, with why), the names of each kind above its note.
+    #[test]
+    fn a_deletes_list_tells_each_kind_of_torrent_its_own_note() {
+        use proto::Held::{Checking, DontMatch};
+        let names = |v: &[&str]| v.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let text = |l: Listing| l.lines().map(|l| format!("{l:?}")).collect::<Vec<_>>().join("\n");
+        let only = deleted_listing(&names(&["Album"]), &[]);
+        assert_eq!(only, happened_listing(UndoAction::Delete, 1, &names(&["Album"])), "all in the Trash: as ever");
+        let stay = deleted_listing(&[], &[("Album".into(), DontMatch)]);
+        assert_eq!(text(stay), "Name(\"Album\")\nMuted(\"Its files don't match and stay.\")");
+        let both =
+            deleted_listing(&names(&["One", "Two"]), &[("Three".into(), DontMatch), ("Four".into(), Checking), ("Five".into(), DontMatch)]);
+        assert_eq!(
+            text(both),
+            "Name(\"One\")\nName(\"Two\")\nMuted(\"Their files are in the Trash.\")\nName(\"Three\")\nName(\"Five\")\nMuted(\"Their files don't match and stay.\")\nName(\"Four\")\nMuted(\"Its files aren't checked yet and stay.\")"
+        );
+    }
+
     /// A torrent found where it is now (#358): "Found" in the line; its name in the list, and where
     /// it is on a line of its own, never in the line.
     #[test]
@@ -1769,18 +1860,41 @@ mod tests {
         assert_eq!(listed.groups, [vec![Line::Name("Album".into()), Line::Path("/Films/Album".into())]]);
     }
 
-    /// The CLI's line once a found torrent's check is over: back as it was, or its files don't match.
     #[test]
-    fn a_found_torrent_s_line_says_how_its_check_went() {
-        let at = std::path::Path::new("/Films/Album");
-        assert_eq!(found_line(3, "Album", at, None), "Found Album at /Films/Album: nothing moved, it's checked there and back as it was");
+    fn the_cli_says_a_held_torrents_files_stay_when_it_is_deleted() {
+        assert_eq!(stayed_line("Album", proto::Held::DontMatch), "Album: taken off the list only. Its files don't match and stay.");
+    }
+
+    /// What the CLI says of a torrent a Move or a Rename found (#358): at once, "checking…", then how the
+    /// check went, whichever way it ends; none while it's still going.
+    #[test]
+    fn the_cli_tells_a_found_torrent_at_once_and_how_its_check_went_when_it_ends() {
+        use proto::{Held, Status};
+        let waiting = Waiting { id: 3, name: "Album".into(), at: "/Films/Album".into() };
+        assert_eq!(found_now(&waiting), "Found Album at /Films/Album, checking…");
+        let at = |status, held| found_outcome(&waiting, Some((&status, held)));
+        assert_eq!(at(Status::Checking, Some(Held::Checking)), None, "still going");
+        assert_eq!(at(Status::Seeding, None).unwrap(), "Album: its files match; nothing moved, and it's back as it was");
         assert_eq!(
-            found_line(3, "Album", at, Some(proto::Held::Checking)),
-            "Found Album at /Films/Album, but it isn't checked: it's stopped and nothing was written; `phantom check 3` checks it"
+            at(Status::Paused, Some(Held::DontMatch)).unwrap(),
+            "Album: its files don't match; it's stopped and nothing was written. `phantom resume 3` downloads over them"
         );
         assert_eq!(
-            found_line(3, "Album", at, Some(proto::Held::DontMatch)),
-            "Found Album at /Films/Album, but its files don't match: it's stopped and nothing was written; `phantom resume 3` downloads over them"
+            at(Status::Unchecked, Some(Held::Checking)).unwrap(),
+            "Album: not checked; it's stopped and nothing was written. `phantom check 3` checks it"
+        );
+        assert_eq!(
+            at(Status::MissingFiles, Some(Held::Checking)).unwrap(),
+            "Album: files of it are missing or aren't its own to write; it's stopped and nothing was written. Once they are put right it's checked again"
+        );
+        assert_eq!(
+            at(Status::WaitingToMove, Some(Held::Checking)).unwrap(),
+            "Album: not checked; it's stopped and nothing was written. `phantom check 3` checks it"
+        );
+        assert_eq!(found_outcome(&waiting, None).unwrap(), "Album: removed before its check ended");
+        assert_eq!(
+            found_lost(&waiting),
+            "Album: the service stopped before its check ended; it's held, nothing was written, and it's checked again when the service starts"
         );
     }
 

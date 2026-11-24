@@ -60,6 +60,8 @@ pub(super) struct Batch {
     failed: Vec<(TorrentId, Failure)>,
     /// Those a Move or a Rename found where they are now (#358).
     found: Vec<TorrentId>,
+    /// Those a Delete only took off the list, their files staying (#358).
+    stayed: Vec<(TorrentId, proto::Held)>,
     done: Done<Commanded>,
 }
 
@@ -103,7 +105,7 @@ impl MemoryService {
                     Some((id, Failure::Refused(Refusal::Torrent { id, why })))
                 })
                 .collect();
-            self.ready.push((answer(done, Commanded { failed, found: Vec::new() }), 0.0));
+            self.ready.push((answer(done, Commanded { failed, found: Vec::new(), stayed: Vec::new() }), 0.0));
             self.changed = true;
             return;
         }
@@ -139,7 +141,7 @@ impl MemoryService {
         }
         let batch = self.next_batch;
         self.next_batch += 1;
-        self.batches.insert(batch, Batch { left: doing.len(), failed: refused, found: Vec::new(), done });
+        self.batches.insert(batch, Batch { left: doing.len(), failed: refused, found: Vec::new(), stayed: Vec::new(), done });
         let action = match &command {
             TorrentCommand::Remove => Some((UndoAction::Remove, Vec::new())),
             TorrentCommand::Delete => Some((UndoAction::Delete, Vec::new())),
@@ -216,11 +218,11 @@ impl MemoryService {
 
     fn batch_ended(&mut self, batch: usize) {
         if self.batches.get(&batch).is_some_and(|b| b.left == 0)
-            && let Some(Batch { failed, found, done, .. }) = self.batches.remove(&batch)
+            && let Some(Batch { failed, found, stayed, done, .. }) = self.batches.remove(&batch)
         {
             let after = self.stale_answers * super::STALE[self.commands % super::STALE.len()];
             self.commands += 1;
-            self.ready.push((answer(done, Commanded { failed, found }), after));
+            self.ready.push((answer(done, Commanded { failed, found, stayed }), after));
         }
     }
 
@@ -229,6 +231,14 @@ impl MemoryService {
     pub(super) fn found(&mut self, seq: u64, id: TorrentId) {
         if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
             b.found.push(id);
+        }
+    }
+
+    /// Step `seq`'s part on torrent `id`, a Delete, left its files where they are (#358): its batch
+    /// hears so with its answer, as the engine's.
+    pub(super) fn stayed(&mut self, seq: u64, id: TorrentId, held: proto::Held) {
+        if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
+            b.stayed.push((id, held));
         }
     }
 
@@ -283,6 +293,11 @@ impl MemoryService {
             What::Action(parts) => match parts.get(&id) {
                 Some(Part::Doing(run)) => match run.action {
                     UndoAction::Remove => return self.removed(seq, id),
+                    // Held (#358): its files aren't verified as its own, so it only leaves the list.
+                    UndoAction::Delete if self.dont_match.contains(&id) => {
+                        self.stayed(seq, id, proto::Held::DontMatch);
+                        return self.removed(seq, id);
+                    }
                     UndoAction::Delete => {
                         self.event(id, Event::Command(proto::Action::Delete));
                         // Without info it has no files: it leaves, as on a Remove.

@@ -139,7 +139,10 @@ fn a_found_torrent_whose_files_do_not_match_stays_stopped_with_a_warning() {
     wait(&mut rt, 3.0);
 
     assert_eq!(notice(&rt), Some("Files don't match"));
-    assert_eq!(newest_list(&mut rt), format!("Files don't match\nAlbum (2024)\n{renamed}\nReveal in Finder"));
+    assert_eq!(
+        newest_list(&mut rt),
+        format!("Files don't match\nAlbum (2024)\n{renamed}\nCheck again\nDownload over them\nReveal in Finder")
+    );
     let t = find_torrent(&rt, 1);
     assert_eq!((t.status.clone(), t.held), (Status::Paused, Some(proto::Held::DontMatch)), "stopped, untouched");
     let entries = rt.state.bar.entries().iter().filter(|e| e.notice.short == "Files don't match").count();
@@ -172,4 +175,120 @@ fn undo_of_a_found_rename_whose_files_do_not_match_points_it_back() {
     wait(&mut rt, 1.0);
     let t = find_torrent(&rt, 1);
     assert_eq!((t.status.clone(), t.held), (Status::MissingFiles, None));
+}
+
+/// The album found on files that don't match, then deleted: only taken off the list. Its notice
+/// says its files don't match and stay; ⌘Z brings it back, still held, stopped.
+#[test]
+fn a_delete_of_files_that_do_not_match_leaves_them_and_says_so() {
+    let renamed = format!("{DOWNLOADS}/Album (2024)");
+    let mut rt = app(seeding_album().moved_by_hand_onto_others(1, &renamed));
+    wait(&mut rt, 0.5);
+    crate::model::rename(&mut rt.state, 1, proto::FileName::new("Album (2024)").unwrap());
+    settle(&mut rt);
+    wait(&mut rt, 3.0);
+    assert_eq!(find_torrent(&rt, 1).held, Some(proto::Held::DontMatch));
+
+    tap(&mut rt, "rows/1");
+    rt.update(|s, _| crate::model::remove_selected(s, true));
+    settle(&mut rt);
+    wait(&mut rt, 1.0);
+    assert_eq!(notice(&rt), Some("Deleted"));
+    assert_eq!(newest_list(&mut rt), "Deleted\nAlbum (2024)\nIts files don't match and stay.\nUndo\n⌘Z");
+    assert!(rt.state.torrents.iter().all(|t| t.id != 1), "off the list");
+
+    shortcut(&mut rt, InApp::Undo);
+    wait(&mut rt, 1.0);
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.status.clone(), t.held), (Status::Paused, Some(proto::Held::DontMatch)), "back, held and stopped");
+}
+
+/// Two deleted in one press, one with files that don't match and one ordinary: each by its own state,
+/// both told in the one notice.
+#[test]
+fn a_delete_of_two_tells_each_ones_files() {
+    let renamed = format!("{DOWNLOADS}/Album (2024)");
+    let mut rt = app(seeding_album().moved_by_hand_onto_others(1, &renamed));
+    wait(&mut rt, 0.5);
+    crate::model::rename(&mut rt.state, 1, proto::FileName::new("Album (2024)").unwrap());
+    settle(&mut rt);
+    wait(&mut rt, 3.0);
+
+    tap(&mut rt, "rows/0");
+    rt.key(rune::KeyEvent { key: Key::Down, mods: Mods { shift: true, ..Default::default() } });
+    settle(&mut rt);
+    assert_eq!(rt.state.table.selected_len(), 2);
+    rt.update(|s, _| crate::model::remove_selected(s, true));
+    settle(&mut rt);
+    wait(&mut rt, 1.0);
+    assert_eq!(notice(&rt), Some("Deleted 2 torrents"));
+    assert_eq!(
+        newest_list(&mut rt),
+        "Deleted 2 torrents\na\nIts files are in the Trash.\nAlbum (2024)\nIts files don't match and stay.\nUndo\n⌘Z"
+    );
+}
+
+/// The found album whose files don't match, as the app shows it: its row stopped, the warning in the bar.
+fn dont_match_album() -> (Runtime<Phantom>, crate::service::Probe) {
+    let renamed = format!("{DOWNLOADS}/Album (2024)");
+    let service = seeding_album().moved_by_hand_onto_others(1, &renamed);
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    crate::model::rename(&mut rt.state, 1, proto::FileName::new("Album (2024)").unwrap());
+    settle(&mut rt);
+    wait(&mut rt, 3.0);
+    assert_eq!(find_torrent(&rt, 1).held, Some(proto::Held::DontMatch));
+    (rt, probe)
+}
+
+/// "Download over them" is Resume: the notice's button runs it on its own torrent, whatever is
+/// selected, and the notice goes once it's resumed. The row menu and Space keep the name Resume.
+#[test]
+fn download_over_them_resumes_its_own_torrent_and_the_notice_goes() {
+    let (mut rt, probe) = dont_match_album();
+    // Another torrent selected: the notice's button is about the album alone.
+    tap(&mut rt, "rows/0");
+    let id = rt.state.bar.entries().last().unwrap().id;
+    super::generated::show_notice(&mut rt, id);
+    tap(&mut rt, "notice-action/1");
+    wait(&mut rt, 1.0);
+    let sent: Vec<_> = probe.commands().into_iter().filter(|(_, c)| matches!(c, TorrentCommand::Resume)).collect();
+    assert_eq!(sent, [(vec![1], TorrentCommand::Resume)], "its own torrent, not the selected one");
+    let t = find_torrent(&rt, 1);
+    assert_eq!((t.status.clone(), t.held), (Status::Downloading, None));
+    assert!(rt.state.bar.entries().iter().all(|e| e.notice.short != "Files don't match"), "settled: the notice goes");
+}
+
+/// "Check again" checks its own torrent; it stays held and the notice stays while its files still
+/// don't match. A notice whose torrent was removed goes with it, and a button that would do nothing
+/// isn't offered.
+#[test]
+fn check_again_checks_its_own_torrent_and_the_notice_goes_with_a_removed_one() {
+    let (mut rt, probe) = dont_match_album();
+    let id = rt.state.bar.entries().last().unwrap().id;
+    super::generated::show_notice(&mut rt, id);
+    tap(&mut rt, "notice-action/0");
+    let sent: Vec<_> = probe.commands().into_iter().filter(|(_, c)| matches!(c, TorrentCommand::Check)).collect();
+    assert_eq!(sent, [(vec![1], TorrentCommand::Check)]);
+    wait(&mut rt, 3.0);
+    assert_eq!(find_torrent(&rt, 1).held, Some(proto::Held::DontMatch));
+    assert!(rt.state.bar.entries().iter().any(|e| e.notice.short == "Files don't match"), "still so: it stays");
+    super::generated::close_popover(&mut rt);
+
+    tap(&mut rt, "rows/1");
+    rt.update(|s, _| crate::model::remove_selected(s, false));
+    settle(&mut rt);
+    wait(&mut rt, 1.0);
+    assert!(rt.state.bar.entries().iter().all(|e| e.notice.short != "Files don't match"), "its torrent is gone: so is the notice");
+}
+
+/// A button that would do nothing now isn't shown: Check again, while it's being checked.
+#[test]
+fn a_button_that_would_do_nothing_is_not_offered() {
+    let (mut rt, _) = dont_match_album();
+    row_pick(&mut rt, 1, "Check");
+    settle(&mut rt);
+    let list = newest_list(&mut rt);
+    assert!(!list.contains("Check again"), "{list}");
 }

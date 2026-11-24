@@ -670,7 +670,7 @@ pub struct Commanded {
     pub found: Vec<TorrentId>,
     /// Those whose Delete left their files where they were: held (#358), their files aren't verified,
     /// so they aren't the torrent's to trash.
-    pub stayed: Vec<TorrentId>,
+    pub stayed: Vec<(TorrentId, proto::Held)>,
 }
 
 /// A command for one torrent: its failure, if it failed.

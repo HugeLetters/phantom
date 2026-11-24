@@ -82,6 +82,9 @@ pub struct Notice {
     pub lasts: Lasts,
     /// A receipt of something that didn't happen ("Already in the list"): a neutral ⓘ instead of ✓.
     pub nothing: bool,
+    /// The torrent whose files don't match (#358) it tells of: it goes once that's no longer so
+    /// (lifted, resumed, removed).
+    pub about: Option<proto::TorrentId>,
 }
 
 impl Notice {
@@ -95,6 +98,7 @@ impl Notice {
             of: Vec::new(),
             lasts: Lasts::UntilDismissed,
             nothing: false,
+            about: None,
         }
     }
 
@@ -177,12 +181,32 @@ impl Notice {
 }
 
 impl Notice {
-    /// A torrent found where it is now (#358), `name` at `at`, whose check found none of its pieces
-    /// there: it's stopped and its files untouched. A warning that stays until dismissed.
-    pub fn files_dont_match(name: &str, at: &std::path::Path) -> Self {
-        Self::warning(display::files_dont_match())
-            .with_listing(display::found_listing(&[(name.to_owned(), at.to_owned())]))
-            .with_actions(vec![NoticeAction::reveal(at)])
+    /// Torrent `id` found where it is now (#358), `name` at `at`, whose check found no piece with
+    /// real content there: it's stopped and its files untouched. A warning that stays until it's
+    /// dismissed or the torrent isn't held so any more. Its buttons act on this torrent alone, each
+    /// offered while it would do something to it: Check again, Download over them (Resume), and
+    /// Reveal in Finder.
+    pub fn files_dont_match(id: proto::TorrentId, name: &str, at: &std::path::Path) -> Self {
+        use proto::Action;
+        let does = move |action: Action| move |s: &Phantom| s.torrents.iter().find(|t| t.id == id).is_some_and(|t| t.actions.does(action));
+        let on_it = move |action: Action, command: proto::TorrentCommand| {
+            move |s: &mut Phantom| {
+                // Only this torrent, and only while it would do something: the notice may be old.
+                if s.torrents.iter().find(|t| t.id == id).is_some_and(|t| t.actions.does(action)) {
+                    crate::model::command(&mut *s.service, &[id], command.clone());
+                }
+            }
+        };
+        let mut check = NoticeAction::new(display::check_again(), on_it(Action::Check, proto::TorrentCommand::Check));
+        check.shown = Some(Rc::new(does(Action::Check)));
+        let mut resume = NoticeAction::new(display::download_over_them(), on_it(Action::Resume, proto::TorrentCommand::Resume));
+        resume.shown = Some(Rc::new(does(Action::Resume)));
+        Self {
+            about: Some(id),
+            ..Self::warning(display::files_dont_match())
+                .with_listing(display::found_listing(&[(name.to_owned(), at.to_owned())]))
+                .with_actions(vec![check, resume, NoticeAction::reveal(at)])
+        }
     }
 }
 

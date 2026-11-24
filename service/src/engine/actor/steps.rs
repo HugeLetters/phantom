@@ -70,7 +70,7 @@ struct Batch {
     reply: Reply,
     failed: Vec<(TorrentId, Failure)>,
     found: Vec<TorrentId>,
-    stayed: Vec<TorrentId>,
+    stayed: Vec<(TorrentId, proto::Held)>,
     left: usize,
     /// Every part has arrived: it's answered once `left` is none.
     closed: bool,
@@ -495,9 +495,9 @@ impl Steps {
 
     /// Step `seq`'s part on torrent `id`, a Delete, left its files where they are (#358): its batch
     /// hears so with its answer.
-    pub(super) fn stayed(&mut self, seq: u64, id: TorrentId) {
+    pub(super) fn stayed(&mut self, seq: u64, id: TorrentId, held: proto::Held) {
         if let Some(b) = self.batch_of.get(&(seq, id)).and_then(|batch| self.batches.get_mut(batch)) {
-            b.stayed.push(id);
+            b.stayed.push((id, held));
         }
     }
 

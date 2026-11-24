@@ -806,10 +806,17 @@ async fn a_delete_of_files_not_verified_leaves_them_and_its_undo_brings_it_back_
         }
         let answer = f.engine.commanded(vec![f.id], TorrentCommand::Delete).await.unwrap();
         assert!(answer.failed.is_empty(), "checking {checking}");
-        assert_eq!(answer.stayed, vec![f.id], "checking {checking}: its files stayed");
+        assert_eq!(
+            answer.stayed,
+            vec![(f.id, if checking { proto::Held::Checking } else { proto::Held::DontMatch })],
+            "checking {checking}: its files stayed"
+        );
         assert!(f.engine.listing().await.is_empty(), "checking {checking}: off the list");
         assert!(f.untouched(), "checking {checking}: nothing written or removed");
-        assert!(!f.dir.path().join("trash").exists() || std::fs::read_dir(f.dir.path().join("trash")).unwrap().next().is_none(), "nothing in the Trash");
+        assert!(
+            !f.dir.path().join("trash").exists() || std::fs::read_dir(f.dir.path().join("trash")).unwrap().next().is_none(),
+            "nothing in the Trash"
+        );
         f.engine.undo().await.unwrap();
         if checking {
             // Still checked, as it was.
@@ -836,7 +843,7 @@ async fn a_delete_of_several_goes_by_each_ones_own_state() {
     wait_for(&f.engine, other, Status::Seeding).await;
     let answer = f.engine.commanded(vec![f.id, other], TorrentCommand::Delete).await.unwrap();
     assert!(answer.failed.is_empty());
-    assert_eq!(answer.stayed, vec![f.id]);
+    assert_eq!(answer.stayed, vec![(f.id, proto::Held::DontMatch)]);
     assert!(f.untouched());
     assert!(!f.dir.path().join("plain/pack/a.bin").exists(), "the other one's files went to the Trash");
     f.engine.stop().await;
@@ -1508,7 +1515,11 @@ async fn torrent_of(dir: &Path, files: &[(&str, &[u8])]) -> AddSource {
     for (name, bytes) in files {
         std::fs::write(pack.join(name), bytes).unwrap();
     }
-    let options = librqbit::CreateTorrentOptions { name: None, trackers: vec!["http://127.0.0.1:1/announce".into()], piece_length: Some(PIECE as u32) };
+    let options = librqbit::CreateTorrentOptions {
+        name: None,
+        trackers: vec!["http://127.0.0.1:1/announce".into()],
+        piece_length: Some(PIECE as u32),
+    };
     let spawner = librqbit::spawn_utils::BlockingSpawner::new(1);
     AddSource::TorrentFile(librqbit::create_torrent(&pack, options, &spawner).await.unwrap().as_bytes().unwrap().to_vec())
 }

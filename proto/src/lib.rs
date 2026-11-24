@@ -386,7 +386,7 @@ pub enum Response {
         found: Vec<TorrentId>,
         /// Those a Delete only took off the list: held (#358), their files stay where they are.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        stayed: Vec<TorrentId>,
+        stayed: Vec<(TorrentId, Held)>,
     },
     /// Refused, for a reason the client may act on.
     Refused(Refusal),

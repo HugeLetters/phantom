@@ -1515,8 +1515,8 @@ impl Actor {
         // never verified as the torrent's (the check is under way, or found none of its pieces), and
         // are the person's, so it's only taken off the list.
         let goes = self.torrents.get(&id).filter(|t| t.record.held.is_none()).and_then(|t| to_trash(&t.record));
-        if self.torrents.get(&id).is_some_and(|t| t.record.held.is_some() && to_trash(&t.record).is_some()) {
-            self.steps.stayed(seq, id);
+        if let Some(held) = self.torrents.get(&id).filter(|t| to_trash(&t.record).is_some()).and_then(|t| t.record.held) {
+            self.steps.stayed(seq, id, held);
         }
         if let Err(e) = self.event(id, Event::Command(proto::Action::Delete)).await {
             return self.step_ended(seq, id, steps::Over::Failed, Err(e));
@@ -1974,7 +1974,8 @@ fn on_disk(torrent: &Torrent) -> files::Disk {
     let mut disk = files::disk_of(&expected(torrent));
     if torrent.record.held.is_some() {
         let destination = &torrent.record.destination;
-        let reach = |path: &std::path::Path| path.strip_prefix(destination).ok().and_then(|inside| super::moving::reached(destination, inside));
+        let reach =
+            |path: &std::path::Path| path.strip_prefix(destination).ok().and_then(|inside| super::moving::reached(destination, inside));
         for found in disk.files.values_mut() {
             found.at = found.at.filter(|_| reach(&found.file.path).is_some_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) == 1));
         }

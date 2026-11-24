@@ -125,8 +125,11 @@ impl SocketService {
 
 /// A command's answer, or, not reaching the service, every one of `all` failed alike.
 fn all_failed(result: Result<Commanded, Failure>, all: &[TorrentId]) -> Commanded {
-    result
-        .unwrap_or_else(|e| Commanded { failed: all.iter().map(|&id| (id, Failure::Error(anyhow!("{e:#}")))).collect(), found: Vec::new() })
+    result.unwrap_or_else(|e| Commanded {
+        failed: all.iter().map(|&id| (id, Failure::Error(anyhow!("{e:#}")))).collect(),
+        found: Vec::new(),
+        stayed: Vec::new(),
+    })
 }
 
 impl Service for SocketService {

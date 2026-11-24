@@ -319,7 +319,16 @@ fn commands(client: &mut Client, ids: &[TorrentId], command: TorrentCommand) -> 
     let action = command.action();
     let mut seen = std::collections::BTreeSet::new();
     let ids: Vec<TorrentId> = ids.iter().copied().filter(|id| seen.insert(*id)).collect();
-    let client::Commanded { mut failed, found } = client.commands(&ids, command)?;
+    // Its name, which it no longer has once it's off the list.
+    let names: Vec<(TorrentId, String)> = match (&command, client.list()) {
+        (TorrentCommand::Delete, Ok(listed)) => listed.iter().map(|t| (t.id, t.display_name().to_owned())).collect(),
+        _ => Vec::new(),
+    };
+    let client::Commanded { mut failed, found, stayed } = client.commands(&ids, command)?;
+    for (id, held) in &stayed {
+        let name = names.iter().find(|(n, _)| n == id).map_or_else(|| format!("torrent {id}"), |(_, name)| name.clone());
+        println!("{}", display::stayed_line(&name, *held));
+    }
     print_found(client, &found)?;
     match failed.len() {
         0 => Ok(()),
@@ -370,7 +379,7 @@ fn moves(client: &mut Client, ids: &[TorrentId], to: proto::AbsolutePath, choice
         Some(proto::Answered { choice: choice?, found: found.files.clone() })
     };
     let moves = ids.iter().map(|&id| proto::MoveOf { id, clash: answered(id), name: name.clone() }).collect();
-    let client::Commanded { mut failed, found } = client.moves(to, moves)?;
+    let client::Commanded { mut failed, found, .. } = client.moves(to, moves)?;
     print_found(client, &found)?;
     match failed.len() {
         0 => Ok(()),
@@ -384,33 +393,61 @@ fn moves(client: &mut Client, ids: &[TorrentId], to: proto::AbsolutePath, choice
     }
 }
 
-/// Each torrent of `found` a Move or a Rename found where it is now (#358), where that is and how
-/// its check there went: once each is over, or can't go on by itself.
+/// Each torrent of `found` a Move or a Rename found where it is now (#358): told at once ("Found
+/// <name> at <path>, checking…"), then how its check there went, as each one's ends. Every outcome ends
+/// the wait: its files match, don't, couldn't be checked, the torrent removed, the service stopped.
+/// Ctrl-C ends only the waiting: the check carries on in the service, which this is a client of.
 fn print_found(client: &mut Client, found: &[TorrentId]) -> Result<()> {
+    use std::io::Write;
     if found.is_empty() {
         return Ok(());
     }
-    let mut snapshots = client.snapshots()?;
-    let torrents = loop {
-        let torrents: Vec<proto::TorrentInfo> = snapshots.receive()?.torrents.into_iter().filter(|t| found.contains(&t.id)).collect();
-        if !torrents.iter().any(being_checked) {
-            break torrents;
-        }
+    let say = |line: String| {
+        println!("{line}");
+        // Told at once, though what's piped may be buffered.
+        let _ = std::io::stdout().flush();
     };
-    for t in &torrents {
-        if let Some(at) = &t.location {
-            println!("{}", display::found_line(t.id, t.display_name(), at, t.held));
+    let mut snapshots = client.snapshots()?;
+    let mut waiting: Vec<display::Waiting> = Vec::new();
+    let mut first = true;
+    while first || !waiting.is_empty() {
+        let snapshot = match snapshots.receive() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                for w in &waiting {
+                    say(display::found_lost(w));
+                }
+                return Err(e.into());
+            }
+        };
+        if std::mem::take(&mut first) {
+            for id in found {
+                let listed = snapshot.torrents.iter().find(|t| t.id == *id);
+                let at = listed.and_then(|t| t.location.as_ref());
+                let w = display::Waiting {
+                    id: *id,
+                    name: listed.map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned()),
+                    at: at.map(|at| at.to_path_buf()).unwrap_or_default(),
+                };
+                match listed {
+                    Some(_) => say(display::found_now(&w)),
+                    None => say(display::found_outcome(&w, None).expect("a torrent that isn't listed is over")),
+                }
+                waiting.extend(listed.map(|_| w));
+            }
         }
+        waiting.retain(|w| {
+            let now = snapshot.torrents.iter().find(|t| t.id == w.id).map(|t| (&t.status, t.held));
+            match display::found_outcome(w, now) {
+                Some(line) => {
+                    say(line);
+                    false
+                }
+                None => true,
+            }
+        });
     }
     Ok(())
-}
-
-/// Whether the check of a found torrent goes on: not one cancelled, or whose files can't be read,
-/// which is held till it's checked again.
-fn being_checked(t: &proto::TorrentInfo) -> bool {
-    use proto::Status as S;
-    let ended = matches!(t.status, S::Unchecked | S::MissingFiles | S::DestinationUnavailable { .. } | S::Error { .. });
-    t.held == Some(proto::Held::Checking) && !ended
 }
 
 /// The CLI's own fix for a refusal, after the shared words.
