@@ -363,10 +363,10 @@ impl Actor {
                 // Its files partly in the Trash on purpose, wherever its drive is.
                 away if !record.delete_failed.is_empty() => Phase::DeleteFailed { kept: record.delete_failed.clone(), away, unchecked },
                 Some(reason) => Phase::DestinationUnavailable { reason },
-                // Found and held while it was checked (#358): checked again, held, whatever's there.
-                None if record.held == Some(proto::Held::Checking) => Phase::CheckDue { returning: BTreeMap::new() },
                 // Whatever files went meanwhile: only a check says.
                 None if unchecked => Phase::Unchecked { gone: BTreeMap::new() },
+                // Found and held while it was checked (#358): checked again, held, whatever's there.
+                None if record.held == Some(proto::Held::Checking) => Phase::CheckDue { returning: BTreeMap::new() },
                 None if gone.is_empty() => Phase::Ready,
                 None => Phase::MissingFiles { gone },
             };
@@ -1268,6 +1268,11 @@ impl Actor {
             return Some(Observation::DestinationGone { reason });
         }
         if torrent.lib.torrent().is_some_and(|h| matches!(h.stats().state, TorrentStatsState::Initializing { .. })) {
+            return None;
+        }
+        // Found, its check over and not judged yet (#358): a file that isn't there was never made,
+        // and is as its hold is lifted.
+        if torrent.record.held == Some(proto::Held::Checking) && torrent.lifecycle.phase == Phase::Ready {
             return None;
         }
         Some(Observation::Files(files::disk_of(&expected(torrent))))

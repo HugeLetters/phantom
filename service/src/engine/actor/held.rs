@@ -1,5 +1,5 @@
 //! A torrent a Move or a Rename found where it is now (#358) is held while it's checked there:
-//! written ahead with its move (`Record::held`), it's added to librqbit with storage that touches
+//! saved with the place it's found at (`Record::held`), it's added to librqbit with storage that touches
 //! nothing ([`Guard::held`](super::super::files::Guard::held)), and never started, so nothing there
 //! is made, written, grown or stamped. Once the check ends:
 //!
@@ -12,6 +12,7 @@
 //!
 //! A crash meanwhile leaves it held: the next start checks it in full again, held.
 
+use librqbit::TorrentStatsState;
 use proto::{Action, Held, TorrentId};
 use tracing::warn;
 
@@ -24,7 +25,12 @@ impl Actor {
     pub(super) async fn judge_held(&mut self, id: TorrentId) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(held) = torrent.record.held else { return };
-        if torrent.lifecycle.phase != Phase::Ready || !matches!(torrent.lib, lib::Lib::In(_)) {
+        let lib::Lib::In(handle) = &torrent.lib else { return };
+        if torrent.lifecycle.phase != Phase::Ready || matches!(handle.stats().state, TorrentStatsState::Initializing { .. }) {
+            return;
+        }
+        // Not under a step of its own (files of it on their way to the Trash, say): the next poll does.
+        if self.steps.machine().lanes.get(&id).is_some_and(|lane| !lane.is_empty()) {
             return;
         }
         let wants = torrent.lifecycle.wants;
@@ -33,11 +39,13 @@ impl Actor {
             (Held::DontMatch, false) if wants == Wants::Run => self.lift_hold(id).await,
             (Held::DontMatch, false) => {}
             (Held::Checking, false) => {
+                // In one save with the Pause: saved as it doesn't match and wanted running, a start
+                // would take it for a Resume.
                 self.torrents.get_mut(&id).expect("just found").record.held = Some(Held::DontMatch);
-                self.save();
                 if let Err(e) = Box::pin(self.event(id, Event::Command(Action::Pause))).await {
                     warn!(id, error = ?e, "couldn't stop a found torrent whose files don't match");
                 }
+                self.save();
             }
         }
     }

@@ -174,6 +174,11 @@ impl Plan {
         self.items.iter().any(|i| i.kept)
     }
 
+    /// Whether it neither moves a file nor takes one that's there already: it only points elsewhere.
+    pub fn moves_none(&self) -> bool {
+        self.items.iter().all(|i| !i.kept && i.source.is_none())
+    }
+
     /// The files that don't move, by index: not in the old destination (deleted by hand), nor
     /// kept from the new one.
     pub fn missing(&self) -> Vec<usize> {

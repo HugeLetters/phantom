@@ -159,8 +159,8 @@ pub struct Saved {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moving: Option<Moving>,
     /// A Move or a Rename found it where it is now (#358): held stopped, librqbit's storage of it
-    /// touching nothing there, until a check finds any of its pieces there. Written ahead with the
-    /// move, so a start after a crash checks it again, held.
+    /// touching nothing there, until a check finds any of its pieces there. Saved with the
+    /// destination it's found at, so a start after a crash checks it again, held.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub held: Option<proto::Held>,
 }
@@ -191,6 +191,11 @@ pub struct Moving {
     /// before (none: its info's).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub names: Option<Names>,
+    /// [`Record::held`] on the other side of `placed`: what it's held as once the record names the
+    /// new destination, and, from there, what it was before, which a move going back gives it again.
+    /// They change places in the save that changes the destination (#358).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<proto::Held>,
 }
 
 /// The names on disk a move takes a torrent from and to ([`Record::on_disk`]'s: none is its info's).

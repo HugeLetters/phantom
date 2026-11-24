@@ -516,17 +516,18 @@ impl Actor {
         // file replaced by hand were of the one it had open, which doesn't move.
         let replaced = self.guard.trashed().replaced(&record.info_hash);
         let torrent = self.torrents.get_mut(&id).expect("just found");
+        // Found (#358): held from where the record names the new place, till it's checked there. Pointed
+        // back where nothing of it is, it's held no more; moved with its files, it's as it was.
+        let held = match found {
+            true => Some(proto::Held::Checking),
+            false if plan.moves_none() => None,
+            false => torrent.record.held,
+        };
         torrent.record.moving =
-            Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced: !replaced.is_empty(), names });
-        // Found (#358): held while it's checked there, written ahead with the move.
-        let held = torrent.record.held;
-        if found {
-            torrent.record.held = Some(proto::Held::Checking);
-        }
+            Some(Moving { plan, stash: stash.clone(), placed: false, landed: false, replaced: !replaced.is_empty(), names, held });
         if let Err(e) = self.save_move() {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.moving = None;
-            torrent.record.held = held;
             let why = NotMoved::Failed { detail: format!("couldn't save where it goes: {e:#}") };
             return Err(refused(not_done(why)));
         }
@@ -727,6 +728,9 @@ impl Actor {
         let torrent = self.torrents.get_mut(&id).context("moving, not in the list")?;
         let moving = torrent.record.moving.as_mut().context("moving without a plan")?;
         change(&mut moving.plan);
+        if moving.placed != placed {
+            std::mem::swap(&mut torrent.record.held, &mut moving.held);
+        }
         moving.placed = placed;
         let to = if placed { &moving.plan.to } else { &moving.plan.from };
         torrent.record.destination = AbsolutePath::new(to.clone()).map_err(|p| anyhow::anyhow!("a move to {}", p.display()))?;
@@ -807,10 +811,6 @@ impl Actor {
                 }
             }
         };
-        // A found torrent's move that went back is held no more: it's where it was (#358).
-        if mover.found && matches!(stage, Stage::Restoring { .. }) {
-            torrent.record.held = None;
-        }
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
         match torrent.record.moving.take() {
             // Checked in full once librqbit has it again. Till then (Missing files keeps it out),
