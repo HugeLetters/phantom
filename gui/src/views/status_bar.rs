@@ -6,7 +6,7 @@
 //!
 //! While the connection is wrong, its few words get a button: Show log, Restart.
 
-use rune::{El, col, el, row};
+use rune::{El, Tx, col, el, row};
 
 use super::speed;
 use crate::bar::machine::{Entry, Way};
@@ -186,7 +186,7 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction]) -> (Option<El>, Optio
         .iter()
         .enumerate()
         .map(|(i, action)| {
-            let run = action.run.clone();
+            let (run, copy) = (action.run.clone(), action.copy.clone());
             let off = action.off.as_ref().and_then(|off| off(s));
             if off.is_some() && s.why_off_note == off {
                 why_shown = off.clone();
@@ -197,7 +197,12 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction]) -> (Option<El>, Optio
             let button = if i == 0 { button.primary() } else { button };
             let button = button
                 .disabled(off.is_some())
-                .on_press(move |s: &mut Phantom| run(s))
+                .on_press_tx(move |s: &mut Phantom, tx: &mut Tx| {
+                    run(s);
+                    if let Some(text) = &copy {
+                        tx.copy(text.clone());
+                    }
+                })
                 .on_press_disabled(move |s: &mut Phantom| s.why_off_note = note.clone())
                 .build();
             row().key(format!("notice-action/{i}")).child(button)

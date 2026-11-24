@@ -555,6 +555,12 @@ pub enum UndoAction {
 pub enum CantUndo {
     /// The torrent is in the list again: added since.
     InList,
+    /// Another torrent in the list has the files now (#371): at the torrent's paths, or its own
+    /// folder, in any spelling, or a Move of it that is waiting or under way. Bringing the torrent
+    /// back would have two torrents write the same files. `other` is that torrent. `magnet` is the
+    /// undone torrent's own magnet link (its info hash, name and trackers), which stays valid after
+    /// the entry is dropped; none for a torrent without an info hash.
+    AnotherHasFiles { other: Named, magnet: Option<String> },
     /// A partial Delete's torrent, or the one whose files were moved, isn't in the list any more.
     NotInList,
     /// A Delete of the torrent is under way, or it's partly deleted.

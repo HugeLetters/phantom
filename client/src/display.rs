@@ -362,6 +362,11 @@ pub fn copied_magnet() -> &'static str {
     "Copied the magnet link"
 }
 
+/// The button that copies a magnet link, as the list's command words it: it acts at once, so no "…".
+pub fn copy_magnet_link() -> &'static str {
+    "Copy magnet link"
+}
+
 /// What an add did, as the bar's line: "Added the torrent", or "Already in the list". The
 /// torrent's name ([`Added::name`]) is the list's.
 pub fn added_line(added: &Added) -> &'static str {
@@ -663,7 +668,17 @@ pub fn undone(undo: &Undoable) -> String {
 /// An undo that couldn't be done, as the CLI prints it: "Couldn't undo Delete of Album", and why,
 /// with what stayed out of the Trash, if anything did.
 pub fn cant_undo(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, String) {
-    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo_names(undo)), sentence(&cant_undo_whole(why, stranded)))
+    let more = sentence(&cant_undo_whole(why, stranded));
+    (format!("Couldn't undo {} of {}", undo_action(undo.action), undo_names(undo)), with_magnet(more, why))
+}
+
+/// `said`, a refusal in words, with the link to add the torrent again when another torrent has its
+/// files (#371): the entry is dropped, and the CLI has no button to copy it.
+fn with_magnet(said: String, why: &CantUndo) -> String {
+    match why {
+        CantUndo::AnotherHasFiles { magnet: Some(link), .. } => format!("{said}. Its magnet link: {link}"),
+        _ => said,
+    }
 }
 
 /// A torrent of an undo of several that didn't come back, as the CLI prints it; one added again
@@ -714,11 +729,21 @@ fn undo_names(undo: &Undoable) -> String {
 /// list has the torrents' names, then why, and what stayed out of the Trash, if anything did.
 pub fn cant_undo_line(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]) -> (String, Listing) {
     let names: Vec<String> = undo.torrents.iter().map(|t| t.name.clone()).collect();
-    let listing = Listing::new(&names_listed(&names), "").then(cant_undo_reason(why).lines());
+    let reason = match why {
+        // The other torrent's name is a line of its own, so the two names read apart (#371).
+        CantUndo::AnotherHasFiles { other, .. } => vec![Line::Muted(another_has_its_files().into()), Line::Name(other.name.clone())],
+        why => cant_undo_reason(why).lines(),
+    };
+    let listing = Listing::new(&names_listed(&names), "").then(reason);
     let stranded = (!stranded.is_empty()).then(|| {
         std::iter::once(Line::Muted("Still in place:".into())).chain(stranded.iter().map(|p| Line::Path(p.display().to_string()))).collect()
     });
     (format!("Couldn't undo the {}", undo_action(undo.action)), listing.then(stranded.unwrap_or_default()))
+}
+
+/// What leads into the name of the torrent that has the files of one an Undo would bring back.
+fn another_has_its_files() -> &'static str {
+    "Another torrent in the list has its files:"
 }
 
 /// A torrent of an undo of several that didn't come back, as [`cant_undo_line`] words it; one added
@@ -759,6 +784,7 @@ fn cant_undo_why(why: &CantUndo) -> String {
     match why {
         // As the app says it ("Already in the list"): added again since, nothing touched.
         CantUndo::InList => already_in_list().to_lowercase(),
+        CantUndo::AnotherHasFiles { other, .. } => format!("another torrent, {}, has its files now", other.name),
         CantUndo::NotInList => "it isn't in the list any more".into(),
         CantUndo::Deleting => "it's being deleted".into(),
         CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
@@ -1443,7 +1469,11 @@ pub fn refusal(refusal: &Refusal) -> String {
         Refusal::NothingToUndo => "nothing to undo".into(),
         Refusal::Undone => "undone before it finished".into(),
         Refusal::Undo { undo, why, stranded } => {
-            format!("can't undo {} of {}: {}", undo_action(undo.action), undo_names(undo), cant_undo_whole(why, stranded))
+            let said = format!("can't undo {} of {}: {}", undo_action(undo.action), undo_names(undo), cant_undo_whole(why, stranded));
+            match why {
+                CantUndo::AnotherHasFiles { magnet: Some(link), .. } => format!("{said}. Its magnet link: {link}"),
+                _ => said,
+            }
         }
     }
 }

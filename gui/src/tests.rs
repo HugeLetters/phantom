@@ -9,6 +9,7 @@ mod renaming;
 mod settings;
 mod space;
 mod undo;
+mod undo_place;
 mod window;
 
 use std::path::Path;

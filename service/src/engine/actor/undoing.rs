@@ -269,7 +269,12 @@ impl Actor {
         let in_list = self.by_hash(&entry.info_hash);
         let destination = match &entry.back {
             Back::Gone { .. } if in_list.is_some() => return Err(CantUndo::InList),
-            Back::Gone { saved, .. } => Some(saved.destination.clone()),
+            Back::Gone { saved, .. } => {
+                if let Some(why) = self.another_has(entry) {
+                    return Err(why);
+                }
+                Some(saved.destination.clone())
+            }
             // Its torrent is in the list, the same one (added again since is another), and one trashing
             // files would do something to now.
             Back::Files { previous, .. } => {
@@ -308,6 +313,26 @@ impl Actor {
             return Err(CantUndo::NotInTrash { path: absolute(first.from.clone()) });
         }
         trash::can_put_back(&left, &destination, &self.new_copies(entry, &left)).map_err(blocked)
+    }
+
+    /// Why `entry`, a Remove or Delete of a torrent that left the list, can't bring it back for
+    /// another torrent in the list that has its files now (#371): at its paths, or inside or around
+    /// its folder, however spelled, or where a Move of it, waiting or under way, takes them. Move's
+    /// own rule for another torrent's place (`moving::anothers`, `Actor::others_files`), so one
+    /// listed torrent never gets files two write. Nothing is touched: the other torrent isn't
+    /// checked, paused or restarted, and nothing at its place is written.
+    fn another_has(&self, entry: &Entry) -> Option<CantUndo> {
+        let Back::Gone { saved, source: Source::Stash(stash) } = &entry.back else { return None };
+        // A magnet without info has no files to be taken.
+        let info = Info::parse(&stash.torrent().ok()?).ok()?;
+        let record = Record::parse(&entry.info_hash, saved.clone(), Some(info));
+        let files = super::moving::inside(&record);
+        let (_, other) = super::super::moving::anothers(&record.destination, &files, self.others_files(entry.id))?;
+        let other = self.torrents.get(&other)?;
+        // Kept in the refusal: the step is dropped, and this is all that's left of the torrent to add
+        // again. Its info's own name, as the app's Copy magnet link has it, not one a Rename gave it.
+        let magnet = (!entry.info_hash.is_empty()).then(|| undo::magnet(&entry.info_hash, saved.name.as_deref(), &saved.trackers));
+        Some(CantUndo::AnotherHasFiles { other: proto::Named { id: other.id, name: name_of(other) }, magnet })
     }
 
     /// The torrent's own new copies of the files `entry`, a Move to Trash, took (#276): files it gets
@@ -421,7 +446,11 @@ impl Actor {
                 Err(refused(entry.undoable(of), why, stranded))
             }
             Ok(back) => {
+                // Looked at again as the torrent is about to be added (#371): another torrent may have
+                // come while the files went back, with nothing between this and the add to let one in.
+                let late = self.another_has(&entry);
                 let added = match &entry.back {
+                    Back::Gone { .. } if late.is_some() => Err(anyhow!("another torrent has its files now").into()),
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
                     Back::Renamed { .. } => Err(anyhow!("a Rename's undo puts nothing back from the Trash").into()),
@@ -442,10 +471,11 @@ impl Actor {
                         Failure::Error(proto::ServiceError::Internal { detail }) => detail.clone(),
                         Failure::Error(e) => format!("{e:?}"),
                     };
-                    let why = match entry.back {
-                        Back::Files { .. } => CantUndo::PriorityFailed { detail },
-                        Back::Gone { .. } | Back::InList { .. } => CantUndo::AddFailed { detail },
-                        Back::Renamed { .. } => CantUndo::Failed { detail },
+                    let why = match (late, &entry.back) {
+                        (Some(why), _) => why,
+                        (None, Back::Files { .. }) => CantUndo::PriorityFailed { detail },
+                        (None, Back::Gone { .. } | Back::InList { .. }) => CantUndo::AddFailed { detail },
+                        (None, Back::Renamed { .. }) => CantUndo::Failed { detail },
                     };
                     // Only what's back: an item emptied from the Trash while a crash cut the undo short
                     // isn't, and what's at its path now isn't the torrent's.

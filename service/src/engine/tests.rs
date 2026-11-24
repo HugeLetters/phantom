@@ -5554,6 +5554,7 @@ mod never_cut;
 mod off_gone;
 mod oracle;
 mod renaming;
+mod undo_place;
 
 /// A .torrent that can't be read at a start keeps its torrent (#244's review): listed under its id,
 /// an error, which a Check tries again (still an error while it can't be read, Seeding once it can);

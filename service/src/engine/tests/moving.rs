@@ -11,7 +11,7 @@ use super::*;
 
 /// Holds the engine's moves: copies even on the same drive, and each copy waits at `gate` after
 /// each chunk while it's held.
-async fn holding(engine: &Engine, copies: bool, gate: Option<super::super::trash::Gate>) {
+pub(super) async fn holding(engine: &Engine, copies: bool, gate: Option<super::super::trash::Gate>) {
     engine.inspect(move |a| a.move_hold = Hold { gate, copies, ..Hold::default() }).await;
 }
 
@@ -632,7 +632,7 @@ fn bytes_in_named(bytes: &BTreeMap<PathBuf, Vec<u8>>) -> BTreeMap<PathBuf, Vec<u
 // Several torrents (#270): the Moves of a selection run one after another, in the order asked.
 
 /// A complete torrent called `name` of two files, in `downloads/<name>`, no two alike.
-async fn album(dir: &Path, name: &str, seed: usize) -> AddSource {
+pub(super) async fn album(dir: &Path, name: &str, seed: usize) -> AddSource {
     let folder = dir.join("downloads").join(name);
     std::fs::create_dir_all(&folder).unwrap();
     let bytes: Vec<u8> = (0..2 * PIECE).map(|n| (n * 7 + seed * 31 + n / PIECE) as u8).collect();

@@ -1523,6 +1523,12 @@ impl MemoryService {
         if self.torrents.iter().any(|t| t.info_hash == left.info.info_hash) {
             return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(of), why: proto::CantUndo::InList, stranded: Vec::new() }));
         }
+        // Another torrent has its files now (#371): the engine's rule, with the place the fake knows.
+        if let Some(other) = self.another_has(left) {
+            let (other, magnet) = (proto::Named { id: other.id, name: other.display_name().to_owned() }, client::magnet_link(&left.info));
+            let why = proto::CantUndo::AnotherHasFiles { other, magnet: Some(magnet) };
+            return Err(Failure::Refused(Refusal::Undo { undo: left.undoable(of), why, stranded: Vec::new() }));
+        }
         if self.undo_refusing.contains(left.info.display_name()) {
             let path = AbsolutePath::new(downloads().join(left.info.display_name())).expect("absolute");
             let why = proto::CantUndo::NotInTrash { path };

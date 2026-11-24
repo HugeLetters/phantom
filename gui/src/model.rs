@@ -822,18 +822,30 @@ pub(crate) fn refused_asked(s: &mut Phantom, mut seqs: Vec<u64>, failure: &clien
 pub(crate) fn not_back_notice(not: &proto::NotBack) -> Notice {
     match display::not_back_line(not) {
         (short, list) if matches!(not.why, proto::CantUndo::InList) => Notice::new(short).brief().nothing_done().with_listing(list),
-        (short, list) => cant_undo(short, list, &not.why, &not.stranded),
+        (short, list) => cant_undo(short, list, &not.why, &not.stranded, Some(&not.torrent.name)),
     }
 }
 
 /// An undo that couldn't be done: an error, as every "Couldn't undo" is, with Reveal in Finder for
 /// the files it left in place, else for what's in its way, while that's on disk.
-fn cant_undo(short: String, list: crate::notice::Listing, why: &proto::CantUndo, stranded: &[proto::AbsolutePath]) -> Notice {
+fn cant_undo(
+    short: String,
+    list: crate::notice::Listing,
+    why: &proto::CantUndo,
+    stranded: &[proto::AbsolutePath],
+    name: Option<&str>,
+) -> Notice {
     let path = match stranded.first() {
         Some(path) => Some(std::path::PathBuf::from(path.display().to_string())),
         None => display::cant_undo_reason(why).paths.first().map(std::path::PathBuf::from),
     };
-    Notice::error(short).with_listing(list).with_actions(path.iter().map(|p| NoticeAction::reveal(p)).collect())
+    let mut actions: Vec<NoticeAction> = path.iter().map(|p| NoticeAction::reveal(p)).collect();
+    // Another torrent has its files (#371): the refused one stays off the list and its step is
+    // dropped, so its link, kept in the refusal, is how to add it again.
+    if let proto::CantUndo::AnotherHasFiles { magnet: Some(link), .. } = why {
+        actions.push(NoticeAction::copy_magnet(link.clone(), name.map(String::from)));
+    }
+    Notice::error(short).with_listing(list).with_actions(actions)
 }
 
 /// What the status bar tells of an undo's answer: what came back (what of a selection didn't, the
@@ -853,7 +865,11 @@ pub fn undo_notices(undone: &Result<proto::Undone, client::Failure>, undos: &Und
         }
         Err(client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded })) => {
             let (short, list) = display::cant_undo_line(undo, why, stranded);
-            vec![cant_undo(short, list, why, stranded)]
+            let name = match &undo.torrents[..] {
+                [one] => Some(one.name.as_str()),
+                _ => None,
+            };
+            vec![cant_undo(short, list, why, stranded, name)]
         }
         Err(e) => vec![Notice::error(display::undo_failed()).with_text(display::sentence(&format!("{e:#}")))],
     }

@@ -200,16 +200,32 @@ pub struct NoticeAction {
     pub undo: bool,
     /// Whether it's offered now: `None`, always. Reveal in Finder is, while what it shows is on disk.
     pub shown: Option<Rc<dyn Fn(&Phantom) -> bool>>,
+    /// Text it puts on the clipboard when pressed (`run` tells so): a magnet link.
+    pub copy: Option<String>,
 }
 
 impl NoticeAction {
     pub fn new(title: impl Into<String>, run: impl Fn(&mut Phantom) + 'static) -> Self {
-        Self { title: title.into(), run: Rc::new(run), hint: None, off: None, undo: false, shown: None }
+        Self { title: title.into(), run: Rc::new(run), hint: None, off: None, undo: false, shown: None, copy: None }
     }
 
     /// Reveal in Finder for `path`, offered while it's on disk.
     pub fn reveal(path: &std::path::Path) -> Self {
         Self::on_disk(display::reveal_in_finder(), path)
+    }
+
+    /// Copy magnet link: puts `link`, a torrent that isn't in the list's, on the clipboard and says
+    /// so in the status bar, naming the torrent if `name` is one.
+    pub fn copy_magnet(link: String, name: Option<String>) -> Self {
+        let mut action = Self::new(display::copy_magnet_link(), move |s: &mut Phantom| {
+            let told = Notice::new(display::copied_magnet()).brief();
+            s.bar.tell(match &name {
+                Some(name) => told.with_names(name),
+                None => told,
+            });
+        });
+        action.copy = Some(link);
+        action
     }
 
     /// Show folder: reveals `folder` in Finder (never opens it: a package would launch), offered

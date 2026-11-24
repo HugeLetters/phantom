@@ -171,6 +171,23 @@ impl MemoryService {
         self.torrents.iter().find(theirs).map(|o| o.id)
     }
 
+    /// The torrent in the list that has the place `left`, a torrent that left it, goes back to, or is
+    /// moving there: Move's rule for another torrent's place (`anothers`), as the engine's undo takes
+    /// it. The fake has no files, so a place is the torrent's location, in any case.
+    pub(super) fn another_has(&self, left: &super::Left) -> Option<&proto::TorrentInfo> {
+        let destination = left.destination.clone().unwrap_or_else(super::downloads);
+        let at = match left.files.as_deref() {
+            Some([only]) => destination.join(&only.path),
+            _ => destination.join(left.info.display_name()),
+        };
+        let folded = |p: &std::path::Path| p.to_string_lossy().to_lowercase();
+        let places = |o: &proto::TorrentInfo| {
+            let there = self.moving.get(&o.id).map(|m| m.to.join(m.name.as_deref().unwrap_or(o.display_name())));
+            self.location(o).map(|l| l.to_path_buf()).into_iter().chain(there)
+        };
+        self.torrents.iter().find(|o| o.id != left.info.id && places(o).any(|p| folded(&p) == folded(&at)))
+    }
+
     /// The files of torrent `id` that a Move into `to` would find there already, if it would find
     /// any: as the fake has no disk, each the same as found every time till the folder's
     /// [`Rewritten`](super::DiskChange::Rewritten).
