@@ -1757,3 +1757,50 @@ async fn a_destination_gone_as_the_hold_is_lifted_leaves_it_held() {
     assert!(t.held.is_some(), "lifted over a file that isn't its own: {:?}", t.status);
     f.engine.stop().await;
 }
+
+/// Copies everything under `from` to `to`.
+fn copy_all(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        match e.file_type().unwrap().is_dir() {
+            true => copy_all(&e.path(), &to.join(e.file_name())),
+            false => drop(std::fs::copy(e.path(), to.join(e.file_name())).unwrap()),
+        }
+    }
+}
+
+/// A crash as the hold is lifted, its storage about to open the files and not having looked at any:
+/// what's saved then is still held. (The data dir as it is at that instant is what the next start
+/// reads.) Its files replaced meanwhile, that start checks them, held, and they're untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_as_the_hold_is_lifted_before_its_files_are_looked_at_leaves_it_held() {
+    let kept = Arc::new(std::sync::Mutex::new(None::<(PathBuf, PathBuf)>));
+    let keep = kept.clone();
+    let f = found_and_held_at(
+        false,
+        |_| {},
+        Arc::new(move |at| {
+            if at == super::super::files::At::Lift
+                && let Some((from, to)) = keep.lock().unwrap().take()
+            {
+                copy_all(&from, &to);
+            }
+        }),
+    )
+    .await;
+    let crashed = f.dir.path().join("crashed");
+    *kept.lock().unwrap() = Some((f.dir.path().join("data"), crashed.join("data")));
+    f.gate.hold(false);
+    until_held(&f.engine, f.id, None).await;
+    assert!(kept.lock().unwrap().is_none(), "kept as its files were about to be opened");
+    f.engine.stop().await;
+    for n in ["a.bin", "b.bin", "c.bin"] {
+        swap(&f, n, &[7; 2 * PIECE]);
+    }
+    let before = (tree(&f.album), bytes_in(&f.album));
+    let e = engine(&crashed).await;
+    until_held(&e, f.id, Some(proto::Held::DontMatch)).await;
+    wait_for(&e, f.id, Status::Paused).await;
+    assert_eq!((tree(&f.album), bytes_in(&f.album)), before);
+    e.stop().await;
+}
