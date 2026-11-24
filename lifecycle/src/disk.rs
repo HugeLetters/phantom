@@ -29,7 +29,7 @@ pub struct Gone {
 }
 
 /// What was at a missing file's path when it was last judged.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum Seen {
     /// Not size-checked yet: the next size check records what's there (the file librqbit made again
     /// when it restored the torrent, or the one a check just found isn't the file that went)
@@ -41,7 +41,7 @@ pub enum Seen {
 
 /// Which file is at a path, and its size and when it was last changed: another file, or the same
 /// one changed, differs in one of them.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct Stamp {
     pub inode: u64,
     pub len: u64,

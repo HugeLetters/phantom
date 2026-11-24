@@ -758,6 +758,7 @@ impl Actor {
             }
             Some(_) | None => {}
         }
+        torrent.keep_known();
         self.save();
         // The stash isn't named any more.
         self.save_undo();
