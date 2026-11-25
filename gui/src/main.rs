@@ -53,7 +53,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // What Settings asked first: a change made there is older than anything the service sends now.
     let posted = Inbox::run(s, |s| &s.inbox, tx);
     let incoming = s.service.poll(now);
-    let changed = posted || !incoming.is_empty();
+    let changed = posted || s.finder.news() || !incoming.is_empty();
     for incoming in incoming {
         match incoming {
             Incoming::Live(live) => s.apply(live),
@@ -991,37 +991,40 @@ fn spec() -> AppSpec<Phantom> {
             ("notice-add-failed", |s| {
                 s.service = Box::new(demo_service());
                 let request = AddRequest::link(NOBODY).expect("a magnet link");
-                let failed =
-                    vec![model::AddFailure { what: "Nobody".into(), why: "No peers have this torrent".into(), request: Some(request) }];
+                let failed = vec![model::AddFailure {
+                    what: "Nobody".into(),
+                    why: "No peers have this torrent".into(),
+                    request: Some(model::Asked { request, to: None, by_field: false }),
+                }];
                 s.bar.tell(model::FailedAdds { total: 1, failed }.notice());
             }),
             ("notice-delete-failed", |s| {
-                s.service = Box::new(demo_service());
+                listed(s, demo_service());
                 let list = notice::Listing::of_entries([("Big Buck Bunny (2008)", &"Some of its files are locked".into())]);
                 s.bar.tell(
                     Notice::error(display::commands_failed(proto::Action::Delete, 1, 1))
                         .with_listing(list)
-                        .with_actions(vec![model::retry::command(vec![1], proto::Action::Delete)]),
+                        .with_actions(vec![model::retry::command(s, &[1], proto::Action::Delete)]),
                 );
             }),
             ("notice-resume-failed", |s| {
-                s.service = Box::new(demo_service());
+                listed(s, demo_service());
                 let list = notice::Listing::of_entries([("Sintel (2010)", &"The disk is full".into())]);
                 s.bar.tell(
                     Notice::error(display::commands_failed(proto::Action::Resume, 1, 2))
                         .with_listing(list)
-                        .with_actions(vec![model::retry::command(vec![2], proto::Action::Resume)]),
+                        .with_actions(vec![model::retry::command(s, &[2], proto::Action::Resume)]),
                 );
             }),
             ("notice-move-partial", |s| {
-                s.service = Box::new(demo_service());
+                listed(s, demo_service());
                 let to = proto::AbsolutePath::new("/Users/me/Films").expect("absolute");
                 let list = notice::Listing::of_entries([("Sintel (2010)", &"Cancelled".into())]);
-                let actions = vec![model::retry::move_again(vec![1], to), model::retry::move_to(vec![1])];
+                let actions = model::retry::moving(s, &[1], to);
                 s.bar.tell(Notice::warning(display::moved_of(1, 2)).with_listing(list).with_actions(actions));
             }),
             ("notice-rename-clash", |s| {
-                s.service = Box::new(demo_service());
+                listed(s, demo_service());
                 let path = proto::AbsolutePath::new("/Users/me/Downloads/Big Buck Bunny (2008) (1)").expect("absolute");
                 let why = display::refused_why(&proto::TorrentRefusal::NameTaken { path: path.clone() });
                 let list = notice::Listing::of_entries([("Big Buck Bunny (2008)", &why)]);
@@ -1029,7 +1032,7 @@ fn spec() -> AppSpec<Phantom> {
                 s.bar.tell(
                     Notice::error(display::commands_failed(proto::Action::Rename, 1, 1))
                         .with_listing(list)
-                        .with_actions(vec![model::retry::rename(1), way]),
+                        .with_actions(vec![model::retry::rename(s, 1), way]),
                 );
             }),
             ("notice-restart-failed", |s| {
@@ -1060,7 +1063,7 @@ fn spec() -> AppSpec<Phantom> {
                         true
                     }
                 }
-                s.service = Box::new(demo_service());
+                listed(s, demo_service());
                 s.finder = Box::new(NotThere);
                 platform::show_of(s, std::path::Path::new("/Users/me/Downloads/Big Buck Bunny.mkv"), platform::Show::Open, Some(1));
             }),
@@ -1312,6 +1315,7 @@ fn main() {
         if rune::tooling::headless_run().is_some() {
             MAIN.set(Some(handle.clone()));
         }
+        let wake_for_disk = handle.clone();
         let wake = move || handle.wake();
         let service: Box<dyn Service> = if rune::tooling::headless_run().is_none() {
             Box::new(SocketService::start(wake))
@@ -1324,7 +1328,7 @@ fn main() {
         let mut app = Phantom { window, looks, settings: to_settings, inbox: main_inbox, prefs, ..Phantom::new(service) };
         // Headless runs keep the fake finder (nothing opens) and keep no recent folders.
         if rune::tooling::headless_run().is_none() {
-            app.finder = Box::new(platform::SystemFinder);
+            app.finder = Box::new(platform::SystemFinder::new(move || wake_for_disk.wake()));
             app.relauncher = Box::new(platform::SystemRelauncher);
             app.recent = recent_folders();
         }

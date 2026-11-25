@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use client::{LinkProblem, OpenRefusal, display};
-use proto::{Action, Added, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo};
+use proto::{AbsolutePath, Action, Added, Details, File, Priority, TorrentCommand, TorrentId, TorrentInfo};
 use rune::{FileDialogOptions, TextEdit, Tx};
 use rune_kit::{SortDir, TableState};
 
@@ -145,7 +145,7 @@ impl FailedAdds {
     /// The entry as a [`Notice`]: "Couldn't add 2 of 5", and each failure as its view.
     pub fn notice(&self) -> Notice {
         let list = Listing::of_entries(self.failed.iter().map(|f| (f.what.as_str(), &f.why)));
-        let again: Vec<AddRequest> = self.failed.iter().filter_map(|f| f.request.clone()).collect();
+        let again: Vec<Asked> = self.failed.iter().filter_map(|f| f.request.clone()).collect();
         let actions = if again.is_empty() { Vec::new() } else { vec![retry::add(again)] };
         Notice { more: Some(list), ..Notice::error(display::adds_failed(self.failed.len(), self.total)) }.with_actions(actions)
     }
@@ -157,7 +157,17 @@ pub struct AddFailure {
     pub what: String,
     pub why: display::Reason,
     /// What was asked of the service, if it was: Try again sends it again.
-    pub request: Option<AddRequest>,
+    pub request: Option<Asked>,
+}
+
+/// An add as it was asked of the service.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Asked {
+    pub request: AddRequest,
+    /// The folder chosen for it; `None`: the default one.
+    pub to: Option<AbsolutePath>,
+    /// The field sent it, and empties once it's added.
+    pub by_field: bool,
 }
 
 impl AddFailure {
@@ -258,17 +268,24 @@ impl Batch {
         Self { field, total: refused.len(), failed: refused }
     }
 
-    /// What the service's answer to `requests` does to the batch.
-    fn answer(self, requests: &[AddRequest]) -> OnAdded {
+    /// What the service's answer to `requests`, asked into `to`, does to the batch.
+    fn answer(self, requests: &[AddRequest], to: Option<AbsolutePath>) -> OnAdded {
         let requests = requests.to_vec();
-        Box::new(move |s, results, tx| self.answered(s, &requests, results, tx))
+        Box::new(move |s, results, tx| self.answered(s, &requests, to, results, tx))
     }
 
     /// Each add that was added is told of in the status bar, the last one showing; those refused
     /// for want of a destination wait for the picker, as one. The field's own add, while the
     /// field still holds its link, empties the field once added; a failure, the field's too, goes
     /// to the batch's notice, the link staying in the field to try again.
-    fn answered(mut self, s: &mut Phantom, asked: &[AddRequest], results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
+    fn answered(
+        mut self,
+        s: &mut Phantom,
+        asked: &[AddRequest],
+        to: Option<AbsolutePath>,
+        results: Vec<Result<Added, AddError>>,
+        tx: &mut Tx,
+    ) {
         let holds = self.field.as_deref().is_some_and(|link| s.magnet.text.trim() == link);
         let mut requests = Vec::new();
         for (request, result) in asked.iter().zip(results) {
@@ -288,7 +305,7 @@ impl Batch {
                     self.failed.push(AddFailure {
                         what: what(request),
                         why: display::add_failure(&e).into(),
-                        request: Some(request.clone()),
+                        request: Some(Asked { request: request.clone(), to: to.clone(), by_field: self.field.is_some() }),
                     });
                 }
             }
@@ -739,7 +756,7 @@ pub fn submit_url(service: &mut dyn Service, field: &TextEdit, note: &mut Option
             *refocus = button;
             let requests = vec![request];
             let batch = Batch::new(Some(field.text.trim().to_owned()), Vec::new());
-            service.add(requests.clone(), None, batch.answer(&requests));
+            service.add(requests.clone(), None, batch.answer(&requests, None));
         }
     }
 }
@@ -758,8 +775,28 @@ pub fn add(s: &mut Phantom, requests: Vec<AddRequest>, refused: Vec<AddFailure>)
     if requests.is_empty() {
         batch.finish(s);
     } else {
-        let answer = batch.answer(&requests);
+        let answer = batch.answer(&requests, None);
         s.service.add(requests, None, answer);
+    }
+}
+
+/// Adds again what failed, as it was asked: those with the same folder as one batch (the field's is
+/// alone in its own).
+fn add_again(s: &mut Phantom, adds: Vec<Asked>) {
+    let field = match adds.as_slice() {
+        [Asked { request: AddRequest::Link { text, .. }, by_field: true, .. }] => Some(text.clone()),
+        _ => None,
+    };
+    let mut batches: Vec<(Option<AbsolutePath>, Vec<AddRequest>)> = Vec::new();
+    for Asked { request, to, .. } in adds {
+        match batches.iter_mut().find(|(into, _)| *into == to) {
+            Some((_, requests)) => requests.push(request),
+            None => batches.push((to, vec![request])),
+        }
+    }
+    for (to, requests) in batches {
+        let answer = Batch::new(field.clone(), Vec::new()).answer(&requests, to.clone());
+        s.service.add(requests, to, answer);
     }
 }
 
@@ -920,10 +957,10 @@ fn command_then(
                         client::Failure::Refused(proto::Refusal::Torrent {
                             why: proto::TorrentRefusal::NameTaken { path } | proto::TorrentRefusal::NameOfAnother { path, .. },
                             ..
-                        }) => Some(NoticeAction::reveal(Path::new(&path.display().to_string()))),
+                        }) => Some(NoticeAction::reveal(path)),
                         _ => None,
                     };
-                    std::iter::once(retry::rename(*id)).chain(way).collect()
+                    std::iter::once(retry::rename(s, *id)).chain(way).collect()
                 }
                 _ => Vec::new(),
             };
@@ -952,7 +989,7 @@ fn command_then(
             };
             let again = match action {
                 Action::Rename => rename_buttons,
-                Action::Pause | Action::Resume | Action::Delete => vec![retry::command(failed_ids, action)],
+                Action::Pause | Action::Resume | Action::Delete => vec![retry::command(s, &failed_ids, action)],
                 _ => Vec::new(),
             };
             s.bar.tell(Notice { more: Some(list), of, ..Notice::error(title) }.with_actions(again));
@@ -980,7 +1017,7 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
         };
         match folder {
             Ok(folder) => {
-                let answer = batch.answer(&requests);
+                let answer = batch.answer(&requests, Some(folder.clone()));
                 s.service.add(requests, Some(folder), answer);
             }
             // None added: the batch fails for them, with the reason, unless cancelled.
@@ -990,7 +1027,7 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
                     batch.failed.extend(requests.iter().map(|r| AddFailure {
                         what: what(r),
                         why: display::sentence(&why).into(),
-                        request: Some(r.clone()),
+                        request: Some(Asked { request: r.clone(), to: None, by_field: batch.field.is_some() }),
                     }));
                 }
                 batch.finish(s);

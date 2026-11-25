@@ -33,6 +33,7 @@ pub use blocks::{BlockOverrides, Blocks};
 pub use blocks::{ProgressBar, StatusDot};
 pub use icon::Icon;
 pub use menu::Entry;
+pub use notice::NOTICES_REST;
 pub use palette::PaletteRow;
 #[cfg(test)]
 pub(crate) use sheet::NAME_LINE;

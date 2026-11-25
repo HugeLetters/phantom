@@ -87,7 +87,9 @@ fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &
         .notice_button(newest, tone, bar_undo(s, ui), pill, client::display::notices_open_glyph())
         .on_press(crate::overlay::press_notices);
     // As wide as the widest notice in the list needs, so it doesn't change from page to page.
-    let width = ui.popover_width(s.bar.entries().iter().map(|entry| {
+    // Measured only while it's open.
+    let open = crate::overlay::up(s) == Some(crate::overlay::Overlay::Notices);
+    let width = ui.popover_width(s.bar.entries().iter().filter(|_| open).map(|entry| {
         let n = &entry.notice;
         let buttons: Vec<_> =
             n.actions.iter().filter(|a| offered(s, a)).map(|a| (a.title.clone(), a.hint.as_ref().and_then(|hint| hint(s)))).collect();
@@ -97,7 +99,6 @@ fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &
         Some((entry, at, total)) => popover_of(s, ui, entry, at, total),
         None => (None, el()),
     };
-    let open = crate::overlay::up(s) == Some(crate::overlay::Overlay::Notices);
     ui.notice_panel(
         "notices",
         line,
@@ -198,12 +199,18 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction], id: crate::bar::machi
             let button = button
                 .disabled(off.is_some())
                 .on_press_tx(move |s: &mut Phantom, tx: &mut Tx| {
+                    // A second press before the next frame finds the button still drawn.
+                    if once && !s.bar.take(id) {
+                        return;
+                    }
                     run(s, tx);
                     if let Some(text) = &copy {
                         tx.copy(text.clone());
                     }
-                    if once {
-                        s.bar.dismiss(id);
+                    // It left, and the focus with it: to the list itself, not to the next notice's
+                    // button, where the same key would press that.
+                    if s.bar.is_open() && s.bar.entries().iter().all(|e| e.id != id) {
+                        tx.focus(crate::ui::NOTICES_REST, false);
                     }
                 })
                 .on_press_disabled(move |s: &mut Phantom| s.why_off_note = note.clone())

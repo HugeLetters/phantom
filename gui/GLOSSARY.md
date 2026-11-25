@@ -110,10 +110,12 @@ place); a failed Open of a file that isn't there has **Show folder** while its f
 warning or error offers what the person would do next, when Phantom can do it: at most three buttons,
 the likeliest first, named by what happens, in sentence case. **Try again** (a failed add, Move,
 Delete, Pause or Resume) runs the same command as before, on the failed torrents only, so every
-safety rule, refusal and clash dialog applies again; pressing it takes its notice away, so it runs
-once. A failed Move also has **Move to…** (the torrents left); a failed Open of a file that isn't on
+safety rule, refusal and clash dialog applies again; an add goes again into the folder
+chosen for it; pressing it takes its notice away, so it runs once, and the focus rests in the list, on no
+other notice's button. A failed Move also has **Move to…** (the torrents left); a failed Open of a file that isn't on
 disk has **Check** after Show folder. A button that no longer applies is not shown: its torrent is
-gone (a torrent removed and added again is another), its command already went through, or the
+gone (a torrent removed and added again is another, as is one whose id a new torrent list gave out
+again), its command already went through, or the
 service says it can't run now. A receipt has none. The bar shows the newest notice's line in its own colour (a receipt
 is never amber), the Undo of the newest action's notice (the small button the connection's are), then
 the **pill**, an oval with the count of every notice tinted by the worst severity among them (a

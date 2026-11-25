@@ -20,8 +20,8 @@ use client::{Failure, display};
 use proto::{AbsolutePath, Action, FileName, Found, MoveOf, NameProblem, NotMoved, Refusal, TorrentId, TorrentRefusal};
 use rune::{FileDialogOptions, TextEdit, Tx};
 
-use super::{AddFailure, Phantom};
-use crate::notice::{Listing, Notice};
+use super::{AddFailure, Phantom, retry};
+use crate::notice::{Listing, Notice, NoticeAction};
 use crate::platform::Show;
 
 /// The clash dialog, while it asks about torrent `id`, called `name`: its files, in `to`, are there
@@ -140,11 +140,17 @@ pub fn pick_folder(s: &mut Phantom, ids: Vec<TorrentId>, tx: &mut Tx) {
     tx.open_folder(options, move |s: &mut Phantom, chosen, _| match chosen {
         Ok(Some(folder)) => match client::absolute(&folder) {
             Ok(to) => start(s, ids, to),
-            Err(e) => tell(s, ids.first().copied().unwrap_or_default(), &format!("{e:#}")),
+            Err(e) => unasked(s, &ids, &format!("{e:#}")),
         },
         Ok(None) => {}
-        Err(e) => tell(s, ids.first().copied().unwrap_or_default(), &format!("can't ask for a folder: {e}")),
+        Err(e) => unasked(s, &ids, &format!("can't ask for a folder: {e}")),
     });
+}
+
+/// A Move of `ids` with no folder to go to: `why`, and Move to… to ask for one again.
+fn unasked(s: &mut Phantom, ids: &[TorrentId], why: &str) {
+    let actions = vec![retry::move_to(s, ids)];
+    tell(s, ids.first().copied().unwrap_or_default(), why, actions);
 }
 
 /// Moves the torrents of `ids` (the selection, in the list's order) that can move into `to`: asks
@@ -192,7 +198,8 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
             }
             Err(e) => {
                 let id = asking.order.first().copied().unwrap_or_default();
-                tell(s, id, &format!("{e:#}"));
+                let actions = retry::moving(s, &asking.order, asking.to.clone());
+                tell(s, id, &format!("{e:#}"), actions);
             }
         }),
     );
@@ -398,7 +405,7 @@ fn one(s: &mut Phantom, id: TorrentId, failed: Vec<(TorrentId, Failure)>, to: &A
     }
     let name = name(s, id);
     let (what, why) = display::command_failure(&name, &failure);
-    told(s, AddFailure { what, why, request: None }, Some((vec![id], to.clone())));
+    told(s, AddFailure { what, why, request: None }, retry::moving(s, &[id], to.clone()));
 }
 
 /// A Move that failed, as a line of the notice's list: the torrent and why, which names it no
@@ -427,28 +434,23 @@ fn tell_selection(s: &mut Phantom, selected: usize, moved: usize, unmoved: Vec<U
     }
     let list = Listing::of_entries(unmoved.iter().map(|u| (u.name.as_str(), &u.why)));
     let left: Vec<TorrentId> = unmoved.iter().map(|u| u.id).collect();
-    s.bar.tell(Notice { more: Some(list), ..Notice::warning(display::moved_of(moved, selected)) }.with_actions(again(left, to.clone())));
+    let actions = retry::moving(s, &left, to.clone());
+    s.bar.tell(Notice { more: Some(list), ..Notice::warning(display::moved_of(moved, selected)) }.with_actions(actions));
 }
 
 fn name(s: &Phantom, id: TorrentId) -> String {
     s.torrents.iter().find(|t| t.id == id).map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned())
 }
 
-/// A Move of torrent `id` that couldn't be asked: `why`.
-fn tell(s: &mut Phantom, id: TorrentId, why: &str) {
-    told(s, AddFailure { what: name(s, id), why: display::sentence(why).into(), request: None }, None);
+/// A Move that couldn't be asked, `id` its first torrent: `why`, and the buttons that ask again.
+fn tell(s: &mut Phantom, id: TorrentId, why: &str, actions: Vec<NoticeAction>) {
+    told(s, AddFailure { what: name(s, id), why: display::sentence(why).into(), request: None }, actions);
 }
 
 /// A Move that failed, as any failed command is told: "Couldn't move the torrent", the torrent and
 /// why under it.
-fn told(s: &mut Phantom, failed: AddFailure, left: Option<(Vec<TorrentId>, AbsolutePath)>) {
+fn told(s: &mut Phantom, failed: AddFailure, actions: Vec<NoticeAction>) {
     let title = display::commands_failed(Action::Move, 1, 1);
     let list = Listing::of_entries([(failed.what.as_str(), &failed.why)]);
-    let actions = left.map(|(ids, to)| again(ids, to)).unwrap_or_default();
     s.bar.tell(Notice { more: Some(list), ..Notice::error(title) }.with_actions(actions));
-}
-
-/// The buttons of a Move that left `ids`: Try again into the same folder, Move to… another.
-fn again(ids: Vec<TorrentId>, to: AbsolutePath) -> Vec<crate::notice::NoticeAction> {
-    vec![super::retry::move_again(ids.clone(), to), super::retry::move_to(ids)]
 }

@@ -8,7 +8,7 @@ use rune::Runtime;
 use super::generated::{show_notice, texts_under};
 use super::{app, settle, tap, torrent, wait};
 use crate::bar::machine::NoticeId;
-use crate::model::{AddFailure, FailedAdds, Phantom, retry};
+use crate::model::{AddFailure, Asked, FailedAdds, Phantom, retry};
 use crate::notice::Notice;
 use crate::service::{AddRequest, MemoryService};
 
@@ -84,7 +84,8 @@ fn try_again_is_not_offered_for_a_torrent_that_is_gone() {
 fn try_again_for_a_resume_acts_on_the_failed_ones_that_still_apply() {
     let mut rt = app(MemoryService::new().with_torrents(vec![paused(0, "A"), paused(1, "B"), torrent(2, "C")]));
     wait(&mut rt, 0.5);
-    let id = told(&mut rt, Notice::error("Couldn't resume 3 of 3").with_actions(vec![retry::command(vec![0, 1, 2], Action::Resume)]));
+    let again = retry::command(&rt.state, &[0, 1, 2], Action::Resume);
+    let id = told(&mut rt, Notice::error("Couldn't resume 3 of 3").with_actions(vec![again]));
     assert_eq!(list_of(&mut rt, id).last().map(String::as_str), Some("Try again"));
     press(&mut rt, id, 0);
     wait(&mut rt, 1.0);
@@ -93,7 +94,8 @@ fn try_again_for_a_resume_acts_on_the_failed_ones_that_still_apply() {
     assert_ne!(status(&rt, 1), Some(Status::Paused));
     assert!(rt.state.bar.entries().iter().all(|e| e.id != id), "pressed, its notice goes");
     // Everything it was for runs now: another notice of the same failure has nothing to offer.
-    let again = told(&mut rt, Notice::error("Couldn't resume 2 of 2").with_actions(vec![retry::command(vec![0, 1], Action::Resume)]));
+    let again = retry::command(&rt.state, &[0, 1], Action::Resume);
+    let again = told(&mut rt, Notice::error("Couldn't resume 2 of 2").with_actions(vec![again]));
     assert!(!list_of(&mut rt, again).contains(&"Try again".to_owned()), "already resumed");
 }
 
@@ -103,7 +105,11 @@ fn try_again_for_a_failed_add_adds_it_again() {
     let mut rt = app(MemoryService::new());
     wait(&mut rt, 0.5);
     let request = AddRequest::link(MAGNET).expect("a link");
-    let failed = AddFailure { what: "Big Buck Bunny".into(), why: "No peers have this torrent".into(), request: Some(request) };
+    let failed = AddFailure {
+        what: "Big Buck Bunny".into(),
+        why: "No peers have this torrent".into(),
+        request: Some(Asked { request, to: None, by_field: false }),
+    };
     let refused = AddFailure { what: "notes.txt".into(), why: "Not a torrent file".into(), request: None };
     let id = told(&mut rt, FailedAdds { total: 2, failed: vec![failed, refused] }.notice());
     assert_eq!(list_of(&mut rt, id).last().map(String::as_str), Some("Try again"));
@@ -212,9 +218,6 @@ fn the_popover_is_as_wide_as_the_widest_notice_needs_on_every_page() {
     show_notice(&mut rt, last);
     let with_path = width(&rt);
     assert!(with_path < 480.0, "a short path counts for its own width, not 480: {with_path}");
-    let head = super::generated::rect_of(&rt, "notices-head").expect("a head");
-    let panel = super::generated::rect_of(&rt, "notices-panel").expect("the panel");
-    assert!(head[0] + head[2] <= panel[0] + panel[2], "the pager fits");
     let long = "/Volumes/An External Drive With a Long Name/Downloads/A Folder Deep Down/And Deeper/And Deeper Still/file.torrent";
     super::generated::close_popover(&mut rt);
     told(&mut rt, Notice::error("Couldn't add the torrent").with_listing(crate::notice::Listing::new(long, "")));
@@ -262,7 +265,8 @@ fn a_rename_that_found_something_there_offers_rename_and_reveal() {
     assert_eq!(rt.state.rename.id, Some(1));
     assert_eq!(crate::model::selected_torrents(&rt.state.table), vec![1]);
     // The torrent is gone: no Rename…; what's in the way is still on disk.
-    let again = told(&mut rt, Notice::error("Couldn't rename the torrent").with_actions(vec![retry::rename(7)]));
+    let gone = retry::rename(&rt.state, 7);
+    let again = told(&mut rt, Notice::error("Couldn't rename the torrent").with_actions(vec![gone]));
     assert!(!list_of(&mut rt, again).contains(&"Rename…".to_owned()), "no torrent 7");
 }
 
@@ -299,4 +303,159 @@ fn a_move_whose_target_vanished_still_offers_move_to_but_not_try_again() {
     settle(&mut rt);
     let list = list_of(&mut rt, id);
     assert!(list.last().map(String::as_str) == Some("Move to…") && !list.contains(&"Try again".to_owned()), "{list:?}");
+}
+
+/// An id given out again (the torrent list was set aside and begun anew) is another torrent: a
+/// Delete's Try again neither shows for it nor, pressed as it changes, touches it.
+#[test]
+fn a_button_never_acts_on_another_torrent_with_its_id() {
+    let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).trash_refusing("A"));
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::remove_ids(s, vec![0], true));
+    wait(&mut rt, 1.0);
+    let id = newest(&rt);
+    show_notice(&mut rt, id);
+    let before = rt.state.bar.entries().last().unwrap().notice.actions[0].clone();
+    // Another list, its torrent 0 another torrent.
+    rt.update(|s, _| {
+        let other = proto::TorrentInfo { info_hash: "another".into(), ..torrent(0, "A") };
+        s.service = Box::new(MemoryService::new().with_torrents(vec![other, torrent(1, "B")]));
+        s.latest = (0, 0);
+    });
+    wait(&mut rt, 0.5);
+    assert_eq!(rt.state.torrents[0].info_hash, "another");
+    assert!(!texts_under(&rt, &format!("notice/{id}")).contains(&"Try again".to_owned()), "not offered");
+    rt.update(|s, tx| (before.run)(s, tx));
+    wait(&mut rt, 1.0);
+    assert_eq!(rt.state.torrents.len(), 2, "nothing deleted");
+}
+
+/// Space pressed again on Try again, two failed Deletes told: it runs once, for its own torrent. The
+/// next notice's button doesn't get the focus.
+#[test]
+fn space_again_on_try_again_runs_only_its_own() {
+    for at_once in [false, true] {
+        let service = MemoryService::new().with_torrents(vec![torrent(0, "A"), torrent(1, "B")]).trash_refusing("A").trash_refusing("B");
+        let probe = service.probe();
+        let mut rt = app(service);
+        wait(&mut rt, 0.5);
+        for id in [0, 1] {
+            rt.update(|s, _| crate::model::remove_ids(s, vec![id], true));
+            wait(&mut rt, 1.0);
+        }
+        let deletes = || probe.commands().iter().filter(|(_, c)| *c == proto::TorrentCommand::Delete).count();
+        assert_eq!(deletes(), 2);
+        let last = newest(&rt);
+        show_notice(&mut rt, last);
+        let on_button = |rt: &Runtime<Phantom>| rt.elements().iter().any(|e| e.focused && e.path.contains("notice-action"));
+        let tab = || rune::KeyEvent { key: rune::Key::Tab, mods: Default::default() };
+        for _ in 0..8 {
+            if on_button(&rt) {
+                break;
+            }
+            rt.key(tab());
+            settle(&mut rt);
+        }
+        assert!(on_button(&rt), "reached by Tab");
+        for _ in 0..3 {
+            rt.key(rune::KeyEvent { key: rune::Key::Text(" ".into()), mods: Default::default() });
+            if !at_once {
+                settle(&mut rt);
+            }
+        }
+        wait(&mut rt, 1.0);
+        assert_eq!(deletes(), 3, "only the one it was on");
+    }
+}
+
+/// The pager, at its longest, and Dismiss all fit the narrowest popover.
+#[test]
+fn the_pager_fits_the_narrowest_popover() {
+    let mut rt = app(MemoryService::new());
+    for _ in 0..crate::bar::machine::MAX_TOLD {
+        rt.update(|s, _| s.bar.tell(Notice::error("Copied")));
+    }
+    settle(&mut rt);
+    let last = newest(&rt);
+    show_notice(&mut rt, last);
+    assert_eq!(width(&rt), 240.0);
+    let [older, all, panel] =
+        ["notice-older", "notice-dismiss-all", "notices-panel"].map(|k| super::generated::rect_of(&rt, k).expect("drawn"));
+    assert!(older[0] + older[2] <= all[0], "{older:?} {all:?}");
+    assert!(all[0] + all[2] <= panel[0] + panel[2] - 8.0, "{all:?} {panel:?}");
+}
+
+/// Drawing never looks at the disk itself: a drive that doesn't answer would hang the window.
+#[test]
+fn drawing_a_notice_never_looks_at_the_disk() {
+    struct Hangs;
+    impl crate::platform::Finder for Hangs {
+        fn show(&mut self, _: &std::path::Path, _: crate::platform::Show) -> Result<(), crate::platform::ShowError> {
+            unreachable!()
+        }
+        fn exists(&self, _: &std::path::Path) -> bool {
+            panic!("looked")
+        }
+        fn seen(&self, _: &std::path::Path) -> bool {
+            true
+        }
+    }
+    let (mut rt, id) = partial_move();
+    rt.state.finder = Box::new(Hangs);
+    let path = std::path::Path::new("/Volumes/Dead/a");
+    told(&mut rt, Notice::error("Couldn't undo the change").with_actions(vec![crate::notice::NoticeAction::reveal(path)]));
+    assert!(list_of(&mut rt, id).contains(&"Try again".to_owned()));
+}
+
+/// An add into a chosen folder is tried again into that folder, not the default one.
+#[test]
+fn try_again_for_an_add_keeps_the_folder_chosen_for_it() {
+    let mut rt = app(MemoryService::new().with_default_destination(None).rejecting(MAGNET));
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::add(s, vec![AddRequest::link(MAGNET).expect("a link")], Vec::new()));
+    wait(&mut rt, 2.0);
+    rt.resolve_file_dialog(Some("/Films".into())).expect("no default folder: asked for one");
+    wait(&mut rt, 2.0);
+    let id = newest(&rt);
+    rt.update(|s, _| s.service = Box::new(MemoryService::new().with_default_destination(None)));
+    press(&mut rt, id, 0);
+    wait(&mut rt, 2.0);
+    assert!(rt.file_dialog().is_none(), "not asked again");
+    rt.update(|s, _| s.latest = (0, 0));
+    wait(&mut rt, 2.0);
+    assert_eq!(rt.state.bar.entries().last().map(|e| e.notice.severity), Some(crate::notice::Severity::Info), "added");
+}
+
+/// The field's add tried again empties the field, which still held its link.
+#[test]
+fn try_again_for_the_fields_add_empties_the_field() {
+    let mut rt = app(MemoryService::new());
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| s.magnet = rune::TextEdit::new(MAGNET));
+    let request = Some(Asked { request: AddRequest::link(MAGNET).expect("a link"), to: None, by_field: true });
+    let failed = AddFailure { what: "Big Buck Bunny".into(), why: "No peers have this torrent".into(), request };
+    let id = told(&mut rt, FailedAdds { total: 1, failed: vec![failed] }.notice());
+    press(&mut rt, id, 0);
+    wait(&mut rt, 2.0);
+    assert_eq!(rt.state.magnet.text, "");
+}
+
+/// A double-click on Try again, both presses before the next frame, runs it once.
+#[test]
+fn a_double_click_on_try_again_runs_it_once() {
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "A")]).trash_refusing("A");
+    let probe = service.probe();
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::remove_ids(s, vec![0], true));
+    wait(&mut rt, 1.0);
+    let id = newest(&rt);
+    show_notice(&mut rt, id);
+    let (x, y) = rt.find("notice-action/0").expect("the button");
+    for _ in 0..2 {
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+    }
+    wait(&mut rt, 1.0);
+    assert_eq!(probe.commands().len(), 2, "the Delete, and its one Try again");
 }

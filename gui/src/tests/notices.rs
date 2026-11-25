@@ -292,7 +292,7 @@ fn run(rt: &mut Runtime<Phantom>, m: &Model, step: &Step) {
 }
 
 /// The path of the element focused now, if any.
-fn focused(rt: &Runtime<Phantom>) -> Option<String> {
+pub(super) fn focused(rt: &Runtime<Phantom>) -> Option<String> {
     rt.elements().into_iter().find(|e| e.focused && !e.exiting).map(|e| e.path)
 }
 

@@ -223,7 +223,8 @@ impl NoticeAction {
         Self { once: true, ..self }
     }
 
-    /// Offered only while `shown` holds.
+    /// Offered only while `shown` holds. Drawing asks it each frame: it never looks at the disk
+    /// itself ([`Finder::seen`](crate::platform::Finder::seen)).
     pub fn shown_while(self, shown: impl Fn(&Phantom) -> bool + 'static) -> Self {
         Self { shown: Some(Rc::new(shown)), ..self }
     }
@@ -257,7 +258,7 @@ impl NoticeAction {
     fn on_disk(title: &str, path: &std::path::Path) -> Self {
         let (run, there) = (path.to_path_buf(), path.to_path_buf());
         let mut action = Self::new(title, move |s: &mut Phantom| crate::platform::show(s, &run, crate::platform::Show::Reveal));
-        action.shown = Some(Rc::new(move |s: &Phantom| s.finder.exists(&there)));
+        action.shown = Some(Rc::new(move |s: &Phantom| s.finder.seen(&there)));
         action
     }
 }

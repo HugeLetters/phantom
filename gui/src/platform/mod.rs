@@ -4,6 +4,7 @@
 //! the Settings window's frame, kept from one run to the next ([`remember_frame`]).
 
 pub mod app_icon;
+pub mod looks;
 pub mod menu_bar;
 #[cfg(target_os = "macos")]
 pub mod open_documents;
@@ -167,10 +168,25 @@ pub trait Finder {
     /// at the disk that Open and Reveal's offer rests on, taken when a menu holding them opens or
     /// their shortcut is pressed (#307).
     fn exists(&self, path: &Path) -> bool;
+    /// [`exists`](Self::exists) for drawing, which never waits for the disk: as last looked.
+    fn seen(&self, path: &Path) -> bool {
+        self.exists(path)
+    }
+    /// Whether [`seen`](Self::seen) has an answer no frame has drawn yet.
+    fn news(&self) -> bool {
+        false
+    }
 }
 
 /// Runs `open`.
-pub struct SystemFinder;
+pub struct SystemFinder(looks::Looks);
+
+impl SystemFinder {
+    /// `wake` has the app draw what a look at the disk found.
+    pub fn new(wake: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(looks::Looks::new(wake))
+    }
+}
 
 impl Finder for SystemFinder {
     fn show(&mut self, path: &Path, how: Show) -> Result<(), ShowError> {
@@ -186,6 +202,14 @@ impl Finder for SystemFinder {
 
     fn exists(&self, path: &Path) -> bool {
         std::fs::symlink_metadata(path).is_ok()
+    }
+
+    fn seen(&self, path: &Path) -> bool {
+        self.0.there(path, |path| std::fs::symlink_metadata(path).is_ok())
+    }
+
+    fn news(&self) -> bool {
+        self.0.news()
     }
 }
 
@@ -346,7 +370,7 @@ fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError, of: Option<T
         ShowError::NoFinder(reason) => (display::cant_start_finder(), reason, None),
     };
     let notice = Notice::error(short).with_listing(display::show_failed_listing(path, &reason));
-    let check = of.filter(|_| missing).map(crate::model::retry::check);
+    let check = of.filter(|_| missing).map(|id| crate::model::retry::check(s, id));
     s.bar.tell(notice.with_actions(folder.map(crate::notice::NoticeAction::folder).into_iter().chain(check).collect()));
 }
 

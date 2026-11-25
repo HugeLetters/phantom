@@ -21,6 +21,8 @@ const HEAD_ROOM: f32 = 40.0;
 /// minimum fits the pager and Dismiss all).
 const MIN_WIDTH: f32 = 240.0;
 const MAX_WIDTH: f32 = 480.0;
+/// Where the focus rests in the popover while on none of its controls.
+pub const NOTICES_REST: &str = "notices-rest";
 /// The tail under the popover, pointing at the bar's line: how far in from its left edge, and how
 /// far it reaches below it.
 const TAIL_IN: f32 = 18.0;
@@ -108,7 +110,10 @@ impl Ui {
     /// How wide the popover is for a list of notices: as the widest of them needs, within
     /// 240–480 points; the same on every page.
     pub fn popover_width(&self, needs: impl IntoIterator<Item = f32>) -> f32 {
-        needs.into_iter().fold(0.0, f32::max).clamp(MIN_WIDTH, MAX_WIDTH)
+        // At the widest nothing more is measured.
+        let widest =
+            needs.into_iter().try_fold(MIN_WIDTH, |widest, need| if need < MAX_WIDTH { Ok(need.max(widest)) } else { Err(MAX_WIDTH) });
+        widest.unwrap_or_else(|widest| widest)
     }
 
     /// How wide one notice asks the popover to be: its widest line, unwrapped (a path at its real
@@ -151,7 +156,7 @@ impl Ui {
 
     /// `trigger` (the bar's notice), with `content` above it while `open`: a raised panel attached
     /// to it by a tail, the theme's radius and a soft shadow, `width` wide (as
-    /// [`notice_width`](Self::notice_width) gives it), at most `room` tall, `content` scrolling past it under a `head` that stays
+    /// [`popover_width`](Self::popover_width) gives it), at most `room` tall, `content` scrolling past it under a `head` that stays
     /// (`None`: no head, and no room kept for one). The panel goes into `layer`. It's modal: focus
     /// goes into it as it opens and stays there for Tab, and back to `trigger` once it closes.
     /// Escape and pressing outside it call `on_close`.
@@ -190,6 +195,16 @@ impl Ui {
             .child(content);
         let fill = self.raised_fill();
         let border = super::opaque_over(k.alpha(k.c.std_border, if k.dark { 0.6 } else { 0.4 }), k.c.page);
+        // Takes the focus of a button that left with its notice: in the panel, so its keys still work,
+        // and pressing nothing.
+        let rest = el()
+            .key(NOTICES_REST)
+            .absolute(0.0, 0.0)
+            .size(1.0, 1.0)
+            .focusable(true)
+            .tab_index(-1)
+            .focus_ring(0.0, 0.0, rune::Color::TRANSPARENT)
+            .a11y_hidden();
         let panel = col()
             .key(format!("{key}-panel"))
             .role("dialog")
@@ -200,6 +215,7 @@ impl Ui {
             .children(head.map(|head| head.px(RING_ROOM)))
             .child(body)
             .child(self.tail(fill, border))
+            .child(rest)
             // Keys while the focus is anywhere in it, on its head, its body or itself.
             .on_key(on_key);
         let panel = panel.modal(true, on_close.clone());
