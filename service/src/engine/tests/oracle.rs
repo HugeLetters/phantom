@@ -214,11 +214,6 @@ impl Open {
     }
 }
 
-/// A piece under way as the torrent is paused isn't asked for again until a start.
-const PAUSED: &str = "#375: a piece under way at a pause";
-/// What leaves a torrent stuck today.
-const STUCK_OPEN: &[&str] = &[PAUSED];
-
 /// Whether the person allowed their file to be written over.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Allow {
@@ -611,7 +606,6 @@ struct World {
     strict: bool,
     made: usize,
     paused: bool,
-    ever_paused: bool,
     renames: usize,
     /// What may still be under way: since it last settled.
     recent: BTreeSet<Route>,
@@ -661,7 +655,6 @@ impl World {
             strict,
             made: 0,
             paused: case.paused,
-            ever_paused: false,
             renames: 0,
             recent: BTreeSet::new(),
             missing: Default::default(),
@@ -1099,10 +1092,7 @@ impl World {
                 }
                 TorrentCommand::Resume
             }
-            Do::Pause => {
-                self.ever_paused = true;
-                TorrentCommand::Pause
-            }
+            Do::Pause => TorrentCommand::Pause,
             Do::Off { file } | Do::TrashFile { file } => {
                 self.off.insert(file);
                 self.theirs.iter_mut().filter(|t| t.file == file).for_each(|t| t.off = true);
@@ -1328,21 +1318,9 @@ impl World {
         self.open.store(true, Ordering::SeqCst);
         self.by(By::DriveBack).await;
         self.power.ending = true;
-        let pause_open = !self.strict && self.ever_paused && STUCK_OPEN.contains(&PAUSED);
-        if pause_open {
-            // Not for as long as a settle waits: some of these don't finish.
-            let _ = tokio::time::timeout(PATIENCE / 6, self.settle()).await;
-        } else {
-            self.settle().await;
-        }
+        self.settle().await;
         self.refresh().await;
         self.judge("the end");
-        // A piece under way as it's paused is lost until a start (#375).
-        if pause_open && self.status().await == Some(Status::Downloading) {
-            self.power.known.insert(PAUSED);
-            self.step(Step::Restart).await;
-            self.settle().await;
-        }
         let safe = self.disturbed.is_none() && self.absent.is_empty() && !self.renamed;
         if safe && let Some(listed) = self.listed().await {
             // No press.
@@ -1635,7 +1613,7 @@ async fn a_persons_bytes_stay_and_a_torrents_own_files_work() {
     panic!("{why}\nminimal: {least:?}");
 }
 
-/// Each class of [`KNOWN_OPEN`] and [`STUCK_OPEN`] on its own: fails while that's open.
+/// Each class of [`KNOWN_OPEN`] on its own: fails while that's open.
 macro_rules! open {
     ($($name:ident: $why:literal, $start:ident, $peer:literal, [$($step:expr),*];)*) => { $(
         #[tokio::test(flavor = "multi_thread")]
@@ -1741,9 +1719,9 @@ async fn often(steps: Vec<Step>) {
     }
 }
 
+/// #375: a piece being put back as the torrent is paused isn't lost.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "#375"]
-async fn open_a_piece_under_way_at_a_pause_is_lost() {
+async fn a_piece_put_back_as_the_torrent_is_paused_isnt_lost() {
     let back = Step::During(Do::Resume, By::PutBack { file: 0 });
     often(vec![Step::By(By::TakeAway { file: 0 }), Step::Settle, back, Step::Do(Do::Pause)]).await;
 }

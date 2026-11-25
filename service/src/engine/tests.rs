@@ -5553,6 +5553,7 @@ mod moving;
 mod never_cut;
 mod off_gone;
 mod oracle;
+mod pausing;
 mod renaming;
 mod undo_place;
 
