@@ -2,17 +2,19 @@
 //! Dock icon, `open -a Phantom x.torrent`. macOS sends them as the open-documents Apple event
 //! ('aevt'/'odoc'); the bundle declares the .torrent type (`scripts/install-mac.sh`).
 //!
-//! Rune doesn't forward that event yet, so Phantom installs its own handler, the way Rune does
-//! for links (`open_url/incoming.rs`). Once Rune has a hook for it (anomalyco/rune#157), this
-//! module goes and `main` passes [`super::open_files`] to the hook instead.
+//! Phantom installs its own handler, the way Rune does for links (`open_url/incoming.rs`). Rune has
+//! a hook for it now (`App::on_open_files`, anomalyco/rune#157): with it this module goes and `main`
+//! passes `platform::open_files` to the hook instead (#381).
 //!
 //! AppKit puts its own 'odoc' handler in place as the app finishes launching, replacing one
-//! installed earlier, and then dispatches the event that launched the app. So [`install`], called
-//! before Rune's event loop starts, only listens for `NSApplicationWillFinishLaunching`, and the
-//! handler goes in then: after AppKit's, before the launch event. Only 'odoc' is taken; get-URL
+//! installed earlier, and then dispatches the event that launched the app. So the handler goes in
+//! twice: in [`listen`], called before Rune's event loop starts, and at
+//! `NSApplicationWillFinishLaunching`, after AppKit's and before the launch event. The first is for
+//! Rune alone: it takes 'odoc' itself as its loop starts unless the app has (it would then replace
+//! ours at launch, and drop the event once no window has its hook). Only 'odoc' is taken; get-URL
 //! stays Rune's, and reopen and quit stay AppKit's.
 //!
-//! An event's files become one `AppHandle::update` running [`super::open_files`]. Rune queues
+//! An event's files become one `AppHandle::update` running `platform::open_files`. Rune queues
 //! updates until the app's state exists, so the files that launched the app arrive too.
 
 use std::path::PathBuf;
@@ -22,10 +24,6 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, MainThreadMarker, define_class, msg_send, sel};
 use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSNotification, NSNotificationCenter, NSObject, NSString};
-use rune::AppHandle;
-
-use crate::model::Phantom;
-
 /// `'aevt'`: `kCoreEventClass`.
 const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
 /// `'odoc'`: `kAEOpenDocuments`.
@@ -44,13 +42,7 @@ define_class!(
     impl Handler {
         #[unsafe(method(applicationWillFinishLaunching:))]
         fn will_finish_launching(&self, _: &NSNotification) {
-            let manager = NSAppleEventManager::sharedAppleEventManager();
-            // SAFETY: the selector is one of this object's methods, taking the event and the
-            // reply; the object lives for the process (see `install`).
-            unsafe {
-                let _: () = msg_send![&manager, setEventHandler: self, andSelector: sel!(handleOpenDocuments:withReplyEvent:),
-                    forEventClass: CORE_EVENT_CLASS, andEventID: OPEN_DOCUMENTS];
-            }
+            self.take_open_documents();
         }
 
         #[unsafe(method(handleOpenDocuments:withReplyEvent:))]
@@ -68,17 +60,27 @@ define_class!(
     }
 );
 
-/// Before Rune's event loop starts, on the main thread: files opened with Phantom go to its state
-/// through `handle`. Does nothing elsewhere or if called again.
-pub fn install(handle: AppHandle<Phantom>) {
-    if MainThreadMarker::new().is_none() {
-        return;
+impl Handler {
+    fn take_open_documents(&self) {
+        let manager = NSAppleEventManager::sharedAppleEventManager();
+        // SAFETY: the selector is one of this object's methods, taking the event and the reply;
+        // the object lives for the process (see `listen`).
+        unsafe {
+            let _: () = msg_send![&manager, setEventHandler: self, andSelector: sel!(handleOpenDocuments:withReplyEvent:),
+                forEventClass: CORE_EVENT_CLASS, andEventID: OPEN_DOCUMENTS];
+        }
     }
-    if SINK.set(Box::new(move |paths| handle.update(move |s, tx| super::open_files(s, &paths, tx)))).is_err() {
+}
+
+/// Before Rune's event loop starts, on the main thread: the files of each open-documents event go
+/// to `sink`. Does nothing elsewhere or if called again.
+pub fn listen(sink: impl Fn(Vec<PathBuf>) + Send + Sync + 'static) {
+    if MainThreadMarker::new().is_none() || SINK.set(Box::new(sink)).is_err() {
         return;
     }
     // SAFETY: `init` on a fresh NSObject subclass with no ivars.
     let handler: Retained<Handler> = unsafe { msg_send![Handler::alloc(), init] };
+    handler.take_open_documents();
     // SAFETY: never released, as neither the notification center nor the event manager retains
     // it: it lives for the process.
     let handler: &'static AnyObject = unsafe { &*Retained::into_raw(handler).cast::<AnyObject>() };

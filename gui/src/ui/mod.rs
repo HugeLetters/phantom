@@ -93,8 +93,46 @@ impl Ui {
     /// The window's root, around the page: where Rune routes window-level pastes and drops,
     /// and where `overlays` (see [`Ui::note`]) and tooltips draw.
     pub fn root(&self, page: El, overlays: Vec<El>) -> El {
-        rune_kit::root(page, overlays)
+        let nowhere = el()
+            .key(NOWHERE)
+            .absolute(0.0, 0.0)
+            .size(1.0, 1.0)
+            .focusable(true)
+            .tab_index(-1)
+            .focus_ring(0.0, 0.0, rune::Color::TRANSPARENT)
+            .a11y_hidden()
+            .on_focus_change_any(|focused, tx| {
+                if focused {
+                    tx.blur();
+                }
+            });
+        rune_kit::root(page, std::iter::once(nowhere).chain(overlays).collect::<Vec<_>>())
     }
+
+    /// A marker for an element whose leaving takes the focus in it nowhere: drawn beside it, going
+    /// when it goes. Rune would hand the focus to a neighbour, and the next key (⌘⌫, Return) would
+    /// act there: on the files, when a notice was dismissed.
+    pub fn focus_goes_nowhere(&self) -> El {
+        el().key("focus-goes-nowhere").absolute(0.0, 0.0).w(0.0).h(0.0).focus_return(NOWHERE)
+    }
+}
+
+/// The element that gives up the focus it's handed ([`Ui::focus_goes_nowhere`]).
+const NOWHERE: &str = "nowhere";
+
+/// A kit button with its focus ring 2.5 points out, as Phantom's is (the kit's is 2).
+fn ringed(button: El, k: &Kit) -> El {
+    button.focus_ring(2.0, 2.5, k.c.border_focus)
+}
+
+/// `color` as it looks over the opaque `behind`, in sRGB as Rune blends. For an edge: Rune draws a
+/// translucent border over its own element's fill, so one that's to take in what's around it is
+/// made opaque first.
+fn opaque_over(color: rune::Color, behind: rune::Color) -> rune::Color {
+    let encode = |c: f32| if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    let decode = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    let mix = |top: f32, under: f32| decode(encode(top) * color.a + encode(under) * (1.0 - color.a));
+    rune::Color { r: mix(color.r, behind.r), g: mix(color.g, behind.g), b: mix(color.b, behind.b), a: 1.0 }
 }
 
 /// Gives a kit component a key, for tests, scripts and anchoring menus.

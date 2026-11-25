@@ -247,7 +247,15 @@ pub fn open(s: &mut Phantom) {
     s.palette.on = listed(s).first().map(Entry::pin);
 }
 
-/// Escape, a click outside, or another overlay opening.
+/// Escape or a click outside.
+pub fn dismiss(s: &mut Phantom, tx: &mut Tx) {
+    // The focus goes back to what had it, or nowhere: without this, after a Tab in the palette,
+    // Rune hands it to a neighbour of the field as the palette fades.
+    tx.blur();
+    close(s);
+}
+
+/// [`dismiss`]ed, a command picked, or another overlay opening.
 pub fn close(s: &mut Phantom) {
     s.palette.then(Event::Close);
     s.palette.query = TextEdit::default();
@@ -296,7 +304,7 @@ pub fn down(s: &mut Phantom, tx: &mut Tx) {
 pub fn run(s: &mut Phantom, tx: &mut Tx) {
     let at = highlighted(s);
     let Some(entry) = listed(s).into_iter().nth(at) else { return };
-    close(s);
+    dismiss(s, tx);
     if let Some(to) = entry.to {
         return super::moving::move_selection_to(s, to);
     }

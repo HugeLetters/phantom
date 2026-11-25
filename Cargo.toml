@@ -15,6 +15,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 
+# Rune builds against its own patched copies of these; Cargo doesn't inherit a dependency's `[patch]`,
+# so they're here, at Rune's rev in gui/Cargo.toml (bump both together).
+[patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+
 # No debug info for dependencies: it was most of `target/`, and we don't step into them. Our own
 # crates keep it. To debug into a dependency, build with
 # `--config 'profile.dev.package."*".debug=true'`.
@@ -40,4 +52,22 @@ opt-level = 2
 opt-level = 2
 
 [profile.test.package.rune-staging]
+opt-level = 2
+
+[profile.test.package.rune-core]
+opt-level = 2
+
+[profile.test.package.rune-edit]
+opt-level = 2
+
+[profile.test.package.rune-gpu]
+opt-level = 2
+
+[profile.test.package.rune-image]
+opt-level = 2
+
+[profile.test.package.rune-media]
+opt-level = 2
+
+[profile.test.package.rune-text]
 opt-level = 2

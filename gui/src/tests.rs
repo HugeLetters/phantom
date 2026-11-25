@@ -946,7 +946,9 @@ fn the_status_bar_speeds_stay_put_when_an_action_runs() {
 
 /// The texts drawn inside the element at `key`, e.g. a row's cells.
 fn texts(rt: &Runtime<Phantom>, key: &str) -> Vec<String> {
-    rt.elements().into_iter().filter(|e| e.path.contains(key)).filter_map(|e| e.text).collect()
+    // In a path Rune writes a key's own slash as %2F.
+    let escaped = key.replace('/', "%2F");
+    rt.elements().into_iter().filter(|e| e.path.contains(key) || e.path.contains(&escaped)).filter_map(|e| e.text).collect()
 }
 
 /// The album with its second file gone from disk, selected.
@@ -2117,4 +2119,100 @@ fn a_removed_torrent_leaves_the_focus_on_the_list_if_one_is_left() {
     shortcut(&mut rt, OnTorrents::Remove);
     assert!(rt.state.torrents.is_empty());
     assert_eq!(focused(&rt), Vec::<String>::new(), "nowhere");
+}
+
+/// What had the focus going (a notice dismissed from its popover or by its own Undo, the rename
+/// field done) leaves it nowhere, not on a neighbour (the file list, say), where the next ⌘⌫ would
+/// act on files (#381).
+#[test]
+fn what_leaves_with_the_focus_hands_it_to_no_neighbour() {
+    use crate::notice::{Notice, NoticeAction};
+    let focused =
+        |rt: &Runtime<Phantom>| -> Vec<String> { rt.elements().into_iter().filter(|e| e.focused && !e.exiting).map(|e| e.path).collect() };
+    let nowhere = |rt: &Runtime<Phantom>, why: &str| assert_eq!(focused(rt), Vec::<String>::new(), "{why}");
+    let open = || {
+        let mut rt = app(with_an_album());
+        tap(&mut rt, "rows/1");
+        settle(&mut rt);
+        assert!(rt.find("files").is_some(), "the pane shows its files");
+        rt
+    };
+
+    let mut rt = open();
+    rt.update(|s, _| s.bar.tell(Notice::new("One")));
+    rt.update(|s, _| s.bar.tell(Notice::new("Two")));
+    settle(&mut rt);
+    tap(&mut rt, "notice-text");
+    tap(&mut rt, "notice-dismiss-all");
+    settle(&mut rt);
+    nowhere(&rt, "Dismiss all");
+
+    let mut rt = open();
+    rt.update(|s, _| {
+        let undo = NoticeAction::new("Undo", |s: &mut Phantom| s.bar.dismiss_all());
+        s.bar.tell(Notice::new("Removed").with_actions(vec![undo]));
+    });
+    settle(&mut rt);
+    tap(&mut rt, "notice-text");
+    tap(&mut rt, "notice-action/0");
+    settle(&mut rt);
+    nowhere(&rt, "a notice's button that dismisses it");
+
+    for key in [Key::Enter, Key::Escape] {
+        let mut rt = open();
+        rt.update(|s, tx| crate::commands::run_on_torrents(s, OnTorrents::Rename, tx));
+        settle(&mut rt);
+        assert!(focused(&rt).iter().any(|p| p.contains("rename-field")), "the field has the focus");
+        rt.key(KeyEvent { key: key.clone(), mods: Mods::default() });
+        settle(&mut rt);
+        assert!(rt.find("rename-field").is_none(), "{key:?} closes it");
+        nowhere(&rt, "the rename field, done");
+    }
+
+    // The palette, after a Tab in it: back where the focus was, or nowhere.
+    let leave: [(&str, fn(&mut Runtime<Phantom>)); 3] = [
+        ("Escape", |rt| rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() })),
+        ("Return", |rt| rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() })),
+        ("a click outside", |rt| {
+            rt.pointer_down(4.0, 500.0);
+            rt.pointer_up(4.0, 500.0);
+        }),
+    ];
+    for (how, leave) in leave {
+        for list in [false, true] {
+            let mut rt = open();
+            rt.update(move |_, tx| if list { tx.focus("table", false) } else { tx.blur() });
+            settle(&mut rt);
+            let before = focused(&rt);
+            assert_eq!(before.is_empty(), !list);
+            rt.update(|s, _| {
+                crate::model::palette::open(s);
+                // What Return runs does nothing of its own to the focus.
+                s.palette.query.text = "Pause".into();
+            });
+            settle(&mut rt);
+            rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+            settle(&mut rt);
+            leave(&mut rt);
+            settle(&mut rt);
+            assert!(!rt.state.palette.is_open(), "{how} closes it");
+            assert_eq!(focused(&rt), before, "the palette, closed by {how}");
+        }
+    }
+
+    // The bar's Undo, with another notice left beside it.
+    let mut rt = open();
+    rt.update(|s, _| {
+        s.bar.tell(Notice::new("Earlier"));
+        let undo = NoticeAction::new("Undo", |s: &mut Phantom| {
+            let id = s.bar.entries().iter().find(|e| e.notice.undo().is_some()).unwrap().id;
+            s.bar.dismiss(id);
+        });
+        let undo = NoticeAction { undo: true, ..undo };
+        s.bar.tell(Notice::new("Removed").with_actions(vec![undo]));
+    });
+    settle(&mut rt);
+    tap(&mut rt, "bar-undo");
+    settle(&mut rt);
+    nowhere(&rt, "the bar's Undo");
 }

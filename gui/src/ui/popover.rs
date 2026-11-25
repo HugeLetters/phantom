@@ -68,6 +68,6 @@ impl Ui {
         let k = &self.k;
         let message = text(message.to_owned()).font(k.ty.text_small).color(k.c.text_base).max_lines(3);
         let body = col().key(format!("{key}-content")).role("tooltip").max_w(MAX_WIDTH).px(10.0).py(6.0).child(message);
-        popover::raised(k, body, k.radius.md).border(1.0, k.c.border_weak)
+        popover::raised(k, body, k.radius.md).border(1.0, super::opaque_over(k.c.border_weak, k.c.page))
     }
 }

@@ -46,7 +46,7 @@ impl Ui {
         window: Option<f32>,
         row_key: impl Fn(usize) -> String,
         on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static,
-        on_close: impl Fn(&mut S) + Clone + 'static,
+        on_close: impl Fn(&mut S, &mut Tx) + Clone + 'static,
         layer: &mut Vec<El>,
     ) {
         let k = &self.k;
@@ -119,7 +119,7 @@ impl Ui {
             .min_h(0.0)
             .radius(8.0)
             .fill(c.layer_01)
-            .border(1.0, c.border_weak)
+            .border(1.0, super::opaque_over(c.border_weak, c.page))
             .child(search)
             .child(el().key("rule").w_full().h(1.0).fill(c.border_muted).a11y_hidden())
             .child(rows)
@@ -128,7 +128,7 @@ impl Ui {
             panel = panel.box_shadow(shadow);
         }
         let close = on_close.clone();
-        layer.push(rune_kit::scrim(format!("{key}-scrim"), move |s: &mut S| close(s)));
+        layer.push(rune_kit::scrim_tx(format!("{key}-scrim"), move |s: &mut S, tx: &mut Tx| close(s, tx)));
         layer.push(
             col()
                 .key(format!("{key}-layer"))
@@ -140,7 +140,7 @@ impl Ui {
                 .pl(left)
                 .pr(SIDE)
                 .items_start()
-                .child(panel.modal(true, move |s: &mut S| on_close(s))),
+                .child(panel.modal_tx(true, move |s: &mut S, tx: &mut Tx| on_close(s, tx))),
         );
     }
 

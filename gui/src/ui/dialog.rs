@@ -65,7 +65,10 @@ impl Ui {
         // Dark: a wash of the text's colour over the raised surface, lifting it off the window.
         let panel = if k.dark { panel.radius(8.0).fill(k.alpha(c.text_base, 0.06)) } else { panel };
         let surface = popover::raised(k, panel, 8.0);
-        let surface = if k.dark { surface.border(1.0, k.alpha(c.text_base, 0.18)) } else { surface.fill(c.layer_01) };
+        let behind = super::opaque_over(c.scrim, c.bg_base);
+        let surface = if k.dark { surface } else { surface.fill(c.layer_01) };
+        let edge = if k.dark { k.alpha(c.text_base, 0.18) } else { k.alpha(c.std_border, 0.5) };
+        let surface = surface.border(1.0, super::opaque_over(edge, behind));
         let surface = surface.modal(true, on_close).modal_click_outside(false).token_motion(k.motion.overlay);
         layer.push(el().key(format!("{key}-scrim")).absolute(0.0, 0.0).w_full().h_full().fill(c.scrim).a11y_hidden());
         layer.push(el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(16.0).center().child(surface));
