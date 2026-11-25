@@ -5546,6 +5546,7 @@ async fn send_end(engine: &Engine, id: u64, task: tokio::task::Id, added: anyhow
     engine.inspect(|_| ()).await;
 }
 
+mod absent_file;
 mod crashed;
 mod letgo;
 mod links;

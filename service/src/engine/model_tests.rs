@@ -1409,8 +1409,8 @@ impl Model {
         packs.collect()
     }
 
-    /// Back, it's added again, so checked, and runs if it was running; one partly deleted only
-    /// says so.
+    /// Back, it's added again, so checked, and runs if it was running, unless a file it gets isn't
+    /// there: that's Missing files (#385); one partly deleted only says so.
     fn destination_back(&mut self, pack: usize) {
         self.unavailable[pack] = false;
         let away = self.pack_torrent_ref(pack).map_or([None; FILES], |p| self.away(pack, &p.off));
@@ -1420,8 +1420,17 @@ impl Model {
             _ => None,
         }) {
             p.unavailable = false;
-            if !p.delete_failed {
+            if p.delete_failed {
+                return;
+            }
+            // A file it gets that isn't there is Missing files, not made again by the check (#385): it
+            // runs once Resume (or the file's return) checks it.
+            let gone: BTreeMap<usize, Gone> =
+                (0..FILES).filter(|&f| !p.off[f] && disk[f] == OnDisk::Absent).map(|f| (f, Gone { had: p.have[f], back: false })).collect();
+            if gone.is_empty() {
                 p.check(disk, folder, held, BTreeMap::new(), away);
+            } else {
+                p.missing = gone;
             }
         }
     }
