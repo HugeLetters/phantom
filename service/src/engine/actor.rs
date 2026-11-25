@@ -506,6 +506,8 @@ impl Actor {
             move_hold: Default::default(),
         };
         let mut actor = actor;
+        // Before anything is added: an undo a crash cut short may have some of its files back.
+        actor.reserve_resumed();
         actor.save();
         actor.save_undo();
         // librqbit restores nothing: each torrent that belongs there is added now, once its files
@@ -1488,6 +1490,7 @@ impl Actor {
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
             Err(e) => Err(e),
         };
+        self.guard.places().added(id);
         // Fetching while its torrent is in the list with this task's add under way; else it was
         // taken off, and perhaps brought back by an undo, whose add is another task's.
         let stage = match self.torrents.get(&id).is_some_and(|t| matches!(&t.lib, lib::Lib::Adding(own) if own.id() == task)) {
@@ -1955,6 +1958,9 @@ pub(super) async fn add_from(
         }
     }
     let output_folder = destination.join(own_folder);
+    // Never into a place an undo is putting files back to (#371): it waits till that's over.
+    let paths = listed.info.iter_file_details().map(|f| output_folder.join(f.filename.to_pathbuf())).collect();
+    guard.places().claim(id, paths).await;
     let all: Vec<usize> = (0..listed.info.iter_file_lengths().count()).collect();
     // Phantom's own storage, which knows its folder, as every add's: it never writes to a file moved
     // from its path.

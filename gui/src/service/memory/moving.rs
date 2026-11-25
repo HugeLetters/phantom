@@ -173,19 +173,28 @@ impl MemoryService {
 
     /// The torrent in the list that has the place `left`, a torrent that left it, goes back to, or is
     /// moving there: Move's rule for another torrent's place (`anothers`), as the engine's undo takes
-    /// it. The fake has no files, so a place is the torrent's location, in any case.
+    /// it: one of its files is at the path of one of `left`'s, in any case.
     pub(super) fn another_has(&self, left: &super::Left) -> Option<&proto::TorrentInfo> {
-        let destination = left.destination.clone().unwrap_or_else(super::downloads);
-        let at = match left.files.as_deref() {
-            Some([only]) => destination.join(&only.path),
-            _ => destination.join(left.info.display_name()),
+        let paths = |destination: &std::path::Path, name: &str, files: &[proto::File]| -> std::collections::BTreeSet<String> {
+            let at = |f: &proto::File| match files {
+                [_] => destination.join(&f.path),
+                _ => destination.join(name).join(&f.path),
+            };
+            files.iter().map(|f| at(f).to_string_lossy().to_lowercase()).collect()
         };
-        let folded = |p: &std::path::Path| p.to_string_lossy().to_lowercase();
-        let places = |o: &proto::TorrentInfo| {
-            let there = self.moving.get(&o.id).map(|m| m.to.join(m.name.as_deref().unwrap_or(o.display_name())));
-            self.location(o).map(|l| l.to_path_buf()).into_iter().chain(there)
+        let ours = paths(
+            &left.destination.clone().unwrap_or_else(super::downloads),
+            left.info.display_name(),
+            left.files.as_deref().unwrap_or_default(),
+        );
+        let takes = |o: &&proto::TorrentInfo| {
+            let Some(files) = self.files.get(&o.id) else { return false };
+            let here = self.destinations.get(&o.id).cloned().unwrap_or_else(super::downloads);
+            let there = self.moving.get(&o.id);
+            let there = there.map(|m| paths(&m.to, m.name.as_deref().unwrap_or(o.display_name()), files));
+            !ours.is_disjoint(&paths(&here, o.display_name(), files)) || there.is_some_and(|t| !ours.is_disjoint(&t))
         };
-        self.torrents.iter().find(|o| o.id != left.info.id && places(o).any(|p| folded(&p) == folded(&at)))
+        self.torrents.iter().filter(|o| o.id != left.info.id).find(takes)
     }
 
     /// The files of torrent `id` that a Move into `to` would find there already, if it would find

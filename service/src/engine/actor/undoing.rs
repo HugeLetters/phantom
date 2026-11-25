@@ -222,6 +222,8 @@ impl Actor {
             }
             return self.start_rename(id, name, super::moving::StepOf::Undo { seq, of, entry }).await;
         }
+        // Kept for it from before it's checked till it's over, whatever comes meanwhile (#371).
+        self.reserve(&entry);
         let refused = match self.can_undo(&entry) {
             Err(why) => Some(refused(entry.undoable(of), why, Vec::new())),
             Ok(()) => self.take_out_for_undo(seq, &entry).await.err(),
@@ -245,6 +247,7 @@ impl Actor {
     /// Undo step `seq` is over, carried out or not: its client hears how it went, and its lanes go on.
     pub(super) fn undo_ended(&mut self, seq: u64, id: TorrentId, answer: Result<Undoable, Failure>) {
         self.resumed.remove(&(seq, id));
+        self.guard.places().release(id);
         // Failed for no reason of Undo's: still refused, with the failure as its reason (#200).
         let over = match &answer {
             Ok(_) => Over::Finished(None),
@@ -292,7 +295,13 @@ impl Actor {
             Back::InList { .. } => match self.torrents.get(&entry.id).map(|t| (&t.lifecycle.phase, &t.record)) {
                 None => return Err(CantUndo::NotInList),
                 Some((Phase::DeleteFailed { away: Some(reason), .. }, _)) => return Err(CantUndo::Destination { reason: reason.clone() }),
-                Some((Phase::DeleteFailed { away: None, .. }, record)) => Some(record.destination.clone()),
+                // Refused while it's still listed, as it is: never once it's taken out to be brought back.
+                Some((Phase::DeleteFailed { away: None, .. }, record)) => {
+                    if let Some(why) = self.another_has(entry) {
+                        return Err(why);
+                    }
+                    Some(record.destination.clone())
+                }
                 // Only a Delete tried again takes a partly deleted torrent elsewhere in the list.
                 Some((_, _)) => return Err(CantUndo::Deleting),
             },
@@ -315,24 +324,64 @@ impl Actor {
         trash::can_put_back(&left, &destination, &self.new_copies(entry, &left)).map_err(blocked)
     }
 
-    /// Why `entry`, a Remove or Delete of a torrent that left the list, can't bring it back for
-    /// another torrent in the list that has its files now (#371): at its paths, or inside or around
-    /// its folder, however spelled, or where a Move of it, waiting or under way, takes them. Move's
-    /// own rule for another torrent's place (`moving::anothers`, `Actor::others_files`), so one
-    /// listed torrent never gets files two write. Nothing is touched: the other torrent isn't
-    /// checked, paused or restarted, and nothing at its place is written.
+    /// The record of the torrent `entry`, a Remove or a Delete, brings back: none of a magnet without
+    /// info, which has no files.
+    fn coming(&self, entry: &Entry) -> Option<Record> {
+        match &entry.back {
+            Back::Gone { saved, source: Source::Stash(stash) } => {
+                let info = Info::parse(&stash.torrent().ok()?).ok()?;
+                Some(Record::parse(&entry.info_hash, saved.clone(), Some(info)))
+            }
+            Back::InList { .. } => Some(self.torrents.get(&entry.id)?.record.clone()),
+            Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } | Back::Renamed { .. } => None,
+        }
+    }
+
+    /// What `entry`'s undo, if it can't finish, takes back of a folder it put back.
+    fn own(&self, entry: &Entry) -> trash::Own {
+        let files = match &entry.back {
+            Back::Gone { source: Source::Stash(stash), .. } | Back::InList { stash } => stash.files.clone(),
+            Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } | Back::Renamed { .. } => Vec::new(),
+        };
+        let others = self.torrents.values().filter(|t| t.id != entry.id);
+        trash::Own { files, kept: others.map(|t| t.record.destination.to_path_buf()).collect() }
+    }
+
+    /// Keeps the place `entry` puts its torrent's files back to for its undo ([`super::super::places`]).
+    fn reserve(&self, entry: &Entry) {
+        if let Some(record) = self.coming(entry) {
+            let items = entry.put_back.iter().map(|t| t.from.clone()).collect();
+            self.guard.places().reserve(entry.id, entry.name.clone(), record.paths(), items);
+        }
+    }
+
+    /// The places of the undos a crash cut short, kept before any torrent is added.
+    pub(super) fn reserve_resumed(&self) {
+        let cut_short = self.steps.machine().steps.values().filter(|s| s.phase != StepPhase::Queued);
+        for step in cut_short {
+            if let What::Undo { parts, .. } = &step.what {
+                parts.values().filter_map(|p| p.doing()).for_each(|entry| self.reserve(entry));
+            }
+        }
+    }
+
+    /// Why `entry`, a Remove or a Delete, can't bring its torrent back for another in the list that
+    /// has its files now (#371): at its paths, however spelled or reached, where a Move of it under way
+    /// takes them, or where an undo that began before is bringing it back. Move's own rule for another
+    /// torrent's place (`moving::anothers`, `Actor::others_files`), so two listed torrents never get to
+    /// write the same files. Nothing is touched: the other torrent isn't checked, paused or
+    /// restarted, and nothing at its place is written.
     fn another_has(&self, entry: &Entry) -> Option<CantUndo> {
-        let Back::Gone { saved, source: Source::Stash(stash) } = &entry.back else { return None };
-        // A magnet without info has no files to be taken.
-        let info = Info::parse(&stash.torrent().ok()?).ok()?;
-        let record = Record::parse(&entry.info_hash, saved.clone(), Some(info));
+        let record = self.coming(entry)?;
         let files = super::moving::inside(&record);
         let (_, other) = super::super::moving::anothers(&record.destination, &files, self.others_files(entry.id))?;
-        let other = self.torrents.get(&other)?;
-        // Kept in the refusal: the step is dropped, and this is all that's left of the torrent to add
-        // again. Its info's own name, as the app's Copy magnet link has it, not one a Rename gave it.
-        let magnet = (!entry.info_hash.is_empty()).then(|| undo::magnet(&entry.info_hash, saved.name.as_deref(), &saved.trackers));
-        Some(CantUndo::AnotherHasFiles { other: proto::Named { id: other.id, name: name_of(other) }, magnet })
+        let name = self.torrents.get(&other).map(name_of).or_else(|| self.guard.places().name(other))?;
+        // Kept in the refusal: the step is dropped, and this is all that's left of a torrent off the
+        // list to add again. Its info's own name, as the app's Copy magnet link has it, not one a
+        // Rename gave it.
+        let magnet =
+            matches!(entry.back, Back::Gone { .. }).then(|| undo::magnet(&entry.info_hash, record.name.as_deref(), &record.trackers));
+        Some(CantUndo::AnotherHasFiles { other: proto::Named { id: other, name }, magnet })
     }
 
     /// The torrent's own new copies of the files `entry`, a Move to Trash, took (#276): files it gets
@@ -418,14 +467,16 @@ impl Actor {
             }
             _ => entry,
         };
+        let own = self.own(&entry);
         self.putting_back.spawn_blocking(move || {
             let first = entry.put_back.first().map_or_else(|| PathBuf::from("/"), |t| t.from.clone());
             // Checked before it started; one finished after a crash may have lost it since.
             let Some(destination) = destination else {
                 return (seq, id, Err((trash::PutBackError::Failed { path: first, detail: "no destination".into() }, Vec::new())));
             };
-            let put =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash::put_back(&items, &destination, &trash, resumed, &copies)));
+            let put = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                trash::put_back(&items, &destination, &trash, resumed, &copies, &own)
+            }));
             let put = put
                 .unwrap_or_else(|_| Err((trash::PutBackError::Failed { path: first, detail: "putting back stopped".into() }, Vec::new())));
             (seq, id, put)
@@ -446,8 +497,8 @@ impl Actor {
                 Err(refused(entry.undoable(of), why, stranded))
             }
             Ok(back) => {
-                // Looked at again as the torrent is about to be added (#371): another torrent may have
-                // come while the files went back, with nothing between this and the add to let one in.
+                // Looked at again as the torrent is about to be added (#371): another torrent may have been
+                // added while the files went back. It waits for this undo, having touched nothing.
                 let late = self.another_has(&entry);
                 let added = match &entry.back {
                     Back::Gone { .. } if late.is_some() => Err(anyhow!("another torrent has its files now").into()),
@@ -479,7 +530,7 @@ impl Actor {
                     };
                     // Only what's back: an item emptied from the Trash while a crash cut the undo short
                     // isn't, and what's at its path now isn't the torrent's.
-                    let stranded = trash::take_back(&self.trash, back.iter());
+                    let stranded = trash::take_back(&self.trash, back.iter(), &self.own(&entry));
                     refused(entry.undoable(of), why, stranded)
                 })
             }

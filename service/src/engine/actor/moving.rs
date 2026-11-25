@@ -337,12 +337,20 @@ impl Actor {
     }
 
     /// Where every torrent in the list but `id` has its files: at their paths, and for one moving,
-    /// in its old destination, its staging folder and its new one too.
+    /// in its old destination, its staging folder and its new one too; and those being added, or
+    /// brought back by an undo ([`super::super::places`]).
     pub(super) fn others_files(&self, id: TorrentId) -> impl Iterator<Item = (TorrentId, PathBuf)> + '_ {
-        self.torrents.iter().filter(move |(other, _)| **other != id).flat_map(|(other, t)| {
-            let moving = t.record.moving.iter().flat_map(|m| m.plan.paths());
-            t.record.paths().into_iter().chain(moving.collect::<Vec<_>>()).map(|p| (*other, p))
-        })
+        self.torrents
+            .iter()
+            .filter(move |(other, _)| **other != id)
+            .flat_map(|(other, t)| {
+                let moving = t.record.moving.iter().flat_map(|m| m.plan.paths());
+                t.record.paths().into_iter().chain(moving.collect::<Vec<_>>()).map(|p| (*other, p))
+            })
+            .chain(self.guard.places().others(id).into_iter().filter(|(other, _)| {
+                // Not an add taken off the list meanwhile.
+                self.torrents.contains_key(other) || self.guard.places().name(*other).is_some()
+            }))
     }
 
     /// Which of `ids` a move into `to` would find files at (`Request::Clashes`): in the order of

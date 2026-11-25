@@ -368,15 +368,16 @@ pub enum PutBackError {
 /// went), or ones emptied from the Trash meanwhile, which stay gone while their path is free
 /// (#162); an item that can't go back, an emptied one whose path is taken too, returns those it
 /// put back before the crash as well, as any undo that can't finish does, and the folders left
-/// empty on their way go. A folder is told by its volume and inode alone, so what was put into one
-/// put back before the crash goes to the Trash with it. What's back, in the order it went to the
-/// Trash; or why not, with what couldn't return to the Trash.
+/// empty on their way go. `own`: the torrent's files; of a folder back that has anything else in it by
+/// then only they go to the Trash again ([`take_back`]). What's back, in the order it went to the Trash; or why
+/// not, with what couldn't return to the Trash.
 pub fn put_back(
     items: &[Trashed],
     destination: &Path,
     trash: &Trash,
     resumed: bool,
     copies: &Copies,
+    own: &Own,
 ) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
     // The torrent's own new copies go to the Trash first, as a Move to Trash sends them; given back
     // if the undo can't finish, so a refused one changes nothing.
@@ -392,7 +393,7 @@ pub fn put_back(
         let failed = PutBackError::Failed { path: path.clone(), detail };
         return Err((failed, give_back(trash, &sent.moved)));
     }
-    let put = put_back_items(items, destination, trash, resumed);
+    let put = put_back_items(items, destination, trash, resumed, own);
     match put {
         Ok(back) => Ok(back),
         Err((failed, mut stranded)) => {
@@ -426,6 +427,7 @@ fn put_back_items(
     destination: &Path,
     trash: &Trash,
     resumed: bool,
+    own: &Own,
 ) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
     let mut back: Vec<&Trashed> = Vec::new();
     // Put back before the crash: the folders on their way, which that run made, aren't in `made`.
@@ -472,7 +474,7 @@ fn put_back_items(
         }
     }
     let Some(failed) = failed else { return Ok(back.into_iter().rev().cloned().collect()) };
-    let stranded = take_back(trash, back.into_iter().rev());
+    let stranded = take_back(trash, back.into_iter().rev(), own);
     for dir in made.iter().rev() {
         let _ = std::fs::remove_dir(dir);
     }
@@ -485,11 +487,71 @@ fn put_back_items(
     Err((failed, stranded))
 }
 
-/// Returns items put back to where they were in the Trash, in turn: those that couldn't go.
-pub fn take_back<'a>(trash: &Trash, items: impl IntoIterator<Item = &'a Trashed>) -> Vec<PathBuf> {
+/// What an undo that can't finish takes back of a folder it put back (#371).
+#[derive(Debug, Clone, Default)]
+pub struct Own {
+    /// The torrent's files, each as it was when it was kept aside.
+    pub files: Vec<(PathBuf, Option<Identity>)>,
+    /// The folders other torrents in the list have their files in: never taken.
+    pub kept: Vec<PathBuf>,
+}
+
+impl Own {
+    /// Whether the folder `dir` can go whole: nothing in it but the torrent's files and litter, as
+    /// when a Delete takes it, and no other torrent's destination.
+    fn whole(&self, dir: &Path) -> bool {
+        let files: Vec<PathBuf> = self.files.iter().map(|(path, _)| path.clone()).collect();
+        let place = super::moving::folder_place(dir);
+        let kept = || self.kept.iter().any(|k| k.ancestors().any(|a| super::moving::folder_place(a) == place));
+        only(dir, &files) && !kept()
+    }
+
+    /// Takes the torrent's files in `dir`, and them alone, into a folder at `to` in the Trash, each
+    /// at its path in it; then the folders this left empty in `dir` go. `dir` stays.
+    fn take_from(&self, dir: &Path, to: &Path, trash: &Trash) -> Result<(), String> {
+        let same = |path: &Path, seen: &Identity| identity(path).is_some_and(|now| is_same(&now, seen));
+        let ours = self
+            .files
+            .iter()
+            .filter(|(path, seen)| path.starts_with(dir) && reached(dir, path) && seen.is_some_and(|seen| same(path, &seen)));
+        // Nothing is ever put into something already there.
+        std::fs::create_dir(to).map_err(|e| e.to_string())?;
+        let mut failed = None;
+        for (path, _) in ours {
+            let there = to.join(path.strip_prefix(dir).unwrap_or(path));
+            let made = there.parent().map_or(Ok(()), std::fs::create_dir_all).map_err(|e| e.to_string());
+            if let Err(e) = made.and_then(|()| trash.return_to(path, &there)) {
+                failed.get_or_insert(e);
+                continue;
+            }
+            for empty in path.ancestors().skip(1).take_while(|a| a.starts_with(dir) && *a != dir) {
+                if std::fs::remove_dir(empty).is_err() {
+                    break;
+                }
+            }
+        }
+        failed.map_or(Ok(()), Err)
+    }
+}
+
+/// Whether two are the same file or folder: a rename keeps both its volume and its inode.
+fn is_same(a: &Identity, b: &Identity) -> bool {
+    (a.dev, a.ino) == (b.dev, b.ino)
+}
+
+/// Returns items put back to where they were in the Trash, in turn: those that couldn't go. Only what
+/// was put back goes, by its volume and inode: of a folder with anything else in it by then, another
+/// torrent's or the person's, the torrent's own files alone, the rest staying as it is (#371).
+pub fn take_back<'a>(trash: &Trash, items: impl IntoIterator<Item = &'a Trashed>, own: &Own) -> Vec<PathBuf> {
     let mut stranded = Vec::new();
     for item in items {
-        let returned = item.to.as_deref().map_or(Err("where it went is unknown".to_owned()), |to| trash.return_to(&item.from, to));
+        let now = identity(&item.from);
+        let returned = match (&item.to, &item.seen) {
+            (None, _) => Err("where it went is unknown".to_owned()),
+            (Some(_), Some(seen)) if !now.is_some_and(|now| is_same(&now, seen)) => Err("what's there isn't what was put back".to_owned()),
+            (Some(to), _) if now.is_some_and(|n| n.file.is_none()) && !own.whole(&item.from) => own.take_from(&item.from, to, trash),
+            (Some(to), _) => trash.return_to(&item.from, to),
+        };
         if let Err(e) = returned {
             tracing::warn!(path = %item.from.display(), error = %e, "failed to return an item to the Trash after a failed undo");
             stranded.push(item.from.clone());
@@ -854,7 +916,7 @@ mod tests {
             let carried = carry_out(&plan(&location, &files, t.single), &trash, |m| told.push(m.clone()));
             prop_assert_eq!(&told, &carried.moved, "told of each item as it went");
             prop_assert_eq!(can_put_back(&carried.moved, root.path(), &Copies::default()), Ok(()));
-            prop_assert_eq!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default()), Ok(carried.moved.clone()));
+            prop_assert_eq!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default(), &own(&files)), Ok(carried.moved.clone()));
             prop_assert_eq!(contents(root.path()), before);
             prop_assert!(tree(&trash_dir).is_empty(), "nothing left in the trash");
         }
@@ -880,7 +942,7 @@ mod tests {
             }
             let failing_trash: Trash = Arc::new(Fails(trash, failing.clone()));
             let failed = PutBackError::Failed { path: failing, detail: "locked".to_owned() };
-            prop_assert_eq!(put_back(&carried.moved, root.path(), &failing_trash, false, &Copies::default()), Err((failed, Vec::new())));
+            prop_assert_eq!(put_back(&carried.moved, root.path(), &failing_trash, false, &Copies::default(), &own(&files)), Err((failed, Vec::new())));
             prop_assert_eq!(contents(root.path()), after_delete);
             prop_assert_eq!(tree(root.path()), dirs_after);
         }
@@ -932,7 +994,7 @@ mod tests {
             let blocked = &moved[block.index(moved.len() - first)];
             write(&blocked.from);
             want.insert(blocked.from.strip_prefix(root.path()).unwrap().to_owned(), b"x".to_vec());
-            let refused = put_back(&moved, root.path(), &trash, true, &Copies::default());
+            let refused = put_back(&moved, root.path(), &trash, true, &Copies::default(), &own(&files));
             prop_assert_eq!(refused, Err((PutBackError::Blocked(Blocked::Taken(blocked.from.clone())), Vec::new())));
             prop_assert_eq!(contents(root.path()), want);
         }
@@ -962,7 +1024,7 @@ mod tests {
             }
             // The first of the two in the order they go back.
             let taken = moved[emptied.max(blocked)].from.clone();
-            prop_assert_eq!(put_back(&moved, root.path(), &trash, true, &Copies::default()), Err((PutBackError::Blocked(Blocked::Taken(taken)), Vec::new())));
+            prop_assert_eq!(put_back(&moved, root.path(), &trash, true, &Copies::default(), &own(&files)), Err((PutBackError::Blocked(Blocked::Taken(taken)), Vec::new())));
             prop_assert_eq!(contents(root.path()), want);
         }
 
@@ -982,7 +1044,7 @@ mod tests {
             let to = gone.to.as_deref().unwrap();
             if to.is_dir() { std::fs::remove_dir_all(to).unwrap() } else { std::fs::remove_file(to).unwrap() }
             let back: Vec<Trashed> = moved.iter().filter(|m| *m != gone).cloned().collect();
-            prop_assert_eq!(put_back(&moved, root.path(), &trash, true, &Copies::default()), Ok(back.clone()));
+            prop_assert_eq!(put_back(&moved, root.path(), &trash, true, &Copies::default(), &own(&files)), Ok(back.clone()));
             for item in &back {
                 prop_assert_eq!(identity(&item.from), item.seen, "{} is back as it went", item.from.display());
             }
@@ -1013,7 +1075,7 @@ mod tests {
             }
             let before = contents(root.path());
             prop_assert_eq!(can_put_back(&carried.moved, root.path(), &Copies::default()), Err(Blocked::NotInTrash(swapped.from.clone())));
-            prop_assert!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default()).is_err());
+            prop_assert!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default(), &own(&files)).is_err());
             prop_assert_eq!(contents(root.path()), before);
         }
 
@@ -1032,7 +1094,7 @@ mod tests {
             std::fs::rename(&location, root.path().join("was-pack")).unwrap();
             std::os::unix::fs::symlink(&elsewhere, &location).unwrap();
             prop_assert_eq!(can_put_back(&carried.moved, root.path(), &Copies::default()), Err(Blocked::NotAFolder(location.clone())));
-            prop_assert!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default()).is_err());
+            prop_assert!(put_back(&carried.moved, root.path(), &trash, false, &Copies::default(), &own(&files)).is_err());
             prop_assert!(tree(&elsewhere).is_empty(), "nothing behind the link: {:?}", tree(&elsewhere));
         }
     }
@@ -1046,7 +1108,10 @@ mod tests {
         let moved = carry_out(&plan(&file, std::slice::from_ref(&file), true), &trash, |_| {}).moved;
         std::fs::write(&file, b"mine").unwrap();
         assert_eq!(can_put_back(&moved, root.path(), &Copies::default()), Err(Blocked::Taken(file.clone())));
-        assert!(put_back(&moved, root.path(), &trash, false, &Copies::default()).is_err(), "and the move itself never replaces it");
+        assert!(
+            put_back(&moved, root.path(), &trash, false, &Copies::default(), &Own::default()).is_err(),
+            "and the move itself never replaces it"
+        );
         assert_eq!(std::fs::read(&file).unwrap(), b"mine");
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_dir_all(root.path().join("trash")).unwrap();
@@ -1073,7 +1138,7 @@ mod tests {
         let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
         let moved = carry_out(&plan(&file, std::slice::from_ref(&file), true), &trash, |_| {}).moved;
         let racing: Trash = Arc::new(Races(trash));
-        assert!(put_back(&moved, root.path(), &racing, false, &Copies::default()).is_err());
+        assert!(put_back(&moved, root.path(), &racing, false, &Copies::default(), &Own::default()).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), b"mine", "what was put there stays");
         assert!(moved[0].to.as_ref().unwrap().exists(), "and the item stays in the trash");
     }
@@ -1089,7 +1154,7 @@ mod tests {
         let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
         let moved = carry_out(&plan(&destination.join("pack"), &files, false), &trash, |_| {}).moved;
         std::fs::remove_dir_all(&destination).unwrap();
-        assert!(put_back(&moved, &destination, &trash, false, &Copies::default()).is_err());
+        assert!(put_back(&moved, &destination, &trash, false, &Copies::default(), &own(&files)).is_err());
         assert!(!destination.exists());
     }
 
@@ -1137,5 +1202,53 @@ mod tests {
         system().give_back(&to, &file).unwrap();
         assert!(file.exists() && !to.exists(), "put back where it was");
         moved.0 = Some(file);
+    }
+
+    /// Of a folder put back that has anything else in it by the time the undo fails, or is another
+    /// torrent's destination, only the torrent's own files go to the Trash again, by identity; the rest
+    /// stays (#371). What took an item's place stays too, and is named.
+    #[test]
+    fn only_what_was_put_back_is_taken_back() {
+        for (foreign, kept) in
+            [(None, false), (Some(".DS_Store"), false), (Some("other.bin"), false), (Some("sub/other.bin"), false), (None, true)]
+        {
+            let root = tempfile::tempdir().unwrap();
+            let folder = root.path().join("A");
+            let files = vec![folder.join("x"), folder.join("sub/y")];
+            files.iter().for_each(|f| write(f));
+            let own = Own { kept: if kept { vec![root.path().join("a/sub")] } else { Vec::new() }, ..own(&files) };
+            let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+            let moved = carry_out(&plan(&folder, &files, false), &trash, |_| {}).moved;
+            let in_trash = contents(&root.path().join("trash"));
+            let back = put_back(&moved, root.path(), &trash, false, &Copies::default(), &own).unwrap();
+            if let Some(name) = foreign {
+                write(&folder.join(name));
+            }
+            assert_eq!(take_back(&trash, back.iter(), &own), Vec::<PathBuf>::new(), "{foreign:?}");
+            let mut now = contents(&root.path().join("trash"));
+            let litter = foreign == Some(".DS_Store");
+            if litter {
+                now.retain(|p, _| !p.ends_with(".DS_Store"));
+            }
+            assert_eq!(now, in_trash, "{foreign:?}, {kept}: the torrent's own");
+            let stays = foreign.filter(|_| !litter).map(|name| folder.join(name));
+            assert_eq!(folder.exists(), stays.is_some() || kept, "{foreign:?}, {kept}");
+            assert!(stays.is_none_or(|path| path.exists()), "{foreign:?} stays");
+        }
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("x");
+        write(&file);
+        let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
+        let moved = carry_out(&plan(&file, std::slice::from_ref(&file), true), &trash, |_| {}).moved;
+        let back = put_back(&moved, root.path(), &trash, false, &Copies::default(), &Own::default()).unwrap();
+        std::fs::rename(&file, root.path().join("kept")).unwrap();
+        write(&file);
+        assert_eq!(take_back(&trash, back.iter(), &Own::default()), vec![file.clone()]);
+        assert!(file.exists());
+    }
+
+    /// `files`, as they are or as they were in the Trash: for tests that take folders whole.
+    fn own(files: &[PathBuf]) -> Own {
+        Own { files: files.iter().map(|f| (f.clone(), identity(f))).collect(), kept: Vec::new() }
     }
 }

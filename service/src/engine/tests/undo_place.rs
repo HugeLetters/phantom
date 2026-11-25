@@ -3,6 +3,7 @@
 
 use super::moving::{album, bytes_in};
 use super::*;
+use std::collections::BTreeMap;
 
 /// What the other torrent is, against `A`'s two files at `downloads/A`.
 #[derive(Debug, Clone, Copy)]
@@ -47,6 +48,9 @@ async fn removed_then(dir: &Path, engine: &Engine, delete: bool, other: Other) -
             }
         }
         Other::Stopped => {}
+    }
+    if matches!(other, Other::InsideItsFolder) {
+        until(engine, b, |s| matches!(s, Status::Downloading { .. })).await;
     }
     (b, name, a, hash)
 }
@@ -130,8 +134,8 @@ async fn an_undo_is_refused_while_another_torrent_is_moving_to_its_place() {
 
 /// Another torrent comes while an undo's files are going back, and has some of them when they're
 /// back: the undo is refused as it would have been, not added beside it, and what went back goes to
-/// the Trash again (every undo does all or nothing). Nothing is lost: every byte of `A` is in the
-/// Trash or at its place, and `A` isn't listed.
+/// the Trash again (every undo does all or nothing), each file as it was. Across a crash the add,
+/// which waited without its info, is forgotten as any is, having touched nothing: the undo finishes.
 #[tokio::test(flavor = "multi_thread")]
 async fn another_torrent_added_while_the_files_go_back_refuses_the_undo() {
     for crash in [false, true] {
@@ -151,7 +155,8 @@ async fn another_torrent_added_while_the_files_go_back_refuses_the_undo() {
         held_at_the_gate(&gate).await;
         // Its folder is back; another torrent takes one of its files' paths now.
         // A torrent of one file, `a.bin`, in `A`'s folder: its path is one of `A`'s.
-        let b = add(&engine, &downloads.join("pack"), torrent_file("a.bin"), false).await.unwrap().id;
+        let b = add_now(&engine, torrent_file("a.bin"), &downloads.join("pack")).await;
+        says_its_place(&engine, b).await;
         let engine = if crash {
             engine.kill().await;
             super::super::trash::abandon(&gate);
@@ -174,12 +179,16 @@ async fn another_torrent_added_while_the_files_go_back_refuses_the_undo() {
         };
 
         let listed: Vec<u64> = engine.listing().await.iter().map(|t| t.id).collect();
-        assert_eq!(listed, [b], "crash: {crash}: only the other torrent is listed");
+        assert_eq!(listed, [if crash { a } else { b }], "crash: {crash}");
         assert_eq!(top(&engine).await, None, "crash: {crash}: dropped");
-        let found: Vec<Vec<u8>> = bytes_in(dir.path()).into_values().collect();
-        // (`a.bin` is the other torrent's too: its add sized it, which the undo has no part in.)
-        for (name, bytes) in ours.into_iter().filter(|(name, _)| name != "a.bin") {
-            assert!(found.contains(&bytes), "crash: {crash}: {name} is in the Trash or at its place");
+        if crash {
+            wait_for(&engine, a, Status::Seeding).await;
+            assert_eq!(pack_bytes(dir.path()), ours);
+        } else {
+            let found: Vec<Vec<u8>> = bytes_in(&dir.path().join("trash")).into_values().collect();
+            for (name, bytes) in ours {
+                assert!(found.contains(&bytes), "{name} is in the Trash as it was");
+            }
         }
         engine.stop().await;
     }
@@ -242,5 +251,156 @@ async fn a_selection_undone_brings_back_the_torrent_whose_files_are_free_and_say
     wait_for(&engine, c, Status::Seeding).await;
     let listed: BTreeSet<u64> = engine.listing().await.iter().map(|t| t.id).collect();
     assert_eq!(listed, [b, c].into(), "A stays off the list");
+    engine.stop().await;
+}
+
+/// `complete_torrent`, seeding in `downloads`, deleted, and its undo held with its folder back and
+/// the torrent not added yet: its id, its files' bytes, and the undo.
+async fn held_putting_back(
+    dir: &Path,
+    engine: &Engine,
+    gate: &super::super::trash::Gate,
+) -> (u64, BTreeMap<PathBuf, Vec<u8>>, tokio::task::JoinHandle<Result<proto::Undone, Failure>>) {
+    let a = add(engine, &dir.join("downloads"), complete_torrent(dir).await, false).await.unwrap().id;
+    wait_for(engine, a, Status::Seeding).await;
+    let ours = bytes_in(&dir.join("downloads/pack"));
+    engine.command(a, TorrentCommand::Delete).await.unwrap();
+    super::super::trash::hold(gate, true);
+    let undoing = tokio::spawn(engine.undo_later());
+    held_at_the_gate(gate).await;
+    (a, ours, undoing)
+}
+
+/// A .torrent's add, answered as it's listed, not waited for.
+async fn add_now(engine: &Engine, source: AddSource, destination: &Path) -> u64 {
+    engine.add(super::super::fetched(source).await.unwrap(), false, parsed(destination)).await.unwrap().id
+}
+
+/// Waits until the add of torrent `id` got as far as its info: it says where its files go.
+async fn says_its_place(engine: &Engine, id: u64) {
+    for _ in 0..1000 {
+        if engine.inspect(move |actor| actor.guard.places().says(id)).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the add never said where its files go");
+}
+
+/// A torrent added into a place an undo is putting files back to touches nothing there till the undo
+/// is over. One with the undone torrent's files refuses it: what went back is in the Trash again,
+/// as it went, and the other torrent then makes its own file and keeps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_into_the_place_waits_while_the_files_go_back() {
+    let dir = temp();
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let (_, ours, undoing) = held_putting_back(dir.path(), &engine, &gate).await;
+    let place = dir.path().join("downloads/pack");
+    let b = add_now(&engine, torrent_file("a.bin"), &place).await;
+    says_its_place(&engine, b).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(bytes_in(&place), ours, "the add touched nothing yet");
+
+    super::super::trash::hold(&gate, false);
+    let (_, why) = cant_undo(undoing.await.unwrap());
+    assert!(matches!(&why, proto::CantUndo::AnotherHasFiles { other, .. } if other.id == b), "{why:?}");
+    let trash: BTreeMap<PathBuf, Vec<u8>> =
+        bytes_in(&dir.path().join("trash")).into_iter().map(|(p, b)| (p.file_name().unwrap().into(), b)).collect();
+    assert!(trash == ours, "all in the Trash, as it went: {:?}", trash.keys());
+    until(&engine, b, |s| !matches!(s, Status::FetchingInfo)).await;
+    for _ in 0..1000 {
+        if bytes_in(&place).contains_key(Path::new("a.bin")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(4 * SIZE_CHECK_EVERY).await;
+    assert!(!matches!(find(&engine, b).await.status, Status::MissingFiles { .. }), "{:?}", find(&engine, b).await.status);
+    assert_eq!(bytes_in(&place), BTreeMap::from([("a.bin".into(), vec![0; 16384])]), "its own file, and only it");
+    engine.stop().await;
+}
+
+/// One added inside the folder, with files of its own, waits too, and then both are in the list: they
+/// share no file.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_inside_the_folder_sharing_no_file_waits_and_both_are_listed() {
+    let dir = temp();
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let (a, ours, undoing) = held_putting_back(dir.path(), &engine, &gate).await;
+    // However it's spelled.
+    let place = dir.path().join("downloads/pack");
+    let b = add_now(&engine, torrent_file("own.bin"), &dir.path().join("downloads/PACK")).await;
+    says_its_place(&engine, b).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(bytes_in(&place), ours, "the add touched nothing yet");
+
+    super::super::trash::hold(&gate, false);
+    undoing.await.unwrap().unwrap();
+    wait_for(&engine, a, Status::Seeding).await;
+    until(&engine, b, |s| !matches!(s, Status::FetchingInfo)).await;
+    let mut now = bytes_in(&place);
+    now.remove(Path::new("own.bin"));
+    assert_eq!(now, ours);
+    engine.stop().await;
+}
+
+/// Another torrent told to move into a place an undo is putting files back to, replacing what's
+/// there, is refused: its files stay where they are, whole, as does what the undo brought back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_into_the_place_is_refused_while_the_files_go_back() {
+    let dir = temp();
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let other = dir.path().join("other");
+    let b = add(&engine, &other, complete_torrent_in(dir.path(), "other", 9).await, false).await.unwrap().id;
+    wait_for(&engine, b, Status::Seeding).await;
+    let theirs = bytes_in(&other);
+    let (a, ours, undoing) = held_putting_back(dir.path(), &engine, &gate).await;
+
+    let replace = TorrentCommand::Move { to: AbsolutePath::new(dir.path().join("downloads")).unwrap(), clash: None, name: None };
+    let (id, why) = refusal(engine.command(b, replace).await);
+    assert_eq!(id, b);
+    assert!(matches!(why, TorrentRefusal::AnothersFiles { .. }), "{why:?}");
+    assert_eq!(bytes_in(&other), theirs);
+
+    super::super::trash::hold(&gate, false);
+    undoing.await.unwrap().unwrap();
+    wait_for(&engine, a, Status::Seeding).await;
+    wait_for(&engine, b, Status::Seeding).await;
+    assert_eq!(bytes_in(&other), theirs, "the other keeps every byte");
+    assert_eq!(bytes_in(&dir.path().join("downloads/pack")), ours);
+    engine.stop().await;
+}
+
+/// Two torrents that had the same place, one after the other, undone at once: the first undo has the
+/// place, the second is refused, naming it, and its files stay in the Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn of_two_undos_into_one_place_the_second_is_refused() {
+    let dir = temp();
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let downloads = dir.path().join("downloads");
+    let mut ids = Vec::new();
+    for k in [1, 2] {
+        let id = add(&engine, &downloads, album(dir.path(), "A", k).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        engine.command(id, TorrentCommand::Delete).await.unwrap();
+        ids.push(id);
+    }
+    super::super::trash::hold(&gate, true);
+    let newest = tokio::spawn(engine.undo_later());
+    held_at_the_gate(&gate).await;
+    let (_, why) = cant_undo(engine.undo().await);
+    assert!(matches!(&why, proto::CantUndo::AnotherHasFiles { other, .. } if other.id == ids[1] && other.name == "A"), "{why:?}");
+    super::super::trash::hold(&gate, false);
+    newest.await.unwrap().unwrap();
+    wait_for(&engine, ids[1], Status::Seeding).await;
+    assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [ids[1]]);
     engine.stop().await;
 }
