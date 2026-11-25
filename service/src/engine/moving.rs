@@ -164,9 +164,10 @@ impl Plan {
         self.items.iter().flat_map(|i| [self.old(i), self.staged(i), self.new(i)])
     }
 
-    /// It takes files that were in the new destination already: they're checked once it's moved.
-    pub fn adopts(&self) -> bool {
-        self.items.iter().any(|i| i.kept)
+    /// The files, by index, it takes that were in the new destination already: they're checked
+    /// before anything of them counts.
+    pub fn adopted(&self) -> BTreeSet<usize> {
+        self.items.iter().filter(|i| i.kept).map(|i| i.index).collect()
     }
 
     /// The files that don't move, by index: not in the old destination (deleted by hand), nor

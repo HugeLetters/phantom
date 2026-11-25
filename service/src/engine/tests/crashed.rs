@@ -399,3 +399,143 @@ async fn a_clean_stop_forgets_what_was_seen_at_a_missing_path() {
     engine.stop().await;
     assert_eq!(saved_missing(dir)[&b].seen, super::super::files::Seen::NotYet);
 }
+
+/// How a Move into `dir`'s `elsewhere`, which has a file at `a.bin`'s path, uses it.
+async fn move_using(engine: &Engine, dir: &Path, id: u64, choice: proto::Clash) -> Result<(), Failure> {
+    let to = AbsolutePath::new(dir.join("elsewhere")).unwrap();
+    let TorrentRefusal::Clash { files: found } =
+        refusal(engine.command(id, TorrentCommand::Move { to: to.clone(), clash: None, name: None }).await).1
+    else {
+        panic!("a clash")
+    };
+    let answered = proto::Answered { choice, found };
+    engine.command(id, TorrentCommand::Move { to, clash: Some(answered), name: None }).await
+}
+
+/// What each file of torrent `id` shows it has, by name.
+async fn shown_had(engine: &Engine, id: u64) -> std::collections::BTreeMap<String, u64> {
+    let files = engine.details(id).await.unwrap().files;
+    files.into_iter().map(|f| (f.path.to_string_lossy().into_owned(), f.progress_bytes)).collect()
+}
+
+/// How the engine goes on from a Move that adopts `a.bin`, `b.bin` still missing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MovedThen {
+    /// To another drive: every inode changes.
+    Copied,
+    Restart,
+    Crash,
+    /// A crash once the old files are gone, before the record says the Move is over.
+    CrashInIt,
+    /// Moved again, nothing there.
+    MovedAgain,
+    /// The torrent's own file, which a person took away, put back.
+    OwnBack,
+    /// `b.bin` set Off: nothing is missing.
+    SetOff,
+}
+
+/// #406: `b.bin` is missing, a person's file at its path, as a Move uses another file at `a.bin`'s
+/// new one. It's still Missing files, with nothing of `a.bin` had till it's checked, and the
+/// person's file is as it was, whatever comes that isn't Resume or Check.
+async fn moved_missing(then: MovedThen) {
+    let dir = temp();
+    let dir = dir.path();
+    let gate = Arc::new(super::super::files::Gate::default());
+    let _held = Opens(gate.clone());
+    let mut engine = engine_gated_at(dir, super::super::files::At::Length, &gate).await;
+    let id = add(&engine, &dir.join("downloads"), complete_torrent(dir).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let (b, own) = (file(dir, "b.bin"), dir.join("own"));
+    std::fs::rename(&b, &own).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    std::fs::write(&b, other()).unwrap();
+    // Looked at, and told not to be the one that went.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for(&engine, id, Status::MissingFiles).await;
+    let elsewhere = dir.join("elsewhere/pack");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    std::fs::write(elsewhere.join("a.bin"), other()).unwrap();
+    if then == MovedThen::Copied {
+        super::moving::holding(&engine, true, None).await;
+    }
+    if then == MovedThen::CrashInIt {
+        let crashed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hold = crashed.clone();
+        engine.inspect(move |a| a.move_hold.crash_once_moved = Some(hold)).await;
+        let _ = tokio::time::timeout(Duration::from_secs(20), move_using(&engine, dir, id, proto::Clash::UseExisting)).await;
+        assert!(crashed.load(std::sync::atomic::Ordering::SeqCst), "it crashed there");
+        engine = super::engine(dir).await;
+    } else {
+        move_using(&engine, dir, id, proto::Clash::UseExisting).await.unwrap();
+    }
+    super::moving::moved(&engine, id).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    wait_for(&engine, id, Status::MissingFiles).await;
+    let mut now = elsewhere.join("b.bin");
+    if then != MovedThen::Copied {
+        assert_eq!(shown_had(&engine, id).await["a.bin"], 0, "not checked yet");
+    }
+    match then {
+        MovedThen::Copied | MovedThen::CrashInIt => {}
+        MovedThen::Restart | MovedThen::Crash => {
+            if then == MovedThen::Crash {
+                engine.kill().await
+            } else {
+                engine.stop().await
+            }
+            drop(engine);
+            engine = super::engine(dir).await;
+        }
+        MovedThen::MovedAgain => {
+            let again = dir.join("again");
+            std::fs::create_dir_all(&again).unwrap();
+            engine.command(id, super::moving::move_to(&again)).await.unwrap();
+            super::moving::moved(&engine, id).await;
+            now = again.join("pack/b.bin");
+        }
+        MovedThen::OwnBack => {
+            std::fs::rename(&now, dir.join("theirs")).unwrap();
+            std::fs::rename(&own, &now).unwrap();
+            until(&engine, id, |s| !matches!(s, Status::MissingFiles | Status::Checking)).await;
+            let had = shown_had(&engine, id).await;
+            assert_eq!((had["a.bin"], had["b.bin"], had["c.bin"]), (0, 2 * PIECE as u64, 2 * PIECE as u64));
+            assert_eq!(std::fs::read(dir.join("theirs")).unwrap(), other());
+            return engine.stop().await;
+        }
+        MovedThen::SetOff => {
+            let index = index_of(&engine, id, "b.bin").await;
+            engine.command(id, TorrentCommand::SetPriority { files: vec![index], priority: Priority::Off }).await.unwrap();
+            until(&engine, id, |s| !matches!(s, Status::MissingFiles | Status::Checking)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            until(&engine, id, |s| !matches!(s, Status::MissingFiles | Status::Checking)).await;
+            assert_eq!(shown_had(&engine, id).await["a.bin"], 0, "checked, nothing of it matched");
+            assert_eq!(std::fs::read(&now).unwrap(), other());
+            return engine.stop().await;
+        }
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    wait_for(&engine, id, Status::MissingFiles).await;
+    assert_eq!(shown_had(&engine, id).await["a.bin"], 0, "{then:?}");
+    assert_eq!(std::fs::read(&now).unwrap(), other(), "{then:?}");
+    // Resume is the choice of it, as it was.
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    wait_for(&engine, id, Status::Downloading).await;
+    engine.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_that_uses_a_file_there_is_still_missing_another() {
+    for then in [
+        MovedThen::Copied,
+        MovedThen::Restart,
+        MovedThen::Crash,
+        MovedThen::CrashInIt,
+        MovedThen::MovedAgain,
+        MovedThen::OwnBack,
+        MovedThen::SetOff,
+    ] {
+        println!("{then:?}");
+        moved_missing(then).await;
+    }
+}

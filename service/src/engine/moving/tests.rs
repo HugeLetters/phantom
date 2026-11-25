@@ -613,7 +613,7 @@ fn an_answer_holds_only_for_the_files_it_was_given_as_they_were() {
             make(&to);
             let planned = plan(&from, &to, None, "h", &files(), Some(&answer), true);
             match change {
-                "the file gone" => assert!(planned.is_ok_and(|p| !p.adopts()), "{choice:?}, {change}"),
+                "the file gone" => assert!(planned.is_ok_and(|p| p.adopted().is_empty()), "{choice:?}, {change}"),
                 "a new file at another path" => assert_eq!(planned, Err(Refused::Changed(to.join("t/c.bin"))), "{choice:?}, {change}"),
                 _ => assert_eq!(planned, Err(Refused::Changed(to.join("t/a.bin"))), "{choice:?}, {change}"),
             }

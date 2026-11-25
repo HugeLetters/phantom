@@ -23,6 +23,8 @@
 //! [`next`] says what the actor runs: the copy (once librqbit let go), its stop, the end of the move
 //! or its undoing, each a task of its own that reports back.
 
+use std::collections::BTreeSet;
+
 use machine::Machine;
 use proto::NotMoved;
 
@@ -35,9 +37,9 @@ pub enum Stage {
     /// copied (none for a rename).
     Copying { done: u64, total: u64 },
     /// All of them are there and the record names the new destination: they take their places, and
-    /// what's left of them in the old one goes. `check`: it took files that were there already
-    /// (Use existing), so it's checked once it's moved.
-    RemovingOld { check: bool },
+    /// what's left of them in the old one goes. `adopted`: the files, by index, it took that were
+    /// there already (Use existing): checked before anything of them counts.
+    RemovingOld { adopted: BTreeSet<usize> },
     /// It didn't move, for `why`: what was renamed goes back, what was copied goes.
     Restoring { why: NotMoved },
 }
@@ -48,7 +50,7 @@ pub enum Event {
     /// The copy copied `done` of `total` bytes so far.
     Copied { done: u64, total: u64 },
     /// Every file is in the new destination, and the record says so.
-    Placed { check: bool },
+    Placed { adopted: BTreeSet<usize> },
     /// It can't go on, for this reason.
     Failed(NotMoved),
     /// A file couldn't take its place, for this reason: those that had are staged again, and the
@@ -97,7 +99,7 @@ pub fn decide(stage: &Stage, event: &Event) -> Option<Stage> {
     let stays = || Some(stage.clone());
     match (stage, event) {
         (S::TakingOut | S::Copying { .. }, E::Copied { done, total }) => Some(S::Copying { done: *done, total: *total }),
-        (S::TakingOut | S::Copying { .. }, E::Placed { check }) => Some(S::RemovingOld { check: *check }),
+        (S::TakingOut | S::Copying { .. }, E::Placed { adopted }) => Some(S::RemovingOld { adopted: adopted.clone() }),
         (S::TakingOut | S::Copying { .. }, E::Failed(why)) => Some(S::Restoring { why: why.clone() }),
         // Not moved yet, nor stopped: nothing ends but by being placed or failing.
         (S::TakingOut | S::Copying { .. }, E::Ended | E::Blocked(_)) => stays(),
@@ -153,13 +155,13 @@ mod tests {
     every!(Stage {
         Stage::TakingOut => [Stage::TakingOut],
         Stage::Copying { .. } => [Stage::Copying { done: 0, total: 0 }, Stage::Copying { done: 3, total: 10 }],
-        Stage::RemovingOld { .. } => [Stage::RemovingOld { check: false }, Stage::RemovingOld { check: true }],
+        Stage::RemovingOld { .. } => [[].into(), [0].into()].map(|adopted| Stage::RemovingOld { adopted }),
         Stage::Restoring { .. } => [Stage::Restoring { why: NotMoved::DiskFull }, Stage::Restoring { why: NotMoved::Cancelled }],
     });
 
     every!(Event {
         Event::Copied { .. } => [Event::Copied { done: 5, total: 10 }],
-        Event::Placed { .. } => [Event::Placed { check: false }, Event::Placed { check: true }],
+        Event::Placed { .. } => [[].into(), [0].into()].map(|adopted| Event::Placed { adopted }),
         Event::Failed(_) => [Event::Failed(NotMoved::Interrupted)],
         Event::Blocked(_) => [Event::Blocked(NotMoved::Cancelled)],
         Event::Ended => [Event::Ended],
@@ -189,7 +191,7 @@ mod tests {
                 then: |_, e, n| {
                     *n == Some(match e {
                         Event::Copied { done, total } => Stage::Copying { done: *done, total: *total },
-                        Event::Placed { check } => Stage::RemovingOld { check: *check },
+                        Event::Placed { adopted } => Stage::RemovingOld { adopted: adopted.clone() },
                         Event::Failed(why) => Stage::Restoring { why: why.clone() },
                         Event::Ended | Event::Blocked(_) => unreachable!(),
                     })
