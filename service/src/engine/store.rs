@@ -119,6 +119,10 @@ pub struct Saved {
     /// it comes back so at start, not Ready with progress nobody checked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unchecked: bool,
+    /// Its files were looked at on a reachable destination once: before, a file not there may never
+    /// have been made (added, or its info arrived, while the destination was away).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reached: bool,
     /// What it did in its seeding round ([`lifecycle::seeding`]): librqbit forgets what it
     /// uploaded at every stop. Kept at the regular size check and when the service stops.
     pub round: lifecycle::seeding::Round,
@@ -239,6 +243,7 @@ pub struct Record {
     pub gets: Gets,
     pub wants: Wants,
     pub unchecked: bool,
+    pub reached: bool,
     pub round: lifecycle::seeding::Round,
     pub missing: BTreeMap<usize, Missing>,
     pub had: Vec<u64>,
@@ -347,6 +352,7 @@ impl Record {
             normal,
             wants,
             unchecked,
+            reached,
             round,
             missing,
             had,
@@ -372,6 +378,7 @@ impl Record {
             gets,
             wants,
             unchecked,
+            reached,
             round,
             missing,
             had,
@@ -404,6 +411,7 @@ impl Record {
             gets: Gets::Every,
             wants,
             unchecked: false,
+            reached: false,
             round: Default::default(),
             missing: BTreeMap::new(),
             had: Vec::new(),
@@ -430,6 +438,7 @@ impl Record {
             },
             wants: self.wants,
             unchecked: self.unchecked,
+            reached: self.reached,
             round: self.round,
             missing: self.missing.clone(),
             had: self.had.clone(),

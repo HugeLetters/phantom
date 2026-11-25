@@ -1456,8 +1456,8 @@ impl Model {
         packs.collect()
     }
 
-    /// Back, it's added again, so checked, and runs if it was running; one partly deleted only
-    /// says so.
+    /// Back, it's added again, so checked, and runs if it was running, unless a file it gets isn't
+    /// there: that's Missing files (#385); one partly deleted only says so.
     fn destination_back(&mut self, pack: usize) {
         self.unavailable[pack] = false;
         let away = self.pack_torrent_ref(pack).map_or([None; FILES], |p| self.away(pack, &p.off));
@@ -1467,8 +1467,17 @@ impl Model {
             _ => None,
         }) {
             p.unavailable = false;
-            if !p.delete_failed {
+            if p.delete_failed {
+                return;
+            }
+            // A file it gets that isn't there is Missing files, not made again by the check (#385): it
+            // runs once Resume (or the file's return) checks it.
+            let gone: BTreeMap<usize, Gone> =
+                (0..FILES).filter(|&f| !p.off[f] && disk[f] == OnDisk::Absent).map(|f| (f, Gone { had: p.have[f], back: false })).collect();
+            if gone.is_empty() {
                 p.check(disk, folder, held, BTreeMap::new(), away);
+            } else {
+                p.missing = gone;
             }
         }
     }
@@ -2100,7 +2109,9 @@ impl ReferenceStateMachine for EngineModel {
             }
             Step::HoldTrash => !model.held,
             Step::ReleaseTrash => model.held,
-            Step::DeleteFile { pack, .. } | Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
+            // A file can be deleted while the destination is away: it's absent when it's back (#385).
+            Step::DeleteFile { .. } => true,
+            Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
             Step::DestinationGone { pack } => !model.unavailable[*pack],
             Step::WriteMine { pack } => !model.unavailable[*pack] && !model.mine[*pack],
             Step::WriteLitter { pack } => !model.unavailable[*pack] && !model.litter[*pack],
@@ -3344,6 +3355,18 @@ fn the_undo_of_a_remove_made_while_the_destination_was_gone_after_it_came_back_i
         Step::Remove(0),
         Step::DestinationBack { pack: 0 },
         Step::Undo,
+    ]);
+}
+
+/// #385: a file deleted while the destination is away is absent when it's back: Missing files, not
+/// made again by the check and downloaded; one set Off isn't missing.
+#[test]
+fn a_file_deleted_while_the_destination_is_away_makes_its_torrent_missing_files_when_it_is_back() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::DestinationGone { pack: 0 },
+        Step::DeleteFile { pack: 0, file: 1 },
+        Step::DestinationBack { pack: 0 },
     ]);
 }
 
