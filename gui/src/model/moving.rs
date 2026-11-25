@@ -20,8 +20,9 @@ use client::{Failure, display};
 use proto::{AbsolutePath, Action, FileName, Found, MoveOf, NameProblem, NotMoved, Refusal, TorrentId, TorrentRefusal};
 use rune::{FileDialogOptions, TextEdit, Tx};
 
-use super::{AddFailure, Phantom};
-use crate::notice::{Listing, Notice};
+use super::{AddFailure, Phantom, retry};
+use crate::bar::machine::NoticeId;
+use crate::notice::{Listing, Notice, NoticeAction};
 use crate::platform::Show;
 
 /// The clash dialog, while it asks about torrent `id`, called `name`: its files, in `to`, are there
@@ -97,11 +98,15 @@ pub struct Asking {
     chosen: BTreeMap<TorrentId, (Choice, Vec<Found>)>,
     /// How many clashed when the service answered: the dialogs' counter.
     of: usize,
+    /// The notice whose Move to… asked: it goes once a Move is sent.
+    leaves: Option<NoticeId>,
 }
 
 /// A torrent of the selection that didn't move, and why: what the notice's list says.
 #[derive(Debug, Clone, PartialEq)]
 struct Unmoved {
+    /// Try again and Move to… are for these.
+    id: TorrentId,
     name: String,
     why: display::Reason,
 }
@@ -123,6 +128,15 @@ pub fn move_selection_to(s: &mut Phantom, to: AbsolutePath) {
 /// move, and moves those that can.
 pub fn move_to(s: &mut Phantom, tx: &mut Tx) {
     let ids = selection(s);
+    pick_folder(s, ids, None, tx);
+}
+
+/// [`move_to`] for `ids`; the notice `leaves` goes once the Move is sent. While a picker is open
+/// no second opens.
+pub fn pick_folder(s: &mut Phantom, ids: Vec<TorrentId>, leaves: Option<NoticeId>, tx: &mut Tx) {
+    if s.picking {
+        return;
+    }
     let Some(first) = s.torrents.iter().find(|t| ids.contains(&t.id) && t.actions.does(Action::Move)) else { return };
     let directory = first.location.as_ref().and_then(|l| l.parent()).map(|p| p.to_path_buf());
     let title = match ids.as_slice() {
@@ -130,20 +144,35 @@ pub fn move_to(s: &mut Phantom, tx: &mut Tx) {
         _ => display::move_picker_several(ids.len()),
     };
     let options = FileDialogOptions { title, directory, ..Default::default() };
-    tx.open_folder(options, move |s: &mut Phantom, chosen, _| match chosen {
-        Ok(Some(folder)) => match client::absolute(&folder) {
-            Ok(to) => start(s, ids, to),
-            Err(e) => tell(s, ids.first().copied().unwrap_or_default(), &format!("{e:#}")),
-        },
-        Ok(None) => {}
-        Err(e) => tell(s, ids.first().copied().unwrap_or_default(), &format!("can't ask for a folder: {e}")),
+    s.picking = true;
+    tx.open_folder(options, move |s: &mut Phantom, chosen, _| {
+        s.picking = false;
+        match chosen {
+            Ok(Some(folder)) => match client::absolute(&folder) {
+                Ok(to) => start_leaving(s, ids, to, leaves),
+                Err(e) => unasked(s, &ids, &format!("{e:#}")),
+            },
+            Ok(None) => {}
+            Err(e) => unasked(s, &ids, &format!("can't ask for a folder: {e}")),
+        }
     });
+}
+
+/// A Move of `ids` with no folder to go to: `why`, and Move to… to ask for one again.
+fn unasked(s: &mut Phantom, ids: &[TorrentId], why: &str) {
+    let actions = vec![retry::move_to(s, ids)];
+    tell(s, ids.first().copied().unwrap_or_default(), why, actions);
 }
 
 /// Moves the torrents of `ids` (the selection, in the list's order) that can move into `to`: asks
 /// the service which clash, then each dialog in turn, then sends the Moves. `to` is the newest of
 /// the recent folders (Move to ▸) from now.
 pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
+    start_leaving(s, ids, to, None);
+}
+
+/// [`start`], for the button of notice `leaves`: it goes once a Move is sent.
+fn start_leaving(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath, leaves: Option<NoticeId>) {
     let (order, skipped): (Vec<TorrentId>, Vec<Unmoved>) = {
         let mut order = Vec::new();
         let mut skipped = Vec::new();
@@ -151,6 +180,7 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
             match s.torrents.iter().find(|t| t.id == *id) {
                 Some(t) if t.actions.does(Action::Move) => order.push(*id),
                 Some(t) => skipped.push(Unmoved {
+                    id: *id,
                     name: t.display_name().to_owned(),
                     why: display::why_off(&[t.actions.get(Action::Move)]).unwrap_or_default().into(),
                 }),
@@ -172,6 +202,7 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
         clashing: VecDeque::new(),
         chosen: BTreeMap::new(),
         of: 0,
+        leaves,
     };
     s.service.clashes(
         order,
@@ -184,7 +215,8 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
             }
             Err(e) => {
                 let id = asking.order.first().copied().unwrap_or_default();
-                tell(s, id, &format!("{e:#}"));
+                let actions = retry::moving(s, &asking.order, asking.to.clone());
+                tell(s, id, &format!("{e:#}"), actions);
             }
         }),
     );
@@ -342,11 +374,13 @@ pub fn reveal(s: &mut Phantom) {
 
 /// Sends the Moves of those that weren't skipped, in the list's order, and tells how they went.
 fn send(s: &mut Phantom, asking: Asking) {
-    let Asking { to, order, mut skipped, selected, chosen, .. } = asking;
+    let Asking { to, order, mut skipped, selected, chosen, leaves, .. } = asking;
     let mut moves = Vec::new();
     for id in order {
         match chosen.get(&id) {
-            Some((Choice::Skip, _)) => skipped.push(Unmoved { name: name(s, id), why: display::not_moved(&NotMoved::Cancelled).into() }),
+            Some((Choice::Skip, _)) => {
+                skipped.push(Unmoved { id, name: name(s, id), why: display::not_moved(&NotMoved::Cancelled).into() })
+            }
             Some((Choice::Use(choice), found)) => {
                 moves.push(MoveOf { id, clash: Some(proto::Answered { choice: *choice, found: found.clone() }), name: None })
             }
@@ -356,23 +390,28 @@ fn send(s: &mut Phantom, asking: Asking) {
     }
     if moves.is_empty() {
         // The only torrent, its Move cancelled in its dialog: as asked, nothing to tell.
-        return if selected == 1 { () } else { tell_selection(s, selected, 0, skipped) };
+        return if selected == 1 { () } else { tell_selection(s, selected, 0, skipped, &to) };
+    }
+    // Sent, even if only some: the notice's buttons were for the whole, and what's not sent was
+    // answered for in a dialog.
+    if let Some(notice) = leaves {
+        s.bar.take(notice);
     }
     let sent: Vec<TorrentId> = moves.iter().map(|m| m.id).collect();
     s.service.moves(
-        to,
+        to.clone(),
         moves,
         Box::new(move |s: &mut Phantom, failed: Vec<(TorrentId, Failure)>, _: &mut Tx| {
             // Taken back by an Undo before it ended: not a failure, and the Undo tells it.
             let failed: Vec<(TorrentId, Failure)> =
                 failed.into_iter().filter(|(_, e)| !matches!(e, Failure::Refused(Refusal::Undone))).collect();
             match (selected, sent.as_slice()) {
-                (1, [id]) => one(s, *id, failed),
+                (1, [id]) => one(s, *id, failed, &to),
                 _ => {
                     let moved = sent.iter().filter(|id| failed.iter().all(|(f, _)| f != *id)).count();
                     let mut unmoved = skipped;
                     unmoved.extend(failed.iter().map(|(id, failure)| unmoved_by(s, *id, failure)));
-                    tell_selection(s, selected, moved, unmoved);
+                    tell_selection(s, selected, moved, unmoved, &to);
                 }
             }
         }),
@@ -381,25 +420,25 @@ fn send(s: &mut Phantom, asking: Asking) {
 
 /// The failure of a Move of the only torrent selected, as it's told: an error notice, but not one a
 /// Remove, a Delete or Cancel move asked for.
-fn one(s: &mut Phantom, id: TorrentId, failed: Vec<(TorrentId, Failure)>) {
+fn one(s: &mut Phantom, id: TorrentId, failed: Vec<(TorrentId, Failure)>, to: &AbsolutePath) {
     let Some((_, failure)) = failed.into_iter().next() else { return };
     if cancelled(&failure) {
         return;
     }
     let name = name(s, id);
     let (what, why) = display::command_failure(&name, &failure);
-    told(s, AddFailure { what, why });
+    told(s, AddFailure { what, why, request: None }, retry::moving(s, &[id], to.clone()));
 }
 
 /// A Move that failed, as a line of the notice's list: the torrent and why, which names it no
 /// more ("Its new folder changed while it waited: …").
 fn unmoved_by(s: &Phantom, id: TorrentId, failure: &Failure) -> Unmoved {
     match failure {
-        _ if cancelled(failure) => Unmoved { name: name(s, id), why: display::not_moved(&NotMoved::Cancelled).into() },
-        Failure::Refused(Refusal::Torrent { why, .. }) => Unmoved { name: name(s, id), why: display::refused_why(why) },
+        _ if cancelled(failure) => Unmoved { id, name: name(s, id), why: display::not_moved(&NotMoved::Cancelled).into() },
+        Failure::Refused(Refusal::Torrent { why, .. }) => Unmoved { id, name: name(s, id), why: display::refused_why(why) },
         _ => {
             let (what, why) = display::command_failure(&name(s, id), failure);
-            Unmoved { name: what, why }
+            Unmoved { id, name: what, why }
         }
     }
 }
@@ -411,27 +450,29 @@ fn cancelled(failure: &Failure) -> bool {
 
 /// A selection's Move once it ended: "Moved 2 of 3", with those that didn't, and why, in the list.
 /// Nothing is told when every torrent moved.
-fn tell_selection(s: &mut Phantom, selected: usize, moved: usize, unmoved: Vec<Unmoved>) {
+fn tell_selection(s: &mut Phantom, selected: usize, moved: usize, unmoved: Vec<Unmoved>, to: &AbsolutePath) {
     if unmoved.is_empty() {
         return;
     }
     let list = Listing::of_entries(unmoved.iter().map(|u| (u.name.as_str(), &u.why)));
-    s.bar.tell(Notice { more: Some(list), ..Notice::warning(display::moved_of(moved, selected)) });
+    let left: Vec<TorrentId> = unmoved.iter().map(|u| u.id).collect();
+    let actions = retry::moving(s, &left, to.clone());
+    s.bar.tell(Notice { more: Some(list), ..Notice::warning(display::moved_of(moved, selected)) }.with_actions(actions));
 }
 
 fn name(s: &Phantom, id: TorrentId) -> String {
     s.torrents.iter().find(|t| t.id == id).map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned())
 }
 
-/// A Move of torrent `id` that couldn't be asked: `why`.
-fn tell(s: &mut Phantom, id: TorrentId, why: &str) {
-    told(s, AddFailure { what: name(s, id), why: display::sentence(why).into() });
+/// A Move that couldn't be asked, `id` its first torrent: `why`, and the buttons that ask again.
+fn tell(s: &mut Phantom, id: TorrentId, why: &str, actions: Vec<NoticeAction>) {
+    told(s, AddFailure { what: name(s, id), why: display::sentence(why).into(), request: None }, actions);
 }
 
 /// A Move that failed, as any failed command is told: "Couldn't move the torrent", the torrent and
 /// why under it.
-fn told(s: &mut Phantom, failed: AddFailure) {
+fn told(s: &mut Phantom, failed: AddFailure, actions: Vec<NoticeAction>) {
     let title = display::commands_failed(Action::Move, 1, 1);
     let list = Listing::of_entries([(failed.what.as_str(), &failed.why)]);
-    s.bar.tell(Notice { more: Some(list), ..Notice::error(title) });
+    s.bar.tell(Notice { more: Some(list), ..Notice::error(title) }.with_actions(actions));
 }

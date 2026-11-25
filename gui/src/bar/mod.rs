@@ -70,6 +70,15 @@ impl Bar {
         self.send(Event::Command(Command::Dismiss(id)));
     }
 
+    /// Dismisses notice `id`, its button pressed; whether it was still there to dismiss.
+    pub fn take(&mut self, id: NoticeId) -> bool {
+        let state = decide(&self.state, &Event::Command(Command::Dismiss(id)));
+        if let Ok(state) = &state {
+            self.state = state.clone();
+        }
+        state.is_ok()
+    }
+
     /// Dismiss all: every notice goes.
     pub fn dismiss_all(&mut self) {
         self.send(Event::Command(Command::DismissAll));
@@ -100,7 +109,6 @@ impl Bar {
     }
 
     /// The notices, oldest first.
-    #[cfg(test)]
     pub fn entries(&self) -> &[Entry] {
         &self.state.entries
     }

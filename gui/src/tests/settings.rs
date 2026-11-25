@@ -2773,6 +2773,21 @@ fn leaving_a_field_whose_text_was_refused_does_not_send_it_again() {
     assert!(d.settings.find("listen_port-refused").is_some(), "the refusal still shows");
 }
 
+/// A setting the service couldn't change offers Open settings: Settings on that setting's tab, its
+/// control focused.
+#[test]
+fn a_setting_that_could_not_be_changed_offers_open_settings_at_it() {
+    let mut d = typing_port_in(MemoryService::new().failing_restarts(), "40001");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    let notice = d.main.state.bar.entries().last().expect("its notice").notice.clone();
+    let titles: Vec<_> = notice.actions.iter().map(|a| a.title.as_str()).collect();
+    assert_eq!(titles, ["Open settings"]);
+    d.main.update(|s, tx| (notice.actions[0].run)(s, tx));
+    d.settle();
+    assert_eq!(d.settings.state.sheet.as_ref().and_then(|s| s.focus), Some("listen_port"));
+}
+
 /// Escape in a field being edited puts the stored value back and keeps Settings; the next Escape
 /// closes it, sending nothing (#254).
 #[test]

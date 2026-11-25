@@ -149,6 +149,21 @@ pub fn move_progress(status: &Status) -> Option<String> {
     }
 }
 
+/// The button of a setting's failure that opens Settings at it.
+pub fn open_settings() -> &'static str {
+    "Open settings"
+}
+
+/// The button of a failure's notice that does again what failed.
+pub fn try_again() -> &'static str {
+    "Try again"
+}
+
+/// The button of a failed Open that checks the torrent's files on disk.
+pub fn check_files() -> &'static str {
+    "Check"
+}
+
 /// The row menu's item that moves a torrent's files: "Move to…".
 pub fn move_to() -> &'static str {
     "Move to…"

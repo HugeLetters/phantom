@@ -17,6 +17,7 @@
 use std::rc::Rc;
 
 use client::display;
+use rune::Tx;
 
 use crate::model::Phantom;
 
@@ -190,7 +191,14 @@ impl Notice {
 #[derive(Clone)]
 pub struct NoticeAction {
     pub title: String,
-    pub run: Rc<dyn Fn(&mut Phantom)>,
+    pub run: Rc<dyn Fn(&mut Phantom, &mut Tx)>,
+    /// Pressing it takes its notice out of the list (Try again: pressed twice runs once; what it
+    /// runs may tell a notice of its own).
+    pub once: bool,
+    /// Its notice goes when what it asks for is sent, not when it's pressed (Move to…, Rename…):
+    /// cancelled before, it stays with its buttons. Pressing it sets [`Phantom::leaving`] to its
+    /// notice for the command to carry.
+    pub leaves_when_sent: bool,
     /// Its shortcut, from the table, shown inside it, muted, while it's that key's.
     pub hint: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
     /// Why it's off now, if it is: then it's drawn disabled, and a press on it says why, as a
@@ -206,7 +214,38 @@ pub struct NoticeAction {
 
 impl NoticeAction {
     pub fn new(title: impl Into<String>, run: impl Fn(&mut Phantom) + 'static) -> Self {
-        Self { title: title.into(), run: Rc::new(run), hint: None, off: None, undo: false, shown: None, copy: None }
+        Self::with_tx(title, move |s: &mut Phantom, _: &mut Tx| run(s))
+    }
+
+    /// A button whose command needs the window's [`Tx`] (a folder picker).
+    pub fn with_tx(title: impl Into<String>, run: impl Fn(&mut Phantom, &mut Tx) + 'static) -> Self {
+        Self {
+            title: title.into(),
+            run: Rc::new(run),
+            once: false,
+            leaves_when_sent: false,
+            hint: None,
+            off: None,
+            undo: false,
+            shown: None,
+            copy: None,
+        }
+    }
+
+    /// Pressing it takes its notice away.
+    pub fn once(self) -> Self {
+        Self { once: true, ..self }
+    }
+
+    /// Its notice goes once what it asks for is sent.
+    pub fn leaves_when_sent(self) -> Self {
+        Self { leaves_when_sent: true, ..self }
+    }
+
+    /// Offered only while `shown` holds. Drawing asks it each frame: it never looks at the disk
+    /// itself ([`Finder::seen`](crate::platform::Finder::seen)).
+    pub fn shown_while(self, shown: impl Fn(&Phantom) -> bool + 'static) -> Self {
+        Self { shown: Some(Rc::new(shown)), ..self }
     }
 
     /// Reveal in Finder for `path`, offered while it's on disk.
@@ -238,7 +277,7 @@ impl NoticeAction {
     fn on_disk(title: &str, path: &std::path::Path) -> Self {
         let (run, there) = (path.to_path_buf(), path.to_path_buf());
         let mut action = Self::new(title, move |s: &mut Phantom| crate::platform::show(s, &run, crate::platform::Show::Reveal));
-        action.shown = Some(Rc::new(move |s: &Phantom| s.finder.exists(&there)));
+        action.shown = Some(Rc::new(move |s: &Phantom| s.finder.seen(&there)));
         action
     }
 }

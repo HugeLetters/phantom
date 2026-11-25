@@ -17,9 +17,12 @@ const PANEL_PADDING: f32 = 10.0;
 const RING_ROOM: f32 = 4.0;
 const FADE: f32 = 16.0;
 const HEAD_ROOM: f32 = 40.0;
-/// The popover's width: as wide as its notice needs, within these.
-const MIN_WIDTH: f32 = 320.0;
+/// The popover's width: as wide as the widest notice in the list needs, within these (the
+/// minimum fits the pager and Dismiss all).
+const MIN_WIDTH: f32 = 240.0;
 const MAX_WIDTH: f32 = 480.0;
+/// Where the focus rests in the popover while on none of its controls.
+pub const NOTICES_REST: &str = "notices-rest";
 /// The tail under the popover, pointing at the bar's line: how far in from its left edge, and how
 /// far it reaches below it.
 const TAIL_IN: f32 = 18.0;
@@ -104,26 +107,33 @@ impl Ui {
             .help_when_truncated(path.to_owned())
     }
 
-    /// How wide the popover is for a notice: as its widest line needs, unwrapped, the mark, ×,
-    /// and its `buttons` (each label with its hint) beside it; within 320–480 points.
-    pub fn notice_width(&self, line: &str, listing: Option<&Listing>, buttons: &[(String, Option<String>)]) -> f32 {
+    /// How wide the popover is for a list of notices: as the widest of them needs, within
+    /// 240–480 points; the same on every page.
+    pub fn popover_width(&self, needs: impl IntoIterator<Item = f32>) -> f32 {
+        // At the widest nothing more is measured.
+        let widest =
+            needs.into_iter().try_fold(MIN_WIDTH, |widest, need| if need < MAX_WIDTH { Ok(need.max(widest)) } else { Err(MAX_WIDTH) });
+        widest.unwrap_or_else(|widest| widest)
+    }
+
+    /// How wide one notice asks the popover to be: its widest line, unwrapped (a path at its real
+    /// width), the mark, ×, and its `buttons` (each label with its hint) beside it, and the
+    /// padding and border.
+    pub fn notice_need(&self, line: &str, listing: Option<&Listing>, buttons: &[(String, Option<String>)]) -> f32 {
         use rune::text::advance;
         let k = &self.k;
         // Mark and its gap; × and its gap; the panel's padding and border.
         let (mark, cross, frame) = (16.0 + 8.0, 8.0 + 24.0, 2.0 * PANEL_PADDING + 2.0);
         let title = mark + advance(line, k.ty.text_small_medium) + cross;
-        // A path is cut to fit, so it asks for no more than the popover's width.
-        let texts = listing.into_iter().flat_map(Listing::lines).map(|l| match l {
-            Line::Path(_) => MAX_WIDTH,
-            other => mark + advance(other.text(), k.ty.text_small),
-        });
+        // A path counts for its real width; the popover cuts it in the middle at its widest.
+        let texts = listing.into_iter().flat_map(Listing::lines).map(|l| mark + advance(l.text(), k.ty.text_small));
         let row: f32 = buttons
             .iter()
             .map(|(label, hint)| {
                 20.0 + advance(label, k.ty.small_medium) + hint.as_ref().map_or(0.0, |h| 6.0 + advance(h, k.ty.text_xsmall)) + 8.0
             })
             .sum();
-        texts.chain([title, row]).fold(0.0, f32::max).add(frame).clamp(MIN_WIDTH, MAX_WIDTH)
+        texts.chain([title, row]).fold(0.0, f32::max).add(frame)
     }
 
     /// A hairline across, `key`ed: under a popover's top row.
@@ -146,7 +156,7 @@ impl Ui {
 
     /// `trigger` (the bar's notice), with `content` above it while `open`: a raised panel attached
     /// to it by a tail, the theme's radius and a soft shadow, `width` wide (as
-    /// [`notice_width`](Self::notice_width) gives it), at most `room` tall, `content` scrolling past it under a `head` that stays
+    /// [`popover_width`](Self::popover_width) gives it), at most `room` tall, `content` scrolling past it under a `head` that stays
     /// (`None`: no head, and no room kept for one). The panel goes into `layer`. It's modal: focus
     /// goes into it as it opens and stays there for Tab, and back to `trigger` once it closes.
     /// Escape and pressing outside it call `on_close`.
@@ -185,6 +195,16 @@ impl Ui {
             .child(content);
         let fill = self.raised_fill();
         let border = super::opaque_over(k.alpha(k.c.std_border, if k.dark { 0.6 } else { 0.4 }), k.c.page);
+        // Takes the focus of a button that left with its notice: in the panel, so its keys still work,
+        // and pressing nothing.
+        let rest = el()
+            .key(NOTICES_REST)
+            .absolute(0.0, 0.0)
+            .size(1.0, 1.0)
+            .focusable(true)
+            .tab_index(-1)
+            .focus_ring(0.0, 0.0, rune::Color::TRANSPARENT)
+            .a11y_hidden();
         let panel = col()
             .key(format!("{key}-panel"))
             .role("dialog")
@@ -195,6 +215,7 @@ impl Ui {
             .children(head.map(|head| head.px(RING_ROOM)))
             .child(body)
             .child(self.tail(fill, border))
+            .child(rest)
             // Keys while the focus is anywhere in it, on its head, its body or itself.
             .on_key(on_key);
         let panel = panel.modal(true, on_close.clone());

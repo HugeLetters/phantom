@@ -53,7 +53,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     // What Settings asked first: a change made there is older than anything the service sends now.
     let posted = Inbox::run(s, |s| &s.inbox, tx);
     let incoming = s.service.poll(now);
-    let changed = posted || !incoming.is_empty();
+    let changed = posted || s.finder.news() || !incoming.is_empty();
     for incoming in incoming {
         match incoming {
             Incoming::Live(live) => s.apply(live),
@@ -982,10 +982,111 @@ fn spec() -> AppSpec<Phantom> {
             }),
             ("mixed", |s| {
                 s.service = Box::new(demo_service());
-                let failed = vec![model::AddFailure { what: "bad-1.torrent".into(), why: "Not a torrent file.".into() }];
+                let failed = vec![model::AddFailure { what: "bad-1.torrent".into(), why: "Not a torrent file.".into(), request: None }];
                 s.bar.tell(model::FailedAdds { total: 3, failed }.notice());
                 s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
                 s.bar.tell(Notice::new(display::copied_magnet()).brief().with_names("Big Buck Bunny (2008)"));
+            }),
+            // The buttons of a failure's notice (#367): Try again after a failed add.
+            ("notice-add-failed", |s| {
+                s.service = Box::new(demo_service());
+                let request = AddRequest::link(NOBODY).expect("a magnet link");
+                let failed = vec![model::AddFailure {
+                    what: "Nobody".into(),
+                    why: "No peers have this torrent".into(),
+                    request: Some(model::Asked { request, to: None, by_field: false }),
+                }];
+                s.bar.tell(model::FailedAdds { total: 1, failed }.notice());
+            }),
+            ("notice-delete-failed", |s| {
+                listed(s, demo_service());
+                let list = notice::Listing::of_entries([("Big Buck Bunny (2008)", &"Some of its files are locked".into())]);
+                s.bar.tell(
+                    Notice::error(display::commands_failed(proto::Action::Delete, 1, 1))
+                        .with_listing(list)
+                        .with_actions(vec![model::retry::command(s, &[1], proto::Action::Delete)]),
+                );
+            }),
+            ("notice-resume-failed", |s| {
+                listed(s, demo_service());
+                let list = notice::Listing::of_entries([("Sintel (2010)", &"The disk is full".into())]);
+                s.bar.tell(
+                    Notice::error(display::commands_failed(proto::Action::Resume, 1, 2))
+                        .with_listing(list)
+                        .with_actions(vec![model::retry::command(s, &[2], proto::Action::Resume)]),
+                );
+            }),
+            ("notice-move-partial", |s| {
+                listed(s, demo_service());
+                let to = proto::AbsolutePath::new("/Users/me/Films").expect("absolute");
+                let list = notice::Listing::of_entries([("Sintel (2010)", &"Cancelled".into())]);
+                let actions = model::retry::moving(s, &[1], to);
+                s.bar.tell(Notice::warning(display::moved_of(1, 2)).with_listing(list).with_actions(actions));
+            }),
+            ("notice-rename-clash", |s| {
+                listed(s, demo_service());
+                let path = proto::AbsolutePath::new("/Users/me/Downloads/Big Buck Bunny (2008) (1)").expect("absolute");
+                let why = display::refused_why(&proto::TorrentRefusal::NameTaken { path: path.clone() });
+                let list = notice::Listing::of_entries([("Big Buck Bunny (2008)", &why)]);
+                let way = notice::NoticeAction::reveal(std::path::Path::new(&path.display().to_string()));
+                s.bar.tell(
+                    Notice::error(display::commands_failed(proto::Action::Rename, 1, 1))
+                        .with_listing(list)
+                        .with_actions(vec![model::retry::rename(s, 1), way]),
+                );
+            }),
+            ("notice-restart-failed", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(
+                    Notice::error(display::cant_restart())
+                        .with_text(display::sentence("no such file or directory"))
+                        .with_actions(vec![model::retry::restart()]),
+                );
+            }),
+            ("notice-setting-failed", |s| {
+                s.service = Box::new(demo_service());
+                let list = display::Listing::new("Listen port", &display::sentence("the torrents didn't start again"));
+                s.bar.tell(
+                    Notice::error(display::setting_not_changed())
+                        .with_listing(list)
+                        .with_actions(vec![model::retry::open_settings("listen_port")]),
+                );
+            }),
+            // A failed Open of a file of torrent 1: Show folder, then Check.
+            ("notice-open-check", |s| {
+                struct NotThere;
+                impl platform::Finder for NotThere {
+                    fn show(&mut self, _: &std::path::Path, _: platform::Show) -> Result<(), platform::ShowError> {
+                        Err(platform::ShowError::NotOnDisk)
+                    }
+                    fn exists(&self, _: &std::path::Path) -> bool {
+                        true
+                    }
+                }
+                listed(s, demo_service());
+                s.finder = Box::new(NotThere);
+                platform::show_of(s, std::path::Path::new("/Users/me/Downloads/Big Buck Bunny.mkv"), platform::Show::Open, Some(1));
+            }),
+            // The popover's width follows the widest notice: a narrow one alone, a path, and a list
+            // of both on two pages.
+            ("notice-width-narrow", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(Notice::new(display::copied_magnet()).brief());
+            }),
+            ("notice-width-path", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(Notice::error("Can't open the file").with_listing(display::show_failed_listing(
+                    std::path::Path::new("/Users/me/Downloads/Pack/a.mkv"),
+                    "It isn't on disk",
+                )));
+            }),
+            ("notice-width-mixed", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(Notice::error("Can't open the file").with_listing(display::show_failed_listing(
+                    std::path::Path::new("/Users/me/Downloads/Pack/a.mkv"),
+                    "It isn't on disk",
+                )));
+                s.bar.tell(Notice::new(display::copied_magnet()).brief());
             }),
             // The list, for scripts that open Settings; a folder on a drive that isn't connected
             // can't be the default.
@@ -1214,6 +1315,7 @@ fn main() {
         if rune::tooling::headless_run().is_some() {
             MAIN.set(Some(handle.clone()));
         }
+        let wake_for_disk = handle.clone();
         let wake = move || handle.wake();
         let service: Box<dyn Service> = if rune::tooling::headless_run().is_none() {
             Box::new(SocketService::start(wake))
@@ -1226,7 +1328,7 @@ fn main() {
         let mut app = Phantom { window, looks, settings: to_settings, inbox: main_inbox, prefs, ..Phantom::new(service) };
         // Headless runs keep the fake finder (nothing opens) and keep no recent folders.
         if rune::tooling::headless_run().is_none() {
-            app.finder = Box::new(platform::SystemFinder);
+            app.finder = Box::new(platform::SystemFinder::new(move || wake_for_disk.wake()));
             app.relauncher = Box::new(platform::SystemRelauncher);
             app.recent = recent_folders();
         }

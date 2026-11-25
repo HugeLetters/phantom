@@ -106,14 +106,29 @@ destination's disk is full", not "Not moved: …"), with the path under it ("Som
 at"). A notice tells what happened, never why Phantom works so: a Remove says no word of its files
 (a Delete says "Its files are in the Trash"). A notice whose path is on disk has **Reveal in
 Finder** (the torrent list kept aside, a part not saved, files a refused Delete's undo left in
-place); a failed Open of a file that isn't there has **Show folder** while its folder is. The bar shows the newest notice's line in its own colour (a receipt
+place); a failed Open of a file that isn't there has **Show folder** while its folder is. A
+warning or error offers what the person would do next, when Phantom can do it: at most three buttons,
+the likeliest first, named by what happens, in sentence case. **Try again** (a failed add, Move,
+Delete, Pause or Resume) runs the same command as before, on the failed torrents only, so every
+safety rule, refusal and clash dialog applies again; an add goes again into the folder
+chosen for it; pressing it takes its notice away, so it runs once, and the focus rests in the list, on no
+other notice's button. A failed Move also has **Move to…** (the torrents left), and a failed Rename **Rename…**: these two
+keep their notice, with its buttons, until the Move or Rename is sent (cancelling the folder picker, the
+clash dialog or the name field, or leaving the name as it was, sends nothing), then it goes; a Move of
+several sent in part takes it away too; one picker opens at a time; a failed Open of a file that isn't on
+disk has **Check** after Show folder. A button that no longer applies is not shown: its torrent is
+gone (a torrent removed and added again is another, as is one whose id a new torrent list gave out
+again), its command already went through, or the
+service says it can't run now. A receipt has none. The bar shows the newest notice's line in its own colour (a receipt
 is never amber), the Undo of the newest action's notice (the small button the connection's are), then
 the **pill**, an oval with the count of every notice tinted by the worst severity among them (a
 count, not a place: no "1/7"; it shows from two notices), then ›. A click
 on the bar always opens the list, at the newest, even for a lone notice; only × (or Dismiss all)
 dismisses. The list shows one notice at a time: with several, a top row (‹ 2 of 3 › and Dismiss
 all) over a hairline, with none for a lone notice; then the notice, its mark (✓ done, ⓘ nothing was done ("Already in the list"), ⚠, ⛔), its line
-and × on its own line, the names, why, and its buttons, the first the default. Its Undo is in the
+and × on its own line, the names, why, and its buttons, the first the default. The popover is as wide as the widest notice in the list needs, the same
+on every page (it changes when a notice arrives or leaves): a path counts for its real width and is
+cut in the middle at 480 pt; never under about 240 pt, which fits the pager and Dismiss all. Its Undo is in the
 bar too, and "Undo ⌘Z" in the list.
 The connection's words beside it are short and fixed too ("Connecting…", "Service unavailable",
 "Phantom was updated"), with no ›, red while the dot is, as an error notice's line is; while the
