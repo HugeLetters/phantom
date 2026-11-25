@@ -425,15 +425,21 @@ impl Actor {
     /// other that left: with its record, now whole again.
     async fn take_out_for_undo(&mut self, seq: u64, entry: &Entry) -> Result<(), Failure> {
         let Back::InList { stash } = &entry.back else { return Ok(()) };
-        let saved = self.torrents.get(&entry.id).map(Torrent::kept).context("a torrent in the list has a record")?;
         let pieces = self.pieces(entry.id);
-        // Written ahead: what brings it back is kept before its record goes. A crash after this
-        // finds it still in the list, partly deleted, and takes it out then (`resume_undo`).
+        self.save_taking_out(seq, entry, stash)?;
+        self.take_off_list(entry.id).await?;
+        self.wait_for_stash(stash, pieces).await;
+        Ok(())
+    }
+
+    /// Written ahead: what brings a partial Delete's torrent back is kept before its record goes. A
+    /// crash after this finds it still in the list, partly deleted, and takes it out then
+    /// (`resume_undo`).
+    fn save_taking_out(&mut self, seq: u64, entry: &Entry, stash: &Stash) -> Result<(), Failure> {
+        let saved = self.torrents.get(&entry.id).map(Torrent::kept).context("a torrent in the list has a record")?;
         let back = Back::Gone { saved: whole(saved), source: Source::Stash(stash.clone()) };
         self.steps.rewrite(seq, entry.id, Entry { back, ..entry.clone() });
         self.save_undo();
-        self.take_off_list(entry.id).await?;
-        self.wait_for_stash(stash, pieces).await;
         Ok(())
     }
 
@@ -814,6 +820,17 @@ impl Actor {
         self.steps.undo(tokio::sync::oneshot::channel().0);
         while self.steps.next().is_some() {}
         self.save_undo();
+    }
+
+    /// [`Actor::save_undoing_unchecked`], of a partial Delete of torrent `id`, then saved as taking it
+    /// out of the list, where it still is: where a test kills it.
+    #[cfg(test)]
+    pub(in super::super) fn save_undoing_taking_out(&mut self, id: TorrentId) {
+        self.save_undoing_unchecked();
+        let seqs: Vec<u64> = self.steps.machine().steps.keys().copied().collect();
+        let (seq, entry) = seqs.into_iter().find_map(|seq| Some((seq, self.undoing(seq, id)?.1))).expect("its undo runs");
+        let Back::InList { stash } = &entry.back else { panic!("a partial Delete's") };
+        self.save_taking_out(seq, &entry, stash).expect("it's in the list");
     }
 
     /// Keeps the stack, lets go of the stashes nothing names any more, and has the files in the
