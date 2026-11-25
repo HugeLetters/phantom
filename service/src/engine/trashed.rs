@@ -796,6 +796,17 @@ fn moved(slot: &Slot, file: &std::fs::File) -> bool {
     }
 }
 
+/// Makes `file` `len` bytes long if it's shorter: the one place a torrent's file gets its length, and
+/// it's never cut (#374). A longer one isn't the torrent's, and the size check finds it missing. Its
+/// length is asked of the open file; there's no call that only lengthens one, so a program making
+/// it longer than `len` between that and the next line has what it just added cut off.
+pub(super) fn grow(file: &std::fs::File, len: u64) -> std::io::Result<()> {
+    if file.metadata()?.len() < len {
+        file.set_len(len)?;
+    }
+    Ok(())
+}
+
 fn write_at(file: &std::fs::File, mut offset: u64, bufs: &[&[u8]]) -> std::io::Result<()> {
     use std::os::unix::fs::FileExt;
     for buf in bufs {
@@ -923,7 +934,7 @@ pub(super) fn phantoms(name: &std::ffi::OsStr) -> bool {
 pub(super) fn make_again(destination: &Path, path: &Path, len: u64) -> Result<()> {
     make_folders(destination, path.parent().context("a file without a folder")?)?;
     let file = std::fs::File::options().write(true).create_new(true).open(path).with_context(|| format!("making {path:?}"))?;
-    file.set_len(len).with_context(|| format!("setting the length of {path:?}"))?;
+    grow(&file, len).with_context(|| format!("setting the length of {path:?}"))?;
     Ok(())
 }
 
@@ -1065,7 +1076,7 @@ impl TorrentStorage for Files {
                 (Place::InPlace(f), _) => {
                     #[cfg(test)]
                     self.at(At::Length);
-                    return Ok(f.set_len(len)?);
+                    return Ok(grow(f, len)?);
                 }
                 (Place::Trashed(_), _) | (Place::Elsewhere, Opened::File(_)) => return Ok(()),
                 (Place::Elsewhere, Opened::NotThere | Opened::Taken) => {}
@@ -1073,7 +1084,7 @@ impl TorrentStorage for Files {
         }
         self.made(slot, file)?;
         match &*slot.file.read().unwrap() {
-            Opened::File(f) => Ok(f.set_len(len)?),
+            Opened::File(f) => Ok(grow(f, len)?),
             _ => bail!("file {file} was handed on"),
         }
     }
@@ -1162,7 +1173,7 @@ mod tests {
         let away = item.to.clone().unwrap();
         let went = std::fs::metadata(&away).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        files.ensure_file_length(0, 50).unwrap();
+        files.ensure_file_length(0, 150).unwrap();
         assert!(!path.exists(), "its length isn't set at its path either");
         let mut buf = [0; 10];
         files.pread_exact(0, 0, &mut buf).unwrap();
@@ -1180,8 +1191,8 @@ mod tests {
         std::fs::rename(&away, &path).unwrap();
         assert_eq!(trashed.put_back("t", &[(0, path.clone())]).written, BTreeSet::from([0]), "something went into it");
         assert_eq!(std::fs::read(&path).unwrap()[..20], buf[..20]);
-        files.ensure_file_length(0, 50).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 50);
+        files.ensure_file_length(0, 150).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 150);
     }
 
     /// #302: a part kept on disk makes its torrent's folder and then the file's, and a sweep of the

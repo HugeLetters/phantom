@@ -314,6 +314,12 @@ pub(super) struct Torrent {
     /// How many times the actor added it to librqbit, for tests.
     #[cfg(test)]
     pub(super) added: u32,
+    /// How many times it was started in librqbit, for tests.
+    #[cfg(test)]
+    pub(super) started: u32,
+    /// How many times librqbit was told which files to get while it ran it, for tests.
+    #[cfg(test)]
+    pub(super) chosen_running: u32,
 }
 
 impl Actor {
@@ -401,6 +407,10 @@ impl Actor {
                 record,
                 #[cfg(test)]
                 added: 0,
+                #[cfg(test)]
+                started: 0,
+                #[cfg(test)]
+                chosen_running: 0,
             };
             torrent.keep_known();
             torrents.insert(id, torrent);
@@ -933,6 +943,7 @@ impl Actor {
     /// Decides `event` for torrent `id`, then makes librqbit match; once its phase changes, its files
     /// are size-checked, and that's decided too. A refused command fails with the reason.
     pub(super) async fn event(&mut self, id: TorrentId, mut event: Event) -> Result<(), Failure> {
+        let session = self.session_folder();
         loop {
             let torrent = self.torrents.get_mut(&id).ok_or(Failure::torrent(id, Refusal::NotInList))?;
             let before = torrent.lifecycle.phase.clone();
@@ -972,6 +983,12 @@ impl Actor {
             // What Undo needs of a Delete is kept until it's over: a Delete that moved nothing
             // leaves nothing to undo.
             let undoable = matches!(torrent.lifecycle.phase, Phase::Deleting { .. } | Phase::DeleteFailed { .. } | Phase::Deleted);
+            // Back with a file of a size it can't have: whatever makes it run again, the rest is checked
+            // in full, as any that was away (one away at a start still has its pieces saved). Before
+            // it's saved as missing: a crash between leaves one checked in full, not pieces trusted.
+            if matches!((&before, &torrent.lifecycle.phase), (Phase::DestinationUnavailable { .. }, Phase::MissingFiles { .. })) {
+                bitv::forget(&bitv::path(&session, &torrent.record.info_hash));
+            }
             let (wants, round) = (torrent.lifecycle.wants, torrent.meter.round);
             // Before librqbit is made to match, which can drop the pieces it saved. Saved at every
             // change, not only when it learnt something: a save that failed then is made up for, as
@@ -1031,16 +1048,29 @@ impl Actor {
                 // Not while it has pieces to let go of (#234): librqbit would offer some it can't read,
                 // and drop each peer that asks. It starts once it's added back without them.
                 (lib::Do::Start, Some(_)) if matches!(torrent.record.letting_go, machine::letgo::State::Gone { .. }) => return Ok(()),
+                // Nor with a file there of a size it can't have (#374), nor is such a file handed to it
+                // as it runs: it would be downloaded into until the next size check, which judges the
+                // files the same way and makes it Missing files, or, put right by then, carries this out.
+                (lib::Do::Start, Some(_)) if self.any_impossible(id) => return Ok(()),
+                (lib::Do::Priorities, Some(handle)) if handle.live().is_some() && self.any_impossible(id) => return Ok(()),
                 (lib::Do::Start, Some(handle)) => {
                     self.session.unpause(&handle).await?;
                     // librqbit's upload counter starts again with the torrent.
                     if let Some(torrent) = self.torrents.get_mut(&id) {
                         torrent.meter.librqbit_started();
+                        #[cfg(test)]
+                        {
+                            torrent.started += 1;
+                        }
                     }
                 }
                 (lib::Do::Stop, Some(handle)) => self.session.pause(&handle).await?,
                 (lib::Do::Priorities, Some(handle)) => {
                     let normal = self.torrents[&id].record.normal().into_iter().collect();
+                    #[cfg(test)]
+                    if handle.live().is_some() {
+                        self.torrents.get_mut(&id).expect("just found").chosen_running += 1;
+                    }
                     self.session.update_only_files(&handle, &normal).await?;
                 }
                 (lib::Do::Start | lib::Do::Stop | lib::Do::Priorities, None) => unreachable!("only on a torrent librqbit has"),
@@ -1282,6 +1312,11 @@ impl Actor {
         })
     }
 
+    /// Whether a size check now finds a file [of a size it can't have](files::Disk::any_impossible).
+    fn any_impossible(&self, id: TorrentId) -> bool {
+        matches!(self.size_checked(id), Some(Observation::Files(disk)) if disk.any_impossible())
+    }
+
     /// A command that isn't a step, on its torrent's lane.
     async fn command(&mut self, id: TorrentId, command: TorrentCommand) -> Result<(), Failure> {
         // Decided on what librqbit is doing now and on its files as they are now, not at the last
@@ -1428,6 +1463,10 @@ impl Actor {
             record,
             #[cfg(test)]
             added: 0,
+            #[cfg(test)]
+            started: 0,
+            #[cfg(test)]
+            chosen_running: 0,
         };
         self.torrents.insert(id, torrent);
     }
@@ -1998,10 +2037,16 @@ pub(super) fn progress(torrent: &Torrent) -> Vec<u64> {
     }
 }
 
-/// The files the torrent is getting (those Normal), as they must be on disk.
+/// The files the torrent is getting (those Normal), as they must be on disk: of one that was away,
+/// by its record, which says what was had as it went, or before a start with it away, and nothing
+/// while a check was to say.
 fn expected(torrent: &Torrent) -> Vec<Expected> {
     let paths = torrent.record.paths();
-    files(&torrent.record, &progress(torrent), &BTreeSet::new())
+    let had = match torrent.lifecycle.phase {
+        Phase::DestinationUnavailable { .. } => torrent.record.had.clone(),
+        _ => progress(torrent),
+    };
+    files(&torrent.record, &had, &BTreeSet::new())
         .into_iter()
         .filter(|f| f.priority == Priority::Normal)
         .map(|f| Expected { index: f.index, path: paths[f.index].clone(), size_bytes: f.size_bytes, progress_bytes: f.progress_bytes })

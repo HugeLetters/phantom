@@ -732,8 +732,13 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::LimitReached(_),
             ),
         ) => stays(),
-        // Its files can be size-checked again: the destination is back.
-        (P::DestinationUnavailable { .. }, Observed(O::Files(_))) => phase(check_due()),
+        // Its files can be size-checked again: the destination is back. Checked, librqbit would write
+        // into a file of a size it can't have: that's Missing files (#374). One not there is made
+        // again by the check.
+        (P::DestinationUnavailable { .. }, Observed(O::Files(disk))) => {
+            let gone = found_missing(disk).filter(|_| disk.any_impossible());
+            phase(gone.map_or_else(check_due, |gone| P::MissingFiles { gone }))
+        }
         (P::DestinationUnavailable { .. }, Observed(O::DestinationGone { reason })) => {
             phase(P::DestinationUnavailable { reason: reason.clone() })
         }
@@ -1231,13 +1236,21 @@ mod tests {
             },
             Row {
                 says: "a size check: files gone make it Missing files, set Off or not judged yet are dropped or judged, all back is checked; \
-                       a check catches them itself, and Unchecked stays so; the destination back is checked",
+                       a check catches them itself, and Unchecked stays so; the destination back is checked, unless a file \
+                       there is of a size it can't have: Missing files",
                 when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_))),
                 then: |s, e, r| {
                     let Some(Observation::Files(disk)) = observed(e) else { unreachable!() };
                     match &s.phase {
                         Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Unchecked { .. } => stays(s, r),
-                        Phase::DestinationUnavailable { .. } => becomes(s, r, check_due()),
+                        Phase::DestinationUnavailable { .. } => {
+                            let wrong =
+                                |f: &disk::Found| f.at.is_some_and(|at| at.len > f.file.size_bytes || at.len < f.file.progress_bytes);
+                            match disk.files.values().any(wrong) {
+                                true => becomes(s, r, after_size_check(&BTreeMap::new(), disk)),
+                                false => becomes(s, r, check_due()),
+                            }
+                        }
                         Phase::MissingFiles { gone } => becomes(s, r, after_size_check(gone, disk)),
                         // A file found missing now is what's there now: it isn't back.
                         _ => match after_size_check(&BTreeMap::new(), disk) {
