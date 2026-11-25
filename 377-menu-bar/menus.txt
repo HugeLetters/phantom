@@ -1,0 +1,800 @@
+==== Nothing selected ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z  (greyed)
+    —
+    Copy  ⌘C  (greyed)
+    Paste and Add  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Pause  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸
+        ✓ Name
+        ✓ Progress
+        ✓ Status
+        ✓ Size
+        ✓ Down
+        ✓ Up
+        ✓ Peers
+        ✓ ETA
+    Sort By ▸
+        Name
+        Progress
+        Status
+        Size
+        Down
+        Up
+        Peers
+        ETA
+    Commands…  ⌘P
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== One running torrent selected ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z  (greyed)
+    —
+    Copy Magnet Link  ⌘C
+    Paste and Add  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O
+    Reveal in Finder  ⇧⌘O
+    —
+    Pause  Space
+    Check
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…
+    Rename…
+    —
+    Remove  ⌫
+    Delete  ⌘⌫
+
+View
+    Columns ▸
+        ✓ Name
+        ✓ Progress
+        ✓ Status
+        ✓ Size
+        ✓ Down
+        ✓ Up
+        ✓ Peers
+        ✓ ETA
+    Sort By ▸
+        Name
+        Progress
+        Status
+        Size
+        Down
+        Up
+        Peers
+        ETA
+    Commands…  ⌘P
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== The link field focused, the torrent still selected ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z
+    Redo  ⇧⌘Z
+    —
+    Cut  ⌘X
+    Copy  ⌘C
+    Paste  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O
+    Reveal in Finder  ⇧⌘O
+    —
+    Pause  Space
+    Check
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…
+    Rename…
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸
+        ✓ Name
+        ✓ Progress
+        ✓ Status
+        ✓ Size
+        ✓ Down
+        ✓ Up
+        ✓ Peers
+        ✓ ETA
+    Sort By ▸
+        Name
+        Progress
+        Status
+        Size
+        Down
+        Up
+        Peers
+        ETA
+    Commands…  ⌘P
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== One paused torrent selected ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z  (greyed)
+    —
+    Copy Magnet Link  ⌘C
+    Paste and Add  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O
+    Reveal in Finder  ⇧⌘O
+    —
+    Resume  Space
+    Check
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…
+    Rename…
+    —
+    Remove  ⌫
+    Delete  ⌘⌫
+
+View
+    Columns ▸
+        ✓ Name
+        ✓ Progress
+        ✓ Status
+        ✓ Size
+        ✓ Down
+        ✓ Up
+        ✓ Peers
+        ✓ ETA
+    Sort By ▸
+        Name
+        Progress
+        Status
+        Size
+        Down
+        Up
+        Peers
+        ETA
+    Commands…  ⌘P
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== Every torrent selected ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z  (greyed)
+    —
+    Copy Magnet Link  ⌘C
+    Paste and Add  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Resume  Space
+    Check
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…
+    Rename…  (greyed)
+    —
+    Remove  ⌫
+    Delete  ⌘⌫
+
+View
+    Columns ▸
+        ✓ Name
+        ✓ Progress
+        ✓ Status
+        ✓ Size
+        ✓ Down
+        ✓ Up
+        ✓ Peers
+        ✓ ETA
+    Sort By ▸
+        Name
+        Progress
+        Status
+        Size
+        Down
+        Up
+        Peers
+        ETA
+    Commands…  ⌘P
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== Settings in front, no field focused ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z  (greyed)
+    —
+    Copy  ⌘C  (greyed)
+    Paste  ⌘V  (greyed)
+    Select All  ⌘A  (greyed)
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Resume  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸  (greyed)
+        ✓ Name  (greyed)
+        ✓ Progress  (greyed)
+        ✓ Status  (greyed)
+        ✓ Size  (greyed)
+        ✓ Down  (greyed)
+        ✓ Up  (greyed)
+        ✓ Peers  (greyed)
+        ✓ ETA  (greyed)
+    Sort By ▸  (greyed)
+        Name  (greyed)
+        Progress  (greyed)
+        Status  (greyed)
+        Size  (greyed)
+        Down  (greyed)
+        Up  (greyed)
+        Peers  (greyed)
+        ETA  (greyed)
+    Commands…  ⌘P  (greyed)
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== Settings in front, a field focused ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z
+    Redo  ⇧⌘Z
+    —
+    Cut  ⌘X
+    Copy  ⌘C
+    Paste  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Resume  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸  (greyed)
+        ✓ Name  (greyed)
+        ✓ Progress  (greyed)
+        ✓ Status  (greyed)
+        ✓ Size  (greyed)
+        ✓ Down  (greyed)
+        ✓ Up  (greyed)
+        ✓ Peers  (greyed)
+        ✓ ETA  (greyed)
+    Sort By ▸  (greyed)
+        Name  (greyed)
+        Progress  (greyed)
+        Status  (greyed)
+        Size  (greyed)
+        Down  (greyed)
+        Up  (greyed)
+        Peers  (greyed)
+        ETA  (greyed)
+    Commands…  ⌘P  (greyed)
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== No window open ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W  (greyed)
+
+Edit
+    Undo  ⌘Z  (greyed)
+    —
+    Copy  ⌘C  (greyed)
+    Paste  ⌘V  (greyed)
+    Select All  ⌘A  (greyed)
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Resume  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸  (greyed)
+        ✓ Name  (greyed)
+        ✓ Progress  (greyed)
+        ✓ Status  (greyed)
+        ✓ Size  (greyed)
+        ✓ Down  (greyed)
+        ✓ Up  (greyed)
+        ✓ Peers  (greyed)
+        ✓ ETA  (greyed)
+    Sort By ▸  (greyed)
+        Name  (greyed)
+        Progress  (greyed)
+        Status  (greyed)
+        Size  (greyed)
+        Down  (greyed)
+        Up  (greyed)
+        Peers  (greyed)
+        ETA  (greyed)
+    Commands…  ⌘P  (greyed)
+
+Window
+    Minimize  ⌘M  (greyed)
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== A file picker open ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A  (greyed)
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z
+    Redo  ⇧⌘Z
+    —
+    Cut  ⌘X
+    Copy  ⌘C
+    Paste  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Resume  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸  (greyed)
+        ✓ Name  (greyed)
+        ✓ Progress  (greyed)
+        ✓ Status  (greyed)
+        ✓ Size  (greyed)
+        ✓ Down  (greyed)
+        ✓ Up  (greyed)
+        ✓ Peers  (greyed)
+        ✓ ETA  (greyed)
+    Sort By ▸  (greyed)
+        Name  (greyed)
+        Progress  (greyed)
+        Status  (greyed)
+        Size  (greyed)
+        Down  (greyed)
+        Up  (greyed)
+        Peers  (greyed)
+        ETA  (greyed)
+    Commands…  ⌘P  (greyed)
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== After a Remove ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo Remove of Album  ⌘Z
+    —
+    Copy  ⌘C  (greyed)
+    Paste and Add  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Pause  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸
+        ✓ Name
+        ✓ Progress
+        ✓ Status
+        ✓ Size
+        ✓ Down
+        ✓ Up
+        ✓ Peers
+        ✓ ETA
+    Sort By ▸
+        Name
+        Progress
+        Status
+        Size
+        Down
+        Up
+        Peers
+        ETA
+    Commands…  ⌘P
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== The palette open ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A  (greyed)
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo  ⌘Z
+    Redo  ⇧⌘Z
+    —
+    Cut  ⌘X
+    Copy  ⌘C
+    Paste  ⌘V
+    Select All  ⌘A
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Pause  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸  (greyed)
+        ✓ Name  (greyed)
+        ✓ Progress  (greyed)
+        ✓ Status  (greyed)
+        ✓ Size  (greyed)
+        ✓ Down  (greyed)
+        ✓ Up  (greyed)
+        ✓ Peers  (greyed)
+        ✓ ETA  (greyed)
+    Sort By ▸  (greyed)
+        Name  (greyed)
+        Progress  (greyed)
+        Status  (greyed)
+        Size  (greyed)
+        Down  (greyed)
+        Up  (greyed)
+        Peers  (greyed)
+        ETA  (greyed)
+    Commands…  ⌘P  (greyed)
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
+==== The clash dialog open ====
+
+Phantom
+    About Phantom
+    Settings…  ⌘,
+    —
+    Hide Phantom  ⌘H
+    —
+    Quit Phantom  ⌘Q
+
+File
+    Add File…  ⇧⌘A  (greyed)
+    —
+    Close Window  ⌘W
+
+Edit
+    Undo Remove of Album  ⌘Z  (greyed)
+    —
+    Copy  ⌘C  (greyed)
+    Paste  ⌘V  (greyed)
+    Select All  ⌘A  (greyed)
+
+Torrent
+    Open  ⌘O  (greyed)
+    Reveal in Finder  ⇧⌘O  (greyed)
+    —
+    Pause  Space  (greyed)
+    Check  (greyed)
+    Cancel Check  (greyed)
+    Cancel Move  (greyed)
+    —
+    Move To…  (greyed)
+    Rename…  (greyed)
+    —
+    Remove  ⌫  (greyed)
+    Delete  ⌘⌫  (greyed)
+
+View
+    Columns ▸  (greyed)
+        ✓ Name  (greyed)
+        ✓ Progress  (greyed)
+        ✓ Status  (greyed)
+        ✓ Size  (greyed)
+        ✓ Down  (greyed)
+        ✓ Up  (greyed)
+        ✓ Peers  (greyed)
+        ✓ ETA  (greyed)
+    Sort By ▸  (greyed)
+        Name  (greyed)
+        Progress  (greyed)
+        Status  (greyed)
+        Size  (greyed)
+        Down  (greyed)
+        Up  (greyed)
+        Peers  (greyed)
+        ETA  (greyed)
+    Commands…  ⌘P  (greyed)
+
+Window
+    Minimize  ⌘M
+    Zoom
+    —
+    Phantom
+
+Help
+
