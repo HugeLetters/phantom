@@ -54,7 +54,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use librqbit::api::TorrentIdOrHash;
 use librqbit::storage::StorageFactoryExt;
-use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, Session, TorrentStats, TorrentStatsState};
+use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, TorrentStats, TorrentStatsState};
 use proto::{
     AbsolutePath, Added, Content, Details, File, Kept, KeptWhy, Priority, Status, TorrentCommand, TorrentId, TorrentInfo, Unavailable,
 };
@@ -64,6 +64,7 @@ use tracing::warn;
 
 use super::bitv;
 use super::files::{self, Expected, Guard, Watcher};
+use super::held::Held;
 use super::machine::add;
 use super::machine::lib::{self, Librqbit};
 use super::machine::{self, Broke, Event, Observation, Phase, Refusal, State, Wants, decide, seeding};
@@ -286,7 +287,7 @@ pub(super) enum Ending {
 }
 
 /// A torrent's librqbit side, with librqbit's own torrent and the task of its first add.
-pub(super) type Lib = lib::Lib<Arc<ManagedTorrent>, JoinHandle<()>>;
+pub(super) type Lib = lib::Lib<Held, JoinHandle<()>>;
 
 /// How an undo's put-back went: what's back, or the path that failed and why, with what went back
 /// and couldn't return.
@@ -1097,7 +1098,7 @@ impl Actor {
     /// told to get none, then the same files. No piece is had or lost by it. Both run before the
     /// actor polls again, so no client sees it getting none. Once librqbit queues such a
     /// piece itself, this can go.
-    async fn ask_for_all_not_had(&self, handle: &Arc<ManagedTorrent>) -> Result<()> {
+    async fn ask_for_all_not_had(&self, handle: &Held) -> Result<()> {
         let stats = handle.stats();
         if !matches!(stats.state, TorrentStatsState::Paused) || stats.finished {
             return Ok(());
@@ -1185,7 +1186,7 @@ impl Actor {
     }
 
     /// librqbit's torrent for `record`, added stopped.
-    async fn add_from_record(&self, record: &Record) -> Result<Arc<ManagedTorrent>> {
+    async fn add_from_record(&self, record: &Record) -> Result<Held> {
         let info = record.info.as_ref().context("a torrent without info isn't added")?;
         let folder = record.output_folder().context("a torrent with info has its folder")?;
         // Its folder and priorities known, the files set Off aren't made (#67).
@@ -1202,8 +1203,8 @@ impl Actor {
             ..Default::default()
         };
         match self.session.add_torrent(AddTorrent::from_bytes(info.bytes.to_vec()), Some(opts)).await? {
-            AddTorrentResponse::Added(_, t) => Ok(t),
-            AddTorrentResponse::AlreadyManaged(_, t) if t.info_hash().as_string() == record.info_hash => Ok(t),
+            AddTorrentResponse::Added(_, t) => Ok(Held::new(t, &self.session)),
+            AddTorrentResponse::AlreadyManaged(_, t) if t.info_hash().as_string() == record.info_hash => Ok(Held::new(t, &self.session)),
             AddTorrentResponse::AlreadyManaged(..) | AddTorrentResponse::ListOnly(_) => {
                 Err(anyhow!("librqbit has another torrent under its id"))
             }
@@ -1224,7 +1225,7 @@ impl Actor {
     /// Counts the torrent's seeding round from librqbit's `stats`, and tells its lifecycle when
     /// that reached a seeding limit while it seeds.
     /// librqbit's figures read now, after the poll's event (which may have started it again).
-    async fn meter(&mut self, id: TorrentId, handle: &Arc<ManagedTorrent>) {
+    async fn meter(&mut self, id: TorrentId, handle: &Held) {
         let Some(info) = self.listing_of(id, &BTreeMap::new(), None) else { return };
         let uploaded = handle.stats().uploaded_bytes;
         let torrent = self.torrents.get_mut(&id).expect("listed");
@@ -1571,7 +1572,7 @@ impl Actor {
             Err(e) => warn!(id, error = %e, "can't read the torrent's info"),
         }
         let checking = matches!(handle.stats().state, TorrentStatsState::Initializing { .. });
-        torrent.lib = lib::Lib::In(handle);
+        torrent.lib = lib::Lib::In(Held::new(handle, &self.session));
         self.save();
         let _ = self.event(id, Event::Observed(Observation::InfoArrived { checking })).await;
         self.poll_torrent(id).await;
@@ -1928,9 +1929,10 @@ fn saved_progress(session: &Path, record: &Record) -> Option<Vec<u64>> {
     Some(bitv::file_progress(&saved, &lens, info.piece_length))
 }
 
-impl Librqbit for Arc<ManagedTorrent> {
+impl Librqbit for Held {
     fn doing(&self) -> machine::Lib {
-        match self.stats().state {
+        // librqbit's own: no piece is counted for it.
+        match (**self).stats().state {
             TorrentStatsState::Initializing { .. } => machine::Lib::Checking,
             TorrentStatsState::Live => machine::Lib::Running,
             TorrentStatsState::Paused => machine::Lib::Stopped,
