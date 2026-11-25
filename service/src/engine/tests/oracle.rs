@@ -24,7 +24,7 @@ const NAMES: [&str; 3] = ["a.bin", "b.bin", "c.bin"];
 /// Pieces 1 and 3 are shared by two files.
 const SIZES: [usize; 3] = [24576, 36864, 28672];
 /// How many sequences run at once.
-const WIDTH: usize = 8;
+const WIDTH: usize = 12;
 /// How long what must happen may take, on a loaded machine too.
 const PATIENCE: Duration = Duration::from_secs(60);
 
@@ -84,6 +84,8 @@ enum Route {
     Add,
     /// Another torrent's add.
     AddOther,
+    /// A file changed while one was known missing: the check of it is of every file.
+    PutBack,
     Check,
     /// Not shown as Missing files with that file there, so not a choice of it.
     Resume,
@@ -113,7 +115,7 @@ enum Missing {
 struct Class {
     kind: Kind,
     routes: BTreeSet<Route>,
-    /// The torrent had all of the file it was put over.
+    /// The torrent had everything where it was put.
     whole: bool,
     missing: Missing,
     /// Its file was set Off at some time since.
@@ -137,7 +139,7 @@ enum Which {
     Any,
     /// Put where the torrent's wasn't known missing.
     There,
-    /// As `There`, and the torrent hadn't all of it.
+    /// As `There`, and the torrent hadn't everything.
     Part,
     /// Put where the torrent's was known missing.
     Missing,
@@ -168,6 +170,8 @@ const KNOWN_OPEN: &[Open] = &[
     known(OTHERS, &[Route::Check], Which::Any, "file-trust 1 row 9: Check"),
     known(OTHERS, &[Route::Resume], Which::Any, "file-trust 1 row 9: Resume of files not shown, or a hard link"),
     known(OTHERS, &[Route::Move, Route::Rename], Which::There, "file-trust B: Moving"),
+    known(OTHERS, &[Route::Priority], Which::There, "file-trust 1 rows 17, 18: Off and Normal check the rest"),
+    known(OTHERS, &[Route::PutBack], Which::There, "file-trust 1 row 6: the check of one put back is of every file"),
     known(OTHERS, &[Route::Undo], Which::Any, "file-trust B: undo of a Remove"),
     known(SAME_SIZE, &[Route::DriveBack], Which::There, "#373"),
     known(SAME_SIZE, &[Route::Restart, Route::Crash], Which::There, "file-trust A: replaced, same size, then a start"),
@@ -716,9 +720,6 @@ impl World {
     }
 
     async fn put(&mut self, file: usize, kind: Kind, path: PathBuf) {
-        if self.engine.is_some() {
-            self.know_missing().await;
-        }
         let missing = self.missing.get(&file).copied().unwrap_or(Missing::No);
         let had_all = self.whole(file);
         let complete = (0..3).all(|f| self.whole(f));
@@ -765,7 +766,7 @@ impl World {
         }
         std::fs::rename(&staged, &path).unwrap();
         self.register(file, kind, &path, None, missing);
-        self.theirs.last_mut().unwrap().whole = had_all;
+        self.theirs.last_mut().unwrap().whole = complete;
         if !kind.equal() {
             self.disturb(kind);
         }
@@ -776,6 +777,12 @@ impl World {
     }
 
     async fn by(&mut self, by: By) {
+        if self.engine.is_some() {
+            self.know_missing().await;
+        }
+        if !self.missing.is_empty() {
+            self.route(Route::PutBack);
+        }
         match by {
             By::Put { file, kind } => {
                 let path = self.at(file);
@@ -1190,6 +1197,10 @@ impl World {
         for other in self.engine().listing().await.into_iter().filter(|t| Some(t.id) != self.id) {
             let _ = self.engine().command(other.id, TorrentCommand::Remove).await;
         }
+        // One partly in the Trash: only a Delete (again) or a Remove applies.
+        if matches!(self.status().await, Some(Status::Error { failure: proto::TorrentFailure::NotTrashed { .. } })) {
+            let _ = self.command(TorrentCommand::Remove).await;
+        }
         if self.listed().await.is_none() {
             self.id = None;
             self.paused = false;
@@ -1437,6 +1448,13 @@ open! {
         [Step::Do(Do::Off { file: B }), Step::By(By::TakeAway { file: B }), Step::Restart, Step::Settle, put(Same)];
     open_an_undone_remove_downloads_over_another_file: "file-trust B: undo of Remove", Whole, true,
         [Step::Do(Do::Remove), put(Same), Step::Do(Do::Undo)];
+    open_a_file_set_off_has_an_edited_one_checked_and_downloaded_over: "file-trust 1, rows 17 and 18", Whole, false,
+        [
+            Step::By(By::TakeAway { file: 0 }), Step::Settle, Step::By(By::Put { file: 0, kind: Same }), Step::Do(Do::Check), Step::Settle,
+            Step::During(Do::TrashFile { file: 0 }, By::Put { file: 1, kind: Edit })
+        ];
+    open_a_check_of_one_put_back_takes_another: "file-trust 1, row 6", Whole, true,
+        [Step::By(By::TakeAway { file: 0 }), Step::Settle, Step::By(By::Put { file: 2, kind: Same }), Step::By(By::PutBack { file: 0 })];
     open_an_undone_remove_forgets_what_was_missing: "file-trust B: undo of Remove", Whole, true,
         [Step::By(By::TakeAway { file: B }), Step::Settle, put(Shorter), Step::Settle, Step::Do(Do::Remove), Step::Do(Do::Undo)];
     open_a_drive_back_forgets_what_was_missing: "#373", Whole, true,
