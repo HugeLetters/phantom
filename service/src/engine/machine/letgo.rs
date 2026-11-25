@@ -62,7 +62,8 @@ pub enum World {
     /// The engine runs: `free`, whether the torrent can be taken out of librqbit now (librqbit has
     /// it, its lifecycle Ready, Unchecked or Missing files, and nothing runs on its lane);
     /// `offered`, whether librqbit has any piece of the files let go of (a check, or an add again,
-    /// since may have dropped them all).
+    /// since may have dropped them all), or has to open one of those files, set Normal again, at its
+    /// path.
     Running { free: bool, offered: bool },
     /// The engine starts, before it adds the torrents to librqbit: `saved`, whether librqbit has its
     /// pieces saved.

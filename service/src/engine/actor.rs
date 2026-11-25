@@ -1748,7 +1748,8 @@ impl Actor {
     /// Torrent `id`'s files `indices`, set Normal, that aren't at their paths (#276): each is
     /// downloaded from nothing, not Missing files, which is for a file it gets that vanished.
     /// librqbit's pieces of each are let go of, as they're of a file that's elsewhere (in the Trash
-    /// for an undo, `in_trash`, which it reads there) or gone; and each is made at its path, as an
+    /// for an undo, `in_trash`, which it reads there) or gone. So is one it has open with none had
+    /// (#402), or it would be downloaded into where it went, not at its path; and each is made at its path, as an
     /// add makes a file a torrent gets, so the size check finds it there, and librqbit, added back,
     /// opens it there. Not one just put `back` by an
     /// undo, nor one missing already: that one vanished while it was Normal.
@@ -1769,9 +1770,10 @@ impl Actor {
             return;
         }
         let hash = torrent.record.info_hash.clone();
+        let open = self.guard.trashed().open(&hash);
         let gone: machine::letgo::Pieces = again
             .iter()
-            .filter(|i| in_trash.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
+            .filter(|i| in_trash.contains(i) || open.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
             .map(|&i| (i, (info.files[i].pieces.start, info.files[i].pieces.end)))
             .collect();
         let made: Vec<(usize, PathBuf, u64)> = again.iter().map(|&i| (i, paths[i].clone(), info.files[i].len)).collect();

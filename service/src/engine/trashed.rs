@@ -418,6 +418,18 @@ impl Trashed {
         replaced
     }
 
+    /// The files librqbit's storage of torrent `info_hash` has open, by index, wherever they are now;
+    /// one being opened or closed now counts. Only what's in memory, so the actor may ask.
+    pub fn open(&self, info_hash: &str) -> BTreeSet<usize> {
+        let mut open = BTreeSet::new();
+        self.torrent(info_hash).each_open(|index, slot| {
+            if slot.file.try_read().map_or(true, |opened| matches!(&*opened, Opened::File(_))) {
+                open.insert(index);
+            }
+        });
+        open
+    }
+
     /// Closes the files `files` (by index) of torrent `info_hash`, which [`Trashed::gone`] found gone
     /// from disk, in every storage of it, so their space is freed: librqbit can't read them any
     /// more, and the torrent is to be added back without their pieces. Touches no disk: a file with
