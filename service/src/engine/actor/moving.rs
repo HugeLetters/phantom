@@ -19,7 +19,8 @@
 //!
 //! Once it's over the torrent is size-checked where its files are now, then added back to librqbit
 //! with the pieces it had, which librqbit samples as at a start: no full check. Unless a file of it
-//! wasn't the one librqbit had open (replaced by hand): then it's checked in full.
+//! wasn't the one librqbit had open (replaced by hand), or was taken as it was in the new destination
+//! (Use existing): then it's checked in full, once nothing else of it is missing (#406).
 //!
 //! Each write-ahead save that the move relies on must land: one that fails before the take-out
 //! refuses the move, one that fails as the files are staged fails it, restored, and one that fails
@@ -596,7 +597,7 @@ impl Actor {
         );
         let event = match ended {
             Moved::Staged(Ok(staged)) if placing => match self.placed(id, |plan| plan.staged_as(&staged), true) {
-                Ok(check) => stages::Event::Placed { check },
+                Ok(adopted) => stages::Event::Placed { adopted },
                 Err(e) => {
                     self.placed(id, |plan| plan.staged_as(&[]), false).ok();
                     stages::Event::Failed(NotMoved::Failed { detail: format!("couldn't save where it goes: {e:#}") })
@@ -659,9 +660,9 @@ impl Actor {
     }
 
     /// Torrent `id`'s move is placed (`placed`: the record names the new destination) or not (the
-    /// old one), `change` made to its plan, written ahead: whether it takes files that were there
+    /// old one), `change` made to its plan, written ahead: the files it takes that were there
     /// already, or why the save failed.
-    fn placed(&mut self, id: TorrentId, change: impl FnOnce(&mut moving::Plan), placed: bool) -> anyhow::Result<bool> {
+    fn placed(&mut self, id: TorrentId, change: impl FnOnce(&mut moving::Plan), placed: bool) -> anyhow::Result<BTreeSet<usize>> {
         let torrent = self.torrents.get_mut(&id).context("moving, not in the list")?;
         let moving = torrent.record.moving.as_mut().context("moving without a plan")?;
         change(&mut moving.plan);
@@ -671,9 +672,9 @@ impl Actor {
         if let Some(names) = &moving.names {
             torrent.record.on_disk = if placed { names.now.clone() } else { names.was.clone() };
         }
-        let check = moving.plan.adopts();
+        let adopted = moving.plan.adopted();
         self.save_move()?;
-        Ok(check)
+        Ok(adopted)
     }
 
     /// Every file of torrent `id`'s move landed, written ahead before any original goes: why not.
@@ -745,10 +746,25 @@ impl Actor {
                 }
             }
         };
+        let adopted = match stage {
+            Stage::RemovingOld { adopted } => adopted.clone(),
+            Stage::TakingOut | Stage::Copying { .. } | Stage::Restoring { .. } => BTreeSet::new(),
+        };
         let before = torrent.lifecycle.phase.clone();
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
         super::track_uncounted(&mut torrent.polled.uncounted, &before, &torrent.lifecycle.phase);
         match torrent.record.moving.take() {
+            // Checked in full once librqbit has it again, which Missing files puts off (#406). None of
+            // a file taken as it was there is had till then: what librqbit said of it was of the
+            // torrent's own.
+            Some(_) if !adopted.is_empty() => {
+                bitv::forget(&bitv::path(&session, &torrent.record.info_hash));
+                for &i in adopted.iter().chain(&mover.replaced) {
+                    if let Some(p) = torrent.polled.file_progress.get_mut(i) {
+                        *p = 0;
+                    }
+                }
+            }
             // Checked in full once librqbit has it again. Till then (Missing files keeps it out),
             // none of a file replaced by hand is had: what librqbit said of it was of the one it had
             // open.
@@ -923,7 +939,7 @@ pub(super) fn inside(record: &super::Record) -> Vec<(usize, PathBuf)> {
 /// past the point where the record names the new destination is finished; any other goes back.
 pub(in super::super) fn at_start(moving: &Moving) -> Stage {
     match moving.placed {
-        true => Stage::RemovingOld { check: moving.plan.adopts() },
+        true => Stage::RemovingOld { adopted: moving.plan.adopted() },
         false => Stage::Restoring { why: NotMoved::Interrupted },
     }
 }

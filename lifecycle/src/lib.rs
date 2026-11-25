@@ -26,7 +26,7 @@ pub mod seeding;
 pub mod settings;
 pub mod undo;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proto::{AbsolutePath, Action, Actions, Answer, Kept, NotMoved, Reached, Status, TorrentFailure, Unavailable, Why};
 use serde::{Deserialize, Serialize};
@@ -763,14 +763,26 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
 
 /// What a torrent moving from `was` is once its move, at `stage`, is over: as it was, but a check
 /// under way (librqbit let go of it, which ends it) is due again, and one that took files already
-/// in the new destination is checked there.
+/// in the new destination is checked there. Not one still missing others, whose files a check would
+/// take for its own (#406): that waits, as it did, for what checks it in full.
 fn moved(was: &Phase, stage: &moving::Stage) -> Phase {
-    let adopted = matches!(stage, moving::Stage::RemovingOld { check: true });
-    match (was, adopted) {
-        (Phase::CheckDue { returning } | Phase::Checking { returning }, _) => Phase::CheckDue { returning: returning.clone() },
-        (_, true) => check_due(),
-        (was, false) => was.clone(),
+    let adopted = match stage {
+        moving::Stage::RemovingOld { adopted } => adopted,
+        moving::Stage::TakingOut | moving::Stage::Copying { .. } | moving::Stage::Restoring { .. } => &BTreeSet::new(),
+    };
+    match was {
+        Phase::CheckDue { returning } | Phase::Checking { returning } => Phase::CheckDue { returning: returning.clone() },
+        was if adopted.is_empty() => was.clone(),
+        Phase::MissingFiles { gone } => still_gone(gone, adopted).map_or_else(check_due, |gone| Phase::MissingFiles { gone }),
+        Phase::Unchecked { gone } => still_gone(gone, adopted).map_or_else(check_due, |gone| Phase::Unchecked { gone }),
+        _ => check_due(),
     }
+}
+
+/// Those of `gone` a move didn't take from the new destination, if any.
+fn still_gone(gone: &BTreeMap<usize, Gone>, adopted: &BTreeSet<usize>) -> Option<BTreeMap<usize, Gone>> {
+    let still: BTreeMap<usize, Gone> = gone.iter().filter(|(i, _)| !adopted.contains(i)).map(|(&i, g)| (i, g.clone())).collect();
+    (!still.is_empty()).then_some(still)
 }
 
 fn check_due() -> Phase {
@@ -1322,7 +1334,8 @@ mod tests {
             },
             Row {
                 says: "moving, its move's news goes by the move's own stages; once it's over the torrent is as it was, but a check \
-                       under way is due again, and one that took files already there is checked",
+                       under way is due again, and one that took files already there is checked, unless it's still missing \
+                       others: then it's missing just those (#406)",
                 when: |s, e| moving(&s.phase) && matches!(observed(e), Some(Observation::Move(_))),
                 then: |s, e, r| {
                     let (Phase::Moving { to, stage, was }, Some(Observation::Move(event))) = (&s.phase, observed(e)) else {
@@ -1331,13 +1344,23 @@ mod tests {
                     match moving::decide(stage, event) {
                         Some(stage) => becomes(s, r, Phase::Moving { to: to.clone(), stage, was: was.clone() }),
                         None => {
-                            let adopted = matches!(stage, moving::Stage::RemovingOld { check: true });
+                            let adopted = match stage {
+                                moving::Stage::RemovingOld { adopted } => adopted.clone(),
+                                _ => BTreeSet::new(),
+                            };
+                            let others = |gone: &BTreeMap<usize, Gone>| {
+                                let mut gone = gone.clone();
+                                gone.retain(|i, _| !adopted.contains(i));
+                                gone
+                            };
                             let back = match &**was {
                                 Phase::Checking { returning } | Phase::CheckDue { returning } => {
                                     Phase::CheckDue { returning: returning.clone() }
                                 }
-                                _ if adopted => check_due(),
-                                was => was.clone(),
+                                was if adopted.is_empty() => was.clone(),
+                                Phase::MissingFiles { gone } if !others(gone).is_empty() => Phase::MissingFiles { gone: others(gone) },
+                                Phase::Unchecked { gone } if !others(gone).is_empty() => Phase::Unchecked { gone: others(gone) },
+                                _ => check_due(),
                             };
                             becomes(s, r, back)
                         }
@@ -1437,7 +1460,7 @@ mod tests {
                 then: |s, e, r| command(e) != Some(Action::CancelCheck) || r.is_ok() == matches!(s.phase, Phase::Checking { .. }),
             },
             Row {
-                says: "only its move's end takes a torrent out of Moving, and then to where it was or a check",
+                says: "only its move's end takes a torrent out of Moving, and then to where it was, missing no more than it did, or a check",
                 when: all,
                 then: |s, e, r| {
                     let Ok(n) = r else { return true };
@@ -1445,7 +1468,15 @@ mod tests {
                         (Phase::Moving { .. }, Phase::Moving { .. }) => true,
                         (Phase::Moving { was, .. }, back) => {
                             observed(e) == Some(&Observation::Move(moving::Event::Ended))
-                                && (*back == **was || matches!(back, Phase::CheckDue { .. }))
+                                && (*back == **was
+                                    || matches!(back, Phase::CheckDue { .. })
+                                    || match (&**was, back) {
+                                        (Phase::MissingFiles { gone: was }, Phase::MissingFiles { gone })
+                                        | (Phase::Unchecked { gone: was }, Phase::Unchecked { gone }) => {
+                                            gone.iter().all(|(i, g)| was.get(i) == Some(g))
+                                        }
+                                        _ => false,
+                                    })
                         }
                         (_, Phase::Moving { was, .. }) => matches!(observed(e), Some(Observation::MoveStarted { .. })) && **was == s.phase,
                         (_, _) => true,

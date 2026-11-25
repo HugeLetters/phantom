@@ -9,6 +9,7 @@
 //! person chooses; one a move [`fails into`](MemoryService::move_failing) fails it halfway, and it's
 //! back where it was.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use lifecycle::moving::{self as stages, Stage};
@@ -20,7 +21,7 @@ use client::Failure;
 
 use super::{MemoryService, Pretend};
 
-/// A move under way: its step, where to, whether it takes files there, and when it started on the
+/// A move under way: its step, where to, the files it takes there, and when it started on the
 /// app clock (filled in by the first poll after it starts).
 #[derive(Clone)]
 pub(super) struct Moving {
@@ -28,7 +29,7 @@ pub(super) struct Moving {
     to: AbsolutePath,
     /// The name it takes there (#270), once moved.
     name: Option<String>,
-    adopts: bool,
+    adopted: BTreeSet<usize>,
     since: Option<f64>,
 }
 
@@ -123,8 +124,10 @@ impl MemoryService {
             }
             None | Some(_) => {}
         }
+        // A folder that holds it holds every file of it.
         let adopts = taken && clash.is_some_and(|a| a.choice == Clash::UseExisting);
-        self.moving.insert(id, Moving { seq, to: to.clone(), name: new_name.map(String::from), adopts, since: None });
+        let adopted = self.files.get(&id).into_iter().flatten().filter(|_| adopts).map(|f| f.index).collect();
+        self.moving.insert(id, Moving { seq, to: to.clone(), name: new_name.map(String::from), adopted, since: None });
         // Undo can't put files of it back from the Trash any more: they'd go to the old destination.
         self.decide(lifecycle::undo::Observed::Moving(id));
         self.event(id, Event::Observed(Observation::MoveStarted { to: to.clone() }));
@@ -256,10 +259,10 @@ impl MemoryService {
                 let done = if self.move_secs > 0.0 { ((now - since) / self.move_secs).min(1.0) } else { 1.0 };
                 let total = self.files.get(&id).into_iter().flatten().map(|f| f.progress_bytes).sum::<u64>();
                 let failing = self.move_failing.get(&*mover.to).cloned();
-                let adopts = mover.adopts;
+                let adopted = mover.adopted.clone();
                 let event = match (failing, done) {
                     (Some(why), d) if d >= 0.5 => stages::Event::Failed(why),
-                    (_, d) if d >= 1.0 => stages::Event::Placed { check: adopts },
+                    (_, d) if d >= 1.0 => stages::Event::Placed { adopted },
                     (_, d) => stages::Event::Copied { done: (total as f64 * d) as u64, total },
                 };
                 self.event(id, Event::Observed(Observation::Move(event)));

@@ -55,8 +55,9 @@ pub fn stages() -> Vec<Stage> {
     vec![
         Stage::TakingOut,
         Stage::Copying { done: 3, total: 10 },
-        Stage::RemovingOld { check: false },
-        Stage::RemovingOld { check: true },
+        Stage::RemovingOld { adopted: [].into() },
+        Stage::RemovingOld { adopted: [0].into() },
+        Stage::RemovingOld { adopted: [1].into() },
         Stage::Restoring { why: NotMoved::Cancelled },
     ]
 }
@@ -211,8 +212,8 @@ every!(Observation {
     Observation::MoveStarted { .. } => [Observation::MoveStarted { to: elsewhere() }],
     Observation::Move(_) => [
         moving::Event::Copied { done: 5, total: 10 },
-        moving::Event::Placed { check: false },
-        moving::Event::Placed { check: true },
+        moving::Event::Placed { adopted: [].into() },
+        moving::Event::Placed { adopted: [0].into() },
         moving::Event::Failed(NotMoved::DiskFull),
         moving::Event::Blocked(NotMoved::Cancelled),
         moving::Event::Ended,
