@@ -1479,6 +1479,9 @@ fn looks_changed(s: &mut SettingsWindow) {
         let preset = sheet.target().and_then(|t| presets.get(t).cloned());
         if let (Some(editor), Some(preset)) = (sheet.editor_mut(), preset) {
             editor.show_colours(&preset);
+            // A refusal goes with its field: a new one in its place was refused nothing.
+            let shown: Vec<Row> = editor.colours.iter().map(|f| Row::Colour(f.side, f.key)).collect();
+            sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)) || shown.contains(&r.row));
         }
     }
     presets::preview(s);
