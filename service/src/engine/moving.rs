@@ -575,7 +575,7 @@ fn copy(from: &Path, to: &Path, copied: &mut dyn FnMut(u64), stop: &AtomicBool, 
             return Err(Copy::Stopped);
         }
     }
-    dst.set_len(at).map_err(Copy::Write)?;
+    super::trashed::grow(&dst, at).map_err(Copy::Write)?;
     dst.sync_all().map_err(Copy::Write)
 }
 

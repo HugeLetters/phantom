@@ -66,7 +66,21 @@ impl Found {
     /// It isn't on disk as it must be: nothing is at its path, something other than a file is, or
     /// a file of a size it can't have.
     pub fn is_missing(&self) -> bool {
-        self.at.is_none_or(|at| at.len > self.file.size_bytes || at.len < self.file.progress_bytes)
+        self.at.is_none() || self.is_impossible()
+    }
+
+    /// A file is there, of a size it can't have: longer than the torrent's, or shorter than what was
+    /// had of it. It isn't the torrent's file as it was, whatever a check finds in it.
+    pub fn is_impossible(&self) -> bool {
+        self.at.is_some_and(|at| at.len > self.file.size_bytes || at.len < self.file.progress_bytes)
+    }
+}
+
+impl Disk {
+    /// Whether a file there [is of a size it can't have](Found::is_impossible): nothing may be
+    /// written into it, so the torrent isn't run, nor checked unasked (#374).
+    pub fn any_impossible(&self) -> bool {
+        self.files.values().any(Found::is_impossible)
     }
 }
 

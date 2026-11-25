@@ -568,6 +568,8 @@ impl Actor {
             record,
             #[cfg(test)]
             added: 0,
+            #[cfg(test)]
+            started: 0,
         };
         self.torrents.insert(id, torrent);
         if let Err(e) = self.carry_out(id).await {
