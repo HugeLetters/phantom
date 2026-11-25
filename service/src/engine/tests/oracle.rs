@@ -139,6 +139,8 @@ struct Open {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Which {
+    /// Known missing, had.
+    Had,
     Any,
     /// Put where the torrent's wasn't known missing.
     There,
@@ -182,6 +184,12 @@ const KNOWN_OPEN: &[Open] = &[
     known(SAME_SIZE, &[Route::Restart, Route::Crash], Which::There, "file-trust A: replaced, same size, then a start"),
     known(SHORT, &[Route::DriveBack, Route::Restart, Route::Crash], Which::Part, "file-trust A: shorter, where less was had"),
     known(ANY_SIZE, &[Route::Check, Route::Resume], Which::GoneMeanwhile, "found by this test: the folder or drive gone during a check"),
+    known(
+        &[Same, Shorter, Empty, OnePiece, Cut, HardLink],
+        &[Route::Move],
+        Which::Had,
+        "found by this test: a Move that uses a file there forgets what was missing",
+    ),
     known(OTHERS, &[Route::DriveBack], Which::Missing, "#373: what was known missing is forgotten"),
     known(&[Shorter], &[Route::PutBack], Which::PieceHad, "file-trust A: missing known, then a shorter one: grown, then refused"),
     known(OTHERS, &[Route::Running], Which::NoneHad, "file-trust A: missing known, nothing had"),
@@ -198,6 +206,7 @@ impl Open {
                 Which::Off => class.off,
                 Which::GoneMeanwhile => class.gone_meanwhile,
                 Which::Missing => class.missing != Missing::No,
+                Which::Had => class.missing == Missing::Had,
                 Which::PieceHad => class.missing == Missing::PieceHad,
                 Which::NoneHad => class.missing == Missing::NoneHad,
                 Which::Any => true,
@@ -1713,6 +1722,15 @@ async fn a_move_without_a_missing_file_takes_the_choice_it_was_sent_with() {
     let gone = [Step::By(By::Put { file: 0, kind: Link }), Step::Do(Do::TrashFile { file: 2 }), Step::Settle];
     let steps = [gone.to_vec(), vec![Step::PeerOpens, Step::Settle, put, Step::Do(Do::Move { replace: false })]].concat();
     World::run(&Peers::start().await, &Case { start: Start::Nothing, peer: false, paused: false, before: None, steps }, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "#374: a Move that uses a file there forgets what was missing"]
+async fn open_a_move_that_uses_a_file_there_writes_over_one_where_a_file_was_missing() {
+    let gone = [Step::Settle, Step::By(By::TakeAway { file: B }), Step::Settle, Step::By(By::Put { file: B, kind: Shorter })];
+    let used = Step::By(By::PutAtTarget { file: 0, kind: Same });
+    let steps = [gone.to_vec(), vec![used, Step::Do(Do::Move { replace: false }), Step::Settle]].concat();
+    World::run(&Peers::start().await, &Case { start: Start::Whole, peer: false, paused: false, before: None, steps }, true).await;
 }
 
 /// One that depends on when its steps come: some runs of it pass.
