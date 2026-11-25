@@ -951,7 +951,7 @@ pub fn reset_notice(reset: &[String], file: &str) -> Option<Notice> {
     let name = copy.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
     let reveal = NoticeAction::reveal(&copy);
     let reset = reset.to_vec();
-    let open = NoticeAction::new("Open settings", move |s: &mut Phantom| {
+    let open = NoticeAction::new(display::open_settings(), move |s: &mut Phantom| {
         let reset = reset.clone();
         s.settings.post(move |w, _| open_reset(w, &reset));
     });
@@ -1917,7 +1917,9 @@ fn answer(row: Row) -> Done<Result<Settings, Failure>> {
         if let Err(failure @ (Failure::Failed(_) | Failure::Error(_))) = &result {
             let of = row_setting(row).map(|key| display::setting_short(key).to_owned()).unwrap_or_default();
             let why = display::sentence(&format!("{failure:#}"));
-            s.bar.tell(Notice::error(display::setting_not_changed()).with_listing(display::Listing::new(&of, &why)));
+            let open = row_setting(row).map(crate::model::retry::open_settings);
+            let notice = Notice::error(display::setting_not_changed()).with_listing(display::Listing::new(&of, &why));
+            s.bar.tell(notice.with_actions(open.into_iter().collect()));
         }
         s.settings.post(move |s, _| {
             let Some(sheet) = &mut s.sheet else { return };

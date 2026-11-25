@@ -251,7 +251,9 @@ pub fn restart(s: &mut Phantom, tx: &mut Tx) {
             s.relaunching = true;
             tx.quit();
         }
-        Err(why) => s.bar.tell(Notice::error(display::cant_restart()).with_text(display::sentence(&why))),
+        Err(why) => s.bar.tell(
+            Notice::error(display::cant_restart()).with_text(display::sentence(&why)).with_actions(vec![crate::model::retry::restart()]),
+        ),
     }
 }
 

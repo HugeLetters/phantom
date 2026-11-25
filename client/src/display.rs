@@ -149,6 +149,11 @@ pub fn move_progress(status: &Status) -> Option<String> {
     }
 }
 
+/// The button of a setting's failure that opens Settings at it.
+pub fn open_settings() -> &'static str {
+    "Open settings"
+}
+
 /// The button of a failure's notice that does again what failed.
 pub fn try_again() -> &'static str {
     "Try again"

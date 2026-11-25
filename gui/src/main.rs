@@ -1020,6 +1020,35 @@ fn spec() -> AppSpec<Phantom> {
                 let actions = vec![model::retry::move_again(vec![1], to), model::retry::move_to(vec![1])];
                 s.bar.tell(Notice::warning(display::moved_of(1, 2)).with_listing(list).with_actions(actions));
             }),
+            ("notice-rename-clash", |s| {
+                s.service = Box::new(demo_service());
+                let path = proto::AbsolutePath::new("/Users/me/Downloads/Big Buck Bunny (2008) (1)").expect("absolute");
+                let why = display::refused_why(&proto::TorrentRefusal::NameTaken { path: path.clone() });
+                let list = notice::Listing::of_entries([("Big Buck Bunny (2008)", &why)]);
+                let way = notice::NoticeAction::reveal(std::path::Path::new(&path.display().to_string()));
+                s.bar.tell(
+                    Notice::error(display::commands_failed(proto::Action::Rename, 1, 1))
+                        .with_listing(list)
+                        .with_actions(vec![model::retry::rename(1), way]),
+                );
+            }),
+            ("notice-restart-failed", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(
+                    Notice::error(display::cant_restart())
+                        .with_text(display::sentence("no such file or directory"))
+                        .with_actions(vec![model::retry::restart()]),
+                );
+            }),
+            ("notice-setting-failed", |s| {
+                s.service = Box::new(demo_service());
+                let list = display::Listing::new("Listen port", &display::sentence("the torrents didn't start again"));
+                s.bar.tell(
+                    Notice::error(display::setting_not_changed())
+                        .with_listing(list)
+                        .with_actions(vec![model::retry::open_settings("listen_port")]),
+                );
+            }),
             // A failed Open of a file of torrent 1: Show folder, then Check.
             ("notice-open-check", |s| {
                 struct NotThere;

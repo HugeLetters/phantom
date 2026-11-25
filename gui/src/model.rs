@@ -914,6 +914,19 @@ fn command_then(
             if failed.is_empty() {
                 return;
             }
+            let rename_buttons: Vec<NoticeAction> = match failed.first() {
+                Some((id, failure)) if action == Action::Rename => {
+                    let way = match failure {
+                        client::Failure::Refused(proto::Refusal::Torrent {
+                            why: proto::TorrentRefusal::NameTaken { path } | proto::TorrentRefusal::NameOfAnother { path, .. },
+                            ..
+                        }) => Some(NoticeAction::reveal(Path::new(&path.display().to_string()))),
+                        _ => None,
+                    };
+                    std::iter::once(retry::rename(*id)).chain(way).collect()
+                }
+                _ => Vec::new(),
+            };
             let named = |id: TorrentId| {
                 s.torrents.iter().find(|t| t.id == id).map_or_else(|| format!("torrent {id}"), |t| t.display_name().to_owned())
             };
@@ -938,6 +951,7 @@ fn command_then(
                 false => Vec::new(),
             };
             let again = match action {
+                Action::Rename => rename_buttons,
                 Action::Pause | Action::Resume | Action::Delete => vec![retry::command(failed_ids, action)],
                 _ => Vec::new(),
             };

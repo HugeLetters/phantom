@@ -40,14 +40,15 @@ pub fn add(requests: Vec<AddRequest>) -> NoticeAction {
 }
 
 /// Try again for a Move of `ids` into `to`: asked and answered as any Move is, clash dialogs included.
+/// Gone with its folder: a Move into a folder that isn't on disk any more isn't offered again.
 pub fn move_again(ids: Vec<TorrentId>, to: proto::AbsolutePath) -> NoticeAction {
-    let listed = ids.clone();
+    let (listed, there) = (ids.clone(), std::path::PathBuf::from(to.display().to_string()));
     NoticeAction::new(client::display::try_again(), move |s: &mut Phantom| {
         let ids = applicable(s, &ids, Action::Move);
         moving::start(s, ids, to.clone());
     })
     .once()
-    .shown_while(move |s| !applicable(s, &listed, Action::Move).is_empty())
+    .shown_while(move |s| s.finder.exists(&there) && !applicable(s, &listed, Action::Move).is_empty())
 }
 
 /// Move to… for the torrents of `ids` that are left: the folder picker, then a Move.
@@ -69,4 +70,34 @@ pub fn check(id: TorrentId) -> NoticeAction {
         crate::model::command(&mut *s.service, &ids, TorrentCommand::Check);
     })
     .shown_while(move |s| !applicable(s, &[id], Action::Check).is_empty())
+}
+
+/// Rename… for torrent `id`, after a rename that couldn't be done: selects it and opens its name
+/// field, as the Rename command does. Offered while the service lists Rename for it.
+pub fn rename(id: TorrentId) -> NoticeAction {
+    NoticeAction::with_tx(client::display::rename(), move |s: &mut Phantom, tx: &mut rune::Tx| {
+        if applicable(s, &[id], Action::Rename).is_empty() {
+            return;
+        }
+        s.table.clear_selection();
+        s.table.select(&id.to_string());
+        s.table.reveal(id.to_string(), tx);
+        crate::model::renaming::open(s, id);
+        s.bar.close();
+    })
+    .once()
+    .shown_while(move |s| !applicable(s, &[id], Action::Rename).is_empty())
+}
+
+/// Try again for a restart that couldn't start: the same restart.
+pub fn restart() -> NoticeAction {
+    NoticeAction::with_tx(client::display::try_again(), |s: &mut Phantom, tx: &mut rune::Tx| crate::platform::restart(s, tx)).once()
+}
+
+/// Open settings on the tab of `setting` (its key in the settings file), its control focused.
+pub fn open_settings(setting: &'static str) -> NoticeAction {
+    NoticeAction::new(client::display::open_settings(), move |s: &mut Phantom| {
+        s.settings.post(move |w, _| crate::model::settings::open_reset(w, &[setting.to_owned()]));
+        s.bar.close();
+    })
 }

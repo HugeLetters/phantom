@@ -226,3 +226,77 @@ fn the_popover_is_as_wide_as_the_widest_notice_needs_on_every_page() {
     tap(&mut rt, "notice-older");
     assert_eq!(width(&rt), 480.0, "the same on every page");
 }
+
+/// Row: Couldn't rename, something is already there. Rename… selects the torrent and opens its name
+/// field; Reveal in Finder shows what's in the way, while it's on disk.
+#[test]
+fn a_rename_that_found_something_there_offers_rename_and_reveal() {
+    let taken = std::path::Path::new(crate::service::DOWNLOADS).join("Live");
+    let album = proto::File {
+        index: 0,
+        path: "a.mkv".into(),
+        size_bytes: 1,
+        progress_bytes: 0,
+        priority: proto::Priority::Normal,
+        missing: false,
+        on_disk: false,
+    };
+    let service =
+        MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "Album")]).with_files(1, vec![album]).taken_on_disk(&taken);
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::rename(s, 1, proto::FileName::new("Live".to_owned()).unwrap()));
+    wait(&mut rt, 1.0);
+    let id = newest(&rt);
+    assert_eq!(super::notice(&rt), Some("Couldn't rename the torrent"));
+    let list = list_of(&mut rt, id);
+    assert_eq!(&list[list.len() - 2..], ["Rename…", "Reveal in Finder"], "{list:?}");
+    // Reveal in Finder shows what is in the way.
+    let shown = crate::platform::Shown::default();
+    rt.state.finder = Box::new(shown.clone());
+    press(&mut rt, id, 1);
+    assert_eq!(shown.all(), vec![(taken.clone(), crate::platform::Show::Reveal)]);
+    // Rename… selects it and opens the field.
+    press(&mut rt, id, 0);
+    settle(&mut rt);
+    assert_eq!(rt.state.rename.id, Some(1));
+    assert_eq!(crate::model::selected_torrents(&rt.state.table), vec![1]);
+    // The torrent is gone: no Rename…; what's in the way is still on disk.
+    let again = told(&mut rt, Notice::error("Couldn't rename the torrent").with_actions(vec![retry::rename(7)]));
+    assert!(!list_of(&mut rt, again).contains(&"Rename…".to_owned()), "no torrent 7");
+}
+
+/// Row: Can't restart Phantom. Try again is the same restart.
+#[test]
+fn a_restart_that_could_not_start_offers_try_again_which_restarts() {
+    struct Fails;
+    impl crate::platform::Relauncher for Fails {
+        fn relaunch(&mut self) -> Result<(), String> {
+            Err("no such file".into())
+        }
+    }
+    let mut rt = app(MemoryService::new());
+    rt.state.relauncher = Box::new(Fails);
+    rt.update(|s, tx| crate::platform::restart(s, tx));
+    settle(&mut rt);
+    let id = newest(&rt);
+    assert_eq!(list_of(&mut rt, id).last().map(String::as_str), Some("Try again"));
+    let working = crate::platform::Relaunched::default();
+    rt.state.relauncher = Box::new(working.clone());
+    press(&mut rt, id, 0);
+    assert_eq!(working.times(), 1, "restarted");
+    assert!(rt.state.bar.entries().iter().all(|e| e.id != id));
+}
+
+/// Row: Couldn't move, its target gone from disk. Try again would go to a folder that isn't there,
+/// so only Move to… is offered (a folder to pick instead), while the torrent can move.
+#[test]
+fn a_move_whose_target_vanished_still_offers_move_to_but_not_try_again() {
+    let (mut rt, id) = partial_move();
+    let disk = crate::platform::Shown::default();
+    disk.lose(std::path::Path::new("/Films"));
+    rt.state.finder = Box::new(disk);
+    settle(&mut rt);
+    let list = list_of(&mut rt, id);
+    assert!(list.last().map(String::as_str) == Some("Move to…") && !list.contains(&"Try again".to_owned()), "{list:?}");
+}
