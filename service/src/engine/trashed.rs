@@ -715,8 +715,13 @@ impl Files {
     }
 
     /// Writes `bufs`, one after another, at `offset` into file `index`, made first if it isn't
-    /// there; aside if it's in the Trash. Where it is is looked at once.
+    /// there; aside if it's in the Trash. Where it is is looked at once. Writing no bytes makes
+    /// nothing (#376).
     fn write(&self, index: usize, offset: u64, bufs: &[&[u8]]) -> Result<()> {
+        // librqbit writes 0 bytes into the file before a chunk: that makes nothing (#376).
+        if bufs.iter().all(|buf| buf.is_empty()) {
+            return Ok(());
+        }
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         self.at(At::Change);
@@ -1176,6 +1181,56 @@ mod tests {
         let plan = Plan { location: dir.to_owned(), items: vec![path.to_owned()] };
         let carried = trashed.take("t", &plan, &[(0, path.to_owned())], trash, |_| {}, &AtomicBool::new(false));
         carried.moved.into_iter().next().expect("moved")
+    }
+
+    /// #376: storage of one file at `path`, which isn't there, set Off.
+    fn absent(trashed: &Trashed, dir: &Path, path: &Path) -> Files {
+        let mut files = trashed.storage("t", Layout::new(dir.to_owned(), None), dir.to_owned());
+        files.files = Arc::new(vec![Slot { path: Some(path.to_owned()), file: RwLock::new(Opened::NotThere) }]);
+        trashed.torrent("t").opened(&files.files);
+        files
+    }
+
+    /// #376: librqbit writes 0 bytes into the file before a chunk. Not a byte, not a file, nor its
+    /// folders: whether it's one write or two empty slices, as vectored.
+    #[test]
+    fn a_write_of_nothing_makes_no_file_nor_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("folder/deeper/off.bin");
+        let files = absent(&Trashed::default(), dir.path(), &path);
+        files.pwrite_all(0, 0, &[]).unwrap();
+        files.pwrite_all(0, 7, &[]).unwrap();
+        assert_eq!(files.pwrite_all_vectored(0, 0, [std::io::IoSlice::new(&[]), std::io::IoSlice::new(&[])]).unwrap(), 0);
+        assert!(!dir.path().join("folder").exists(), "no folder");
+    }
+
+    /// An empty slice beside one with bytes still makes the file, and writes the bytes.
+    #[test]
+    fn a_vectored_write_of_one_empty_slice_and_one_not_is_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("folder/off.bin");
+        let files = absent(&Trashed::default(), dir.path(), &path);
+        let n = files.pwrite_all_vectored(0, 2, [std::io::IoSlice::new(&[]), std::io::IoSlice::new(b"ab")]).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(std::fs::read(&path).unwrap(), b"\0\0ab");
+        let n = files.pwrite_all_vectored(0, 0, [std::io::IoSlice::new(b"x"), std::io::IoSlice::new(&[])]).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(std::fs::read(&path).unwrap(), b"x\0ab");
+    }
+
+    /// A write of nothing to a file in the Trash keeps nothing aside.
+    #[test]
+    fn a_write_of_nothing_to_a_file_in_the_trash_keeps_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let trashed = Trashed::default();
+        let bin = bin(dir.path());
+        let files = storage(&trashed, dir.path(), &path);
+        take(&trashed, &bin, dir.path(), &path);
+        files.pwrite_all(0, 3, &[]).unwrap();
+        assert!(trashed.torrent("t").lock().kept.is_empty(), "nothing kept");
+        assert!(!path.exists(), "nothing made at its path");
     }
 
     /// #217's fourth and fifth reviews, #218's S1: a file a Move to Trash took while open is left as

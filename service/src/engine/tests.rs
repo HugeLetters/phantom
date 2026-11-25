@@ -2837,6 +2837,39 @@ async fn a_file_set_off_and_deleted_comes_back_only_as_the_stub_of_a_piece_it_sh
     assert_eq!(stub[PIECE..], off_bytes[PIECE..], "the part of the piece it shares");
 }
 
+/// #376: librqbit writes 0 bytes into the file just before a chunk. With the file before it Off and
+/// absent (here whole pieces, so no stub of a shared piece is wanted), that makes no file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_set_off_and_absent_is_not_made_by_a_write_of_nothing() {
+    let dir = temp();
+    let seeded = dir.path().join("seed/pack");
+    let downloads = dir.path().join("downloads/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    std::fs::create_dir_all(&downloads).unwrap();
+    for (i, name) in ["a.bin", "b.bin"].iter().enumerate() {
+        let bytes: Vec<u8> = (0..PIECE * 2).map(|n| (n * 7 + i * 31) as u8 | 1).collect();
+        std::fs::write(seeded.join(name), &bytes).unwrap();
+        std::fs::write(downloads.join(name), &bytes).unwrap();
+    }
+    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, PIECE as u32).await;
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let order = engine.details(id).await.unwrap().files;
+    let (off, getting) = (&order[0].path, &order[1].path);
+
+    engine.command(id, TorrentCommand::SetPriority { files: vec![0], priority: Priority::Off }).await.unwrap();
+    std::fs::remove_file(downloads.join(off)).unwrap();
+    std::fs::remove_file(downloads.join(getting)).unwrap();
+    wait_for(&engine, id, Status::MissingFiles).await;
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+
+    assert_eq!(std::fs::read(downloads.join(getting)).unwrap(), std::fs::read(seeded.join(getting)).unwrap(), "downloaded");
+    assert!(!downloads.join(off).exists(), "no file for the one set Off: nothing of it was written");
+    engine.stop().await;
+}
+
 // Undo (#150).
 
 /// `downloads/pack`'s files as they are now: each file's bytes, by name.
