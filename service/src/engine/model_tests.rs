@@ -235,6 +235,12 @@ struct Model {
     /// Each pack's destination is its other one, `elsewhere<pack>`: where its torrent moved, and
     /// where its files are, and where an add of it goes.
     elsewhere: [bool; PACKS],
+    /// Which file is at each path: a number of its own each, given as it's made.
+    inodes: [[u32; FILES]; PACKS],
+    /// The last number given.
+    last_inode: u32,
+    /// The number of each file a Move to Trash took, by item.
+    trashed_inodes: BTreeMap<usize, u32>,
 }
 
 /// An item in the trash: the pack's folder whole, or one of its files, with what each of its files
@@ -363,6 +369,15 @@ struct Pack {
     stash: Option<Stash>,
     /// The numbers of the items its Deletes moved to the trash.
     trashed: Vec<usize>,
+    /// The file librqbit has open of each (`Model::inodes`): one that's no longer at its path was replaced
+    /// by hand, and a Move to Trash lets go of it (#268).
+    open: [Option<u32>; FILES],
+    /// Added to librqbit in this step, which opens its files afresh.
+    reopens: bool,
+    /// It let go of pieces it had: it's added again without them once it's Ready.
+    letting_go: bool,
+    /// In a Move to Trash's entry: the files it let go of, whose undo checks the torrent (#328).
+    let_go: [bool; FILES],
 }
 
 /// A pack as its first Delete found it, which its Undo brings back.
@@ -386,6 +401,13 @@ struct Gone {
 }
 
 impl Pack {
+    /// File `f` is let go of: librqbit's handle is closed, and none of its pieces are had.
+    fn lets_go(&mut self, f: usize) {
+        self.letting_go |= self.have[f];
+        self.have[f] = false;
+        self.open[f] = None;
+    }
+
     fn complete(&self) -> bool {
         (0..FILES).all(|f| self.off[f] || self.have[f])
     }
@@ -426,6 +448,8 @@ impl Pack {
     /// checks them all, once the checks' gate is open, `held` or not; `returning` are the missing
     /// files put back. Those in the Trash for an undo it reads as they went (`away`).
     fn check(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool, held: bool, returning: BTreeMap<usize, Gone>, away: Away) {
+        self.reopens = true;
+        self.letting_go = false;
         self.make_absent(disk, folder);
         self.unchecked = false;
         self.uncounted.extend(std::mem::take(&mut self.missing).into_keys());
@@ -555,6 +579,10 @@ impl Model {
                     unchecked: false,
                     stash: None,
                     trashed: Vec::new(),
+                    open: [None; FILES],
+                    reopens: false,
+                    letting_go: false,
+                    let_go: [false; FILES],
                 };
                 p.check(&mut self.disk[pack], &mut self.folder[pack], self.checks_held, BTreeMap::new(), [None; FILES]);
                 // librqbit makes its folder for the files it makes.
@@ -645,7 +673,7 @@ impl Model {
                     // Missing, set Off: it's let go of (#244's re-check), librqbit offering none of its
                     // pieces once the torrent runs again; but for one in the Trash, read where it went.
                     if p.missing.remove(file).is_some() && !in_trash[*file] {
-                        p.have[*file] = false;
+                        p.lets_go(*file);
                     }
                 } else {
                     // Asked for again after a Move to Trash took it: made afresh.
@@ -655,7 +683,9 @@ impl Model {
                     if disk[pack][*file] == OnDisk::Absent && !p.unavailable && !p.missing.contains_key(file) {
                         disk[pack][*file] = OnDisk::Sparse;
                         folder[pack] = true;
-                        p.have[*file] = false;
+                        if in_trash[*file] || p.have[*file] {
+                            p.lets_go(*file);
+                        }
                     }
                 }
             }
@@ -696,6 +726,8 @@ impl Model {
         // hand, which it read through the file it had open until then).
         let disk = self.disk[pack];
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
+        p.open = [None; FILES];
+        p.reopens = p.missing.is_empty() && !p.unchecked;
         if !(p.unchecked && !p.missing.is_empty()) {
             let read = read(&disk, [None; FILES]);
             if (0..FILES).any(|f| p.have[f] && !read[f]) {
@@ -913,11 +945,18 @@ impl Model {
         let files = &files[..];
         let previous: Vec<(usize, bool)> = files.iter().map(|&f| (f, p.off[f])).collect();
         let mut moved_as: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut let_go = [false; FILES];
         for &f in files {
             p.off[f] = true;
             // Missing, set Off: let go of, as by a priority.
             if p.missing.remove(&f).is_some() && !in_trash[f] {
-                p.have[f] = false;
+                p.lets_go(f);
+            }
+            // Replaced by hand since librqbit opened it (#268): let go of, whether or not the trash
+            // then takes it, as librqbit's pieces are of the file it has open.
+            if p.open[f].is_some_and(|open| open != self.inodes[pack][f]) {
+                p.lets_go(f);
+                let_go[f] = true;
             }
         }
         let mut items = Vec::new();
@@ -933,6 +972,7 @@ impl Model {
             let n = self.next_item;
             self.next_item += 1;
             self.in_trash.push(Trashed { n, pack, item: Item::File(f), files: vec![(f, self.disk[pack][f])], litter: false });
+            self.trashed_inodes.insert(n, self.inodes[pack][f]);
             self.moved.insert((pack, f));
             self.taken.insert((pack, f));
             self.disk[pack][f] = OnDisk::Absent;
@@ -945,7 +985,7 @@ impl Model {
         }
         if !items.is_empty() {
             let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
-            let back = Torrent::Pack(whole(p));
+            let back = Torrent::Pack(Pack { let_go, ..whole(p) });
             let files = previous.into_iter().map(|(f, off)| (f, off, moved_as.get(&f).copied())).collect();
             self.undo.push(Undo {
                 press: 0,
@@ -1042,6 +1082,7 @@ impl Model {
                 let disk = &mut self.disk[p.pack];
                 // A check under way when it went is over: it's checked again in full.
                 let checking = p.checking.take().is_some();
+                p.reopens = true;
                 // The destination is available now (else the Undo was refused above): one removed
                 // while it was gone is added again with it back, and runs if it was running (#202).
                 let was_unavailable = std::mem::take(&mut p.unavailable);
@@ -1124,6 +1165,9 @@ impl Model {
             for &(f, on_disk) in &t.files {
                 self.disk[t.pack][f] = on_disk;
                 self.moved.remove(&(t.pack, f));
+                if let Some(&inode) = self.trashed_inodes.get(&t.n) {
+                    self.inodes[t.pack][f] = inode;
+                }
                 // A file back, as one put back by hand: a missing file it was learns it's there.
                 self.written(t.pack, f);
             }
@@ -1150,8 +1194,10 @@ impl Model {
                 p.missing.remove(&f);
             }
         }
-        // What librqbit has of those is of the new copies: it's checked.
-        if !copies.is_empty() && !p.unchecked {
+        // What librqbit has of those is of the new copies, and it has none of a file the move let go
+        // of: it's checked, which reads them.
+        let let_go = items.iter().flat_map(|t| &t.files).any(|(f, _)| before.let_go[*f]);
+        if (!copies.is_empty() || let_go) && !p.unchecked {
             let (pack, off) = (p.pack, p.off);
             let away = self.away(pack, &off);
             let Some(Torrent::Pack(p)) = self.torrents.get_mut(&undo.id) else { unreachable!() };
@@ -1319,7 +1365,7 @@ impl Model {
             && let Some(p) = self.pack_torrent(pack)
             && p.off[file]
         {
-            p.have[file] = false;
+            p.lets_go(file);
         }
     }
 
@@ -1339,6 +1385,7 @@ impl Model {
             for f in std::mem::take(&mut p.missing).into_keys() {
                 p.have[f] = false;
             }
+            p.uncounted.extend(p.checking.take().into_iter().flat_map(BTreeMap::into_keys));
             p.unchecked = false;
         }
     }
@@ -1393,7 +1440,7 @@ impl Model {
                         && p.off[f]
                         && not_there
                     {
-                        p.have[f] = false;
+                        p.lets_go(f);
                     }
                 }
             }
@@ -1436,6 +1483,10 @@ impl Model {
         for (id, t) in self.torrents.iter_mut() {
             let Torrent::Pack(p) = t else { continue };
             p.uncounted.clear();
+            // Not in librqbit while it's Missing files, not checked or away.
+            p.open = [None; FILES];
+            p.reopens = p.missing.is_empty() && !p.unchecked;
+            p.letting_go = false;
             // Away, or partly in the Trash (its error comes back with it): nothing is known of what
             // it has until it's back and checked.
             if p.unavailable || p.delete_failed {
@@ -1669,6 +1720,9 @@ impl ReferenceStateMachine for EngineModel {
             mine: [false; PACKS],
             litter: [false; PACKS],
             elsewhere: [false; PACKS],
+            inodes: [[0; FILES]; PACKS],
+            last_inode: 0,
+            trashed_inodes: BTreeMap::new(),
         })
         .boxed()
     }
@@ -2065,6 +2119,7 @@ impl ReferenceStateMachine for EngineModel {
 
     fn apply(mut model: Model, step: &Step) -> Model {
         model.trail.clear();
+        let disk_before = model.disk;
         if let Step::Burst(steps) = step {
             let mut trail = Vec::new();
             for step in steps {
@@ -2143,6 +2198,7 @@ impl ReferenceStateMachine for EngineModel {
                     model.unlinked(*pack, *file);
                     model.moved.remove(&(*pack, *file));
                     model.disk[*pack][*file] = OnDisk::Valid;
+                    model.new_inode(*pack, *file);
                     model.folder[*pack] = true;
                     model.written(*pack, *file);
                     Answer::None
@@ -2152,6 +2208,7 @@ impl ReferenceStateMachine for EngineModel {
                     model.unlinked(*pack, *file);
                     model.moved.remove(&(*pack, *file));
                     model.disk[*pack][*file] = OnDisk::Other;
+                    model.new_inode(*pack, *file);
                     model.folder[*pack] = true;
                     model.written(*pack, *file);
                     Answer::None
@@ -2259,11 +2316,49 @@ impl ReferenceStateMachine for EngineModel {
             }
         }
         model.let_go_off_and_gone();
+        model.open_files(disk_before, matches!(step, Step::Undo));
         model
     }
 }
 
 impl Model {
+    /// Another file is at the path of `file`.
+    fn new_inode(&mut self, pack: usize, file: usize) {
+        self.last_inode += 1;
+        self.inodes[pack][file] = self.last_inode;
+    }
+
+    /// What librqbit has open once a step settled: a torrent added again, or added back as it let go of
+    /// pieces, has its files as they are now, and one missing is closed.
+    fn open_files(&mut self, disk_before: [[OnDisk; FILES]; PACKS], undo: bool) {
+        for (k, f) in (0..PACKS).flat_map(|k| (0..FILES).map(move |f| (k, f))) {
+            if !undo && disk_before[k][f] == OnDisk::Absent && self.disk[k][f] == OnDisk::Sparse {
+                self.new_inode(k, f);
+            }
+        }
+        let aways = self.aways();
+        for (id, t) in &mut self.torrents {
+            let Torrent::Pack(p) = t else { continue };
+            let (disk, away) = (&self.disk[p.pack], aways[id]);
+            let ready = p.missing.is_empty() && !p.unchecked && p.checking.is_none() && !p.unavailable && !p.delete_failed && !p.deleting;
+            if p.letting_go && ready {
+                (p.letting_go, p.reopens) = (false, true);
+            }
+            if std::mem::take(&mut p.reopens) {
+                p.open = std::array::from_fn(|f| match disk[f] {
+                    OnDisk::Absent => {
+                        let item = self.in_trash.iter().rev().find(|t| t.pack == p.pack && away[f].is_some() && t.item == Item::File(f));
+                        item.and_then(|t| self.trashed_inodes.get(&t.n).copied())
+                    }
+                    OnDisk::Valid | OnDisk::Other | OnDisk::Sparse => Some(self.inodes[p.pack][f]),
+                });
+            }
+            for f in p.missing.keys().copied().filter(|&f| disk[f] == OnDisk::Absent) {
+                p.open[f] = None;
+            }
+        }
+    }
+
     /// A file set Off that librqbit has, and that isn't at its path (deleted or moved by hand) nor
     /// in the Trash for an undo, is let go of once its torrent is Ready or Missing files with nothing
     /// on its lane (#276): librqbit has none of its pieces.
@@ -2281,7 +2376,7 @@ impl Model {
             {
                 for f in 0..FILES {
                     if p.off[f] && p.have[f] && self.disk[p.pack][f] == OnDisk::Absent && aways[id][f].is_none() {
-                        p.have[f] = false;
+                        p.lets_go(f);
                     }
                 }
             }
@@ -3751,5 +3846,49 @@ fn a_file_deleted_by_hand_isnt_counted_once_its_destination_is_gone_during_a_che
         DestinationGone { pack: 0 },
         ReleaseChecks,
         DestinationBack { pack: 0 },
+    ]);
+}
+
+/// #369, found by a 256-case run: a file librqbit had none of, written back by hand as it was, then
+/// moved to the Trash. The undo checks the torrent, as the file was replaced since librqbit opened
+/// it, and the check finds it whole: it seeds. Overwritten instead, the check finds none.
+#[test]
+fn the_undo_of_a_move_to_trash_of_a_file_put_back_by_hand_counts_what_its_check_finds() {
+    use Step::*;
+    for write in [PutBack { pack: 1, file: 1 }, Overwrite { pack: 1, file: 1 }] {
+        replay(&[DeleteFile { pack: 1, file: 1 }, Add { pack: Some(1), paused: false }, write, TrashFiles { id: 0, files: vec![1] }, Undo]);
+    }
+}
+
+/// #369: the trash refuses a file replaced by hand: it's let go of all the same, as librqbit's
+/// pieces are of the file it has open.
+#[test]
+fn a_file_replaced_by_hand_that_the_trash_refuses_is_let_go_of() {
+    use Step::*;
+    replay(&[
+        Add { pack: Some(1), paused: false },
+        PutBack { pack: 1, file: 1 },
+        Refuse(Some((1, Some(1)))),
+        TrashFiles { id: 0, files: vec![1] },
+    ]);
+}
+
+/// #379, found by a 256-case run: the model was wrong. A destination that goes during a check ends
+/// it, so a Cancel check is refused, before the checks go on or after; back, the torrent is checked.
+#[test]
+fn a_cancel_check_once_the_destination_is_gone_is_refused() {
+    use Step::*;
+    let gone = [HoldChecks, Add { pack: Some(1), paused: false }, DestinationGone { pack: 1 }, CancelCheck(0)];
+    replay(&gone);
+    let then = [ReleaseChecks, CancelCheck(0), DestinationBack { pack: 1 }];
+    replay(&gone.iter().cloned().chain(then).collect::<Vec<_>>());
+    replay(&[
+        Add { pack: Some(0), paused: false },
+        HoldChecks,
+        Add { pack: Some(1), paused: true },
+        DestinationGone { pack: 1 },
+        CancelCheck(1),
+        DestinationBack { pack: 1 },
+        CancelCheck(1),
     ]);
 }
