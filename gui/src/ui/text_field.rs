@@ -14,6 +14,7 @@ pub struct TextField<'a> {
     placeholder: String,
     width: Option<f32>,
     inner: TextInput,
+    plain: bool,
 }
 
 impl Ui {
@@ -31,6 +32,7 @@ impl Ui {
             placeholder: String::new(),
             width: None,
             inner: TextInput::new(edit).label(label).width(None),
+            plain: false,
         }
     }
 }
@@ -58,6 +60,7 @@ impl TextField<'_> {
     /// that sits in something else, which draws how it shows the focus ([`Ui::in_place`]).
     pub fn plain(mut self) -> Self {
         self.inner = self.inner.plain();
+        self.plain = true;
         self
     }
 
@@ -95,7 +98,17 @@ impl TextField<'_> {
     }
 
     fn field(self) -> El {
-        let field = el().key(self.key).child(self.inner.build(&self.ui.k));
+        let k = &self.ui.k;
+        let mut inner = self.inner.build(k);
+        if !self.plain {
+            // The kit's field is flat, its focus ring inside its edge; Phantom's keeps a sheen, and
+            // its ring around it.
+            inner = inner.gradient(k.light(0.06), k.light(0.02));
+            if self.edit.focused {
+                inner = inner.outline(1.0, 0.0, k.c.border_focus);
+            }
+        }
+        let field = el().key(self.key).child(inner);
         if !self.edit.text.is_empty() || self.placeholder.is_empty() {
             return field;
         }

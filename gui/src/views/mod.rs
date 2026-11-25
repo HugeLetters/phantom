@@ -45,6 +45,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     } else {
         table::torrent_table(s, ui, &fitted, width)
     });
+    let list = list.children((!s.torrents.is_empty()).then(|| ui.focus_goes_nowhere()));
     let mut body = col().key("body").w_full().grow(1.0).min_h(0.0).px(MARGIN).child(list);
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
         let files = torrent.content.map(|_| s.pane.details.as_ref().filter(|d| d.id == torrent.id).map_or(1, |d| d.files.len()));

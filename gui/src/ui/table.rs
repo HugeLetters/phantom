@@ -96,12 +96,15 @@ impl Ui {
             .key("toggle-button")
             .role("button")
             .label(label)
-            .w(TOGGLE_BUTTON.0)
-            .h(TOGGLE_BUTTON.1)
+            .w(TOGGLE_BUTTON.0 - 2.0)
+            .h(TOGGLE_BUTTON.1 - 2.0)
+            .mx(1.0)
+            .my(1.0)
             .center()
             .fill(c.bg_button_neutral)
-            .border(1.0, c.border_muted)
-            .radius(self.k.radius.sm)
+            // Around the fill, not over it, so it takes in the row's own colour (selected, hovered).
+            .box_shadow(rune::Shadow { spread: 1.0, color: c.border_muted, ..Default::default() })
+            .radius(self.k.radius.sm - 1.0)
             .child(icon(self.icon(icon_), 12.0).key("toggle-glyph").color(color));
         match off {
             None => button.cursor(rune::Cursor::Pointer).hover(c.hover).press(c.pressed).help(label),

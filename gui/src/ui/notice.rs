@@ -141,7 +141,7 @@ impl Ui {
 
     /// Builds a [`glyph_button`](Self::glyph_button), keyed.
     pub fn glyph(&self, key: impl Into<String>, button: rune_kit::IconButton) -> El {
-        super::keyed(key, button.build(&self.k))
+        super::keyed(key, super::ringed(button.build(&self.k), &self.k))
     }
 
     /// `trigger` (the bar's notice), with `content` above it while `open`: a raised panel attached
@@ -165,7 +165,7 @@ impl Ui {
         layer: &mut Vec<El>,
     ) -> El {
         let anchor = format!("{key}-trigger");
-        let trigger = row().key(anchor.clone()).min_w(0.0).shrink().child(trigger);
+        let trigger = row().key(anchor.clone()).min_w(0.0).shrink().child(trigger).child(self.focus_goes_nowhere());
         if !open {
             return trigger;
         }
@@ -184,7 +184,7 @@ impl Ui {
             .padding(RING_ROOM)
             .child(content);
         let fill = self.raised_fill();
-        let border = k.alpha(k.c.std_border, if k.dark { 0.6 } else { 0.4 });
+        let border = super::opaque_over(k.alpha(k.c.std_border, if k.dark { 0.6 } else { 0.4 }), k.c.page);
         let panel = col()
             .key(format!("{key}-panel"))
             .role("dialog")
