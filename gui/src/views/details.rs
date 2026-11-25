@@ -222,7 +222,7 @@ fn rename_field(s: &Phantom, ui: &Ui, room: f32) -> El {
         .grow(1.0)
         .min_w(0.0);
     let field = ui.in_place(row().w_full().h(NAME_LINE).child(field), behind).w(room + TEXT_INSET).h(NAME_LINE);
-    row().key(RENAME_FIELD).ml(-TEXT_INSET).shrink().min_w(0.0).child(field)
+    row().key(RENAME_FIELD).ml(-TEXT_INSET).shrink().min_w(0.0).child(field).child(ui.focus_goes_nowhere())
 }
 
 /// The key of the rename field's place in the header, which its tooltip hangs under.

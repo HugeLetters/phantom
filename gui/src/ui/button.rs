@@ -144,7 +144,7 @@ impl Button<'_> {
             let label = self.label.clone();
             inner = inner.variant(ButtonVariant::Ghost).label_with(move |font, _| text(label).font(font).color(color));
         }
-        let mut built = inner.build(k);
+        let mut built = super::ringed(inner.build(k), k);
         if self.fill {
             built = built.w_full();
         }

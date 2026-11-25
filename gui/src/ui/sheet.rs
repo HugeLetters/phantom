@@ -366,7 +366,8 @@ impl Ui {
     /// A raised card of rows, with a hairline between each.
     pub fn card(&self, rows: impl IntoIterator<Item = El>) -> El {
         let k = &self.k;
-        let mut card = col().w_full().padding(4.0).radius(k.radius.md).fill(k.c.bg_base).border(1.0, k.c.border_weak);
+        let mut card =
+            col().w_full().padding(4.0).radius(k.radius.md).fill(k.c.bg_base).border(1.0, super::opaque_over(k.c.border_weak, k.c.page));
         for (i, r) in rows.into_iter().enumerate() {
             if i > 0 {
                 card = card.child(el().h(1.0).mx(8.0).fill(k.c.border_weak).a11y_hidden());

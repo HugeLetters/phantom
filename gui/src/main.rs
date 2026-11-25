@@ -983,6 +983,7 @@ fn spec() -> AppSpec<Phantom> {
                 s.service = Box::new(demo_service().with_torrents(vec![short]).with_seeding(proto::SeedingLimits { ratio, time: None }));
             }),
         ],
+        families: FAMILIES,
         ..AppSpec::new("Phantom", (960.0, 540.0), || Phantom::new(Box::new(MemoryService::new())), views::view)
     }
 }
@@ -1104,6 +1105,7 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 s.app_icon.choice = Some(platform::app_icon::Icons::One { icon: "full-moon".into() });
             }),
         ],
+        families: FAMILIES,
         ..AppSpec::new("Settings", SETTINGS_SIZE, SettingsWindow::detached, views::settings::view)
     }
 }
@@ -1116,6 +1118,10 @@ fn stand_in_dark(s: &mut SettingsWindow) {
         s.looks.borrow_mut().set(preset::Appearance::Dark, look);
     }
 }
+
+/// Sans and mono are both Inter: a number cell is set in mono with tabular figures, and the columns
+/// are as wide as Inter's. (Rune's default mono is the system's monospaced face, a third wider.)
+const FAMILIES: (&str, &str) = ("Inter", "Inter");
 
 /// The size Settings first opens at, then as it was left; and the smallest it gets.
 const SETTINGS_SIZE: (f32, f32) = (600.0, 460.0);
@@ -1156,7 +1162,8 @@ fn main() {
     #[cfg(target_os = "macos")]
     if !headless {
         platform::menu_bar::install();
-        platform::open_documents::install(handle.clone());
+        let opened = handle.clone();
+        platform::open_documents::listen(move |paths| opened.update(move |s, tx| platform::open_files(s, &paths, tx)));
         platform::app_icon::appkit::install(looks.app_icons());
     }
     // The two windows, each with its own state, and the ways from one to the other (`windows`).

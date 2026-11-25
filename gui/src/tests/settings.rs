@@ -2033,6 +2033,7 @@ impl StateMachineTest for Sheet {
             Step::Arrow(side, key, right) => {
                 d.front(Which::Settings);
                 d.settings.update(|_, tx| tx.blur());
+                d.settle();
                 let r = &mut d.settings;
                 let control = format!("/edit-{key}-{}/", side.key());
                 // Tab reaches the control, wherever the focus starts: a whole cycle of the sheet's
@@ -2104,6 +2105,8 @@ impl StateMachineTest for Sheet {
                     (Which::Settings, Some(sheet)) if sheet.over() => {
                         d.front(Which::Settings);
                         d.settings.update(|_, tx| tx.blur());
+                        // A blur lands with the next frame, which comes before a person's next key.
+                        d.settle();
                     }
                     (Which::Settings, Some(sheet)) => {
                         let tab = Tab::ALL.iter().position(|t| *t == sheet.tab).unwrap();

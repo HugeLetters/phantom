@@ -58,7 +58,7 @@ fn connection_button(s: &Phantom, ui: &Ui) -> Option<El> {
         Connection::Outdated => ui.button("restart", client::display::restart_app()).on_press_tx(crate::platform::restart),
         _ => return None,
     };
-    Some(button.small().build())
+    Some(row().child(button.small().build()).child(ui.focus_goes_nowhere()))
 }
 
 /// The bar's Undo, right after the newest notice's words: the newest action's notice's Undo, in the

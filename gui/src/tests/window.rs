@@ -324,6 +324,9 @@ fn the_header_menu_hides_any_column_but_the_last() {
         rt.pointer_down(x, y);
         rt.pointer_up(x, y);
         settle(rt);
+        // The menu stays open as columns are ticked; a right-click outside it closes it.
+        rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        settle(rt);
     };
     let all: Vec<(String, bool)> = Column::ALL.iter().map(|c| (c.title().to_owned(), true)).collect();
     assert_eq!(menu(&mut rt), all, "every column, all ticked");

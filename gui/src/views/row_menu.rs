@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use proto::{AbsolutePath, TorrentId};
-use rune::{El, PointerPress, Tx, el};
+use rune::{Align, El, PointerPress, Side, Tx, el};
 
 use crate::commands::{OnTorrents, on_torrents, run_on_torrents};
 use crate::menu::{Event, Menu, Open};
@@ -55,10 +55,16 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layout: impl Fn
         layer,
     );
     // The kit's items take no hover handler, so Phantom follows the pointer over them itself: a
-    // zone over each row, drawn where the row was, that takes no presses and no hover of its own.
+    // zone over each row that takes no presses and no hover of its own. It's anchored to its row
+    // (under it, pulled up by its height), which makes it part of the open menu: Rune leaves the
+    // pointer nothing else while a modal is up.
     for (i, opens) in rows {
-        let Some([x, y, w, h]) = layout(&format!("row-menu-item{i}")) else { continue };
-        let zone = el().key(format!("row-menu-zone{i}")).absolute(x, y).size(w, h).a11y_hidden();
+        let Some([_, _, w, h]) = layout(&format!("row-menu-item{i}")) else { continue };
+        let zone = el()
+            .key(format!("row-menu-zone{i}"))
+            .size(w, h)
+            .anchored(format!("row-menu-item{i}"), Side::Bottom, Align::Start, -h)
+            .a11y_hidden();
         layer.push(match opens {
             true => zone
                 .on_hover_change(move |s: &mut Phantom, inside, _: &mut Tx| {

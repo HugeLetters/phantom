@@ -119,7 +119,7 @@ impl Ui {
             .min_h(0.0)
             .radius(8.0)
             .fill(c.layer_01)
-            .border(1.0, c.border_weak)
+            .border(1.0, super::opaque_over(c.border_weak, c.page))
             .child(search)
             .child(el().key("rule").w_full().h(1.0).fill(c.border_muted).a11y_hidden())
             .child(rows)
