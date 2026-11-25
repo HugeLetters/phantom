@@ -57,6 +57,8 @@ pub struct SettingsWindow {
     pub window: Window,
     /// Whether a field was being edited, as last told to the main window, for Edit ▸ Undo.
     told_editing: bool,
+    /// Whether a field had the focus, as last told to the main window, for the Edit menu.
+    told_field: bool,
 }
 
 impl SettingsWindow {
@@ -68,7 +70,7 @@ impl SettingsWindow {
         inbox: Inbox<SettingsWindow>,
         window: Window,
     ) -> Self {
-        Self { sheet: None, app_icon, looks, saved, default_unavailable: None, main, inbox, window, told_editing: false }
+        Self { sheet: None, app_icon, looks, saved, default_unavailable: None, main, inbox, window, told_editing: false, told_field: false }
     }
 
     /// Settings alone, linked to no main window, as in a scene of it or a test of one window.
@@ -1003,6 +1005,12 @@ pub fn close(s: &mut SettingsWindow) {
     s.window.close();
 }
 
+/// ⌘W and File ▸ Close Window: a sheet over it (a Look Preset's, the App icon's) first, then the
+/// window.
+pub fn close_front(s: &mut SettingsWindow) {
+    if s.sheet.as_ref().is_some_and(SettingsSheet::over) { close_over(s) } else { close(s) }
+}
+
 /// The window closed, also by its close button: the field being edited is applied first.
 pub fn closed(s: &mut SettingsWindow) {
     // A Look Preset's sheet keeps what was done in it, as Done does.
@@ -1020,9 +1028,18 @@ pub fn left_window(s: &mut SettingsWindow) {
     leave_all(s);
 }
 
-/// Called before every frame: tells the main window when a field starts or stops being edited, so
-/// Edit ▸ Undo is the field's own then ([`crate::changes::menu_title`]).
+/// Called before every frame: tells the main window when a field takes or loses the focus, for the
+/// Edit menu, and when it starts or stops being edited, so Edit ▸ Undo is the field's own then
+/// ([`crate::changes::menu_title`]).
 pub fn tell_editing(s: &mut SettingsWindow) {
+    let field = s.sheet.as_ref().is_some_and(|sheet| {
+        let row = sheet.text_rows().into_iter().any(|row| sheet.field(row).is_some_and(|f| f.focused));
+        row || sheet.save_as.as_ref().is_some_and(|save| save.name.focused)
+    });
+    if field != s.told_field {
+        s.told_field = field;
+        s.main.post(move |s, _| s.settings_field = field);
+    }
     let editing = s.sheet.as_ref().is_some_and(|sheet| sheet.editing(&s.looks.borrow(), &s.saved));
     if editing != s.told_editing {
         s.told_editing = editing;

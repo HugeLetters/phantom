@@ -178,7 +178,7 @@ fn a_failed_open_offers_check_which_checks_the_torrent() {
         rt.state.torrents.iter().find(|t| t.id == 1).and_then(crate::model::reveal_target).map(std::path::Path::to_owned).unwrap();
     tap(&mut rt, "rows/1");
     shown.lose(&location);
-    rt.key(super::shortcuts::keys(OnTorrents::Open)[2].event());
+    rt.key(super::shortcuts::keys(OnTorrents::Open)[1].event());
     settle(&mut rt);
     let id = newest(&rt);
     let list = list_of(&mut rt, id);

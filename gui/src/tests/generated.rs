@@ -1998,6 +1998,7 @@ fn item_shortcut(label: &str) -> Option<crate::commands::OnTorrents> {
     match label {
         "Open" => Some(OnTorrents::Open),
         "Reveal in Finder" => Some(OnTorrents::Reveal),
+        "Copy magnet link" => Some(OnTorrents::CopyMagnet),
         l if l.starts_with("Remove") => Some(OnTorrents::Remove),
         l if l.starts_with("Delete") => Some(OnTorrents::Delete),
         _ => None,

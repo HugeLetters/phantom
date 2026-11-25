@@ -5,13 +5,15 @@
 //!
 //! | Command    | Keys                           |
 //! |------------|--------------------------------|
-//! | Open       | ⌘O, ⌘↓, Return                 |
+//! | Open       | ⌘O, Return                     |
 //! | Reveal     | ⇧⌘O                            |
 //! | Add file…  | ⇧⌘A                            |
 //! | Remove     | ⌫, with no confirmation        |
 //! | Delete     | ⌘⌫, with no confirmation       |
+//! | Copy       | ⌘C: each selected one's link   |
+//! | Resume or Pause | Space in the list ([`on_list_key`]) |
 //! | Undo       | ⌘Z: the newest change          |
-//! | Commands…  | ⌘P: the command palette        |
+//! | Command palette… | ⌘P: the command palette        |
 //!
 //! With the file list focused, Open, Reveal and ⌘⌫ are the file commands with those keys, about the
 //! selected files instead of the torrent (⌘⌫ is Move to Trash, which sets them Off and moves them).
@@ -22,7 +24,7 @@
 
 use rune::{Key, KeyEvent, Mods, Tx};
 
-use crate::commands::{Command, OnFiles, OnTorrents, on_files};
+use crate::commands::{Command, OnFiles, OnTorrents, TOGGLE_KEY, on_files, toggle};
 use crate::model::{Phantom, details_torrent, look_at_file, remove_selected, selected_torrents};
 use crate::platform::{Show, open_torrent, press_torrent};
 
@@ -38,8 +40,8 @@ pub struct Chord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Named {
     Letter(char),
-    Down,
     Return,
+    Space,
     Backspace,
 }
 
@@ -52,11 +54,24 @@ impl Chord {
     pub fn hint(self) -> String {
         let key = match self.key {
             Named::Letter(c) => c.to_ascii_uppercase().to_string(),
-            Named::Down => "↓".into(),
+            Named::Space => "Space".into(),
             Named::Return => "↩".into(),
             Named::Backspace => "⌫".into(),
         };
         format!("{}{}{key}", if self.shift { "⇧" } else { "" }, if self.cmd { "⌘" } else { "" })
+    }
+
+    /// As Rune parses a menu's key: "cmd+shift+o".
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn accelerator(self) -> String {
+        let key = match self.key {
+            Named::Letter(',') => "comma".into(),
+            Named::Letter(c) => c.to_string(),
+            Named::Return => "enter".into(),
+            Named::Space => "space".into(),
+            Named::Backspace => "backspace".into(),
+        };
+        format!("{}{}{key}", if self.cmd { "cmd+" } else { "" }, if self.shift { "shift+" } else { "" })
     }
 
     /// Whether `ev` is this chord. Option and Control mustn't be held.
@@ -64,7 +79,8 @@ impl Chord {
         let Mods { shift, cmd, alt, ctrl, .. } = ev.mods;
         let key = match (&ev.key, self.key) {
             (Key::Command(c), Named::Letter(l)) => c.eq_ignore_ascii_case(&l),
-            (Key::Down, Named::Down) | (Key::Enter, Named::Return) | (Key::Backspace, Named::Backspace) => true,
+            (Key::Enter, Named::Return) | (Key::Backspace, Named::Backspace) => true,
+            (Key::Text(t), Named::Space) => t == " ",
             _ => false,
         };
         // A Cmd letter arrives as `Key::Command` whether or not `mods.cmd` says so.
@@ -77,7 +93,7 @@ impl Chord {
     pub fn event(self) -> KeyEvent {
         let key = match self.key {
             Named::Letter(c) => Key::Command(c),
-            Named::Down => Key::Down,
+            Named::Space => Key::Text(" ".into()),
             Named::Return => Key::Enter,
             Named::Backspace => Key::Backspace,
         };
@@ -109,9 +125,10 @@ pub fn by_hint(shown: &str) -> Option<Command> {
     Command::all().filter(|c| !matches!(c, Command::Files(_))).find(|c| c.spec().hint().as_deref() == Some(shown))
 }
 
-/// Runs the shortcut `ev` is, while nothing modal is open; whether it was one.
+/// Runs the shortcut `ev` is, while nothing modal is open (a menu, the palette, a dialog); whether
+/// it was one.
 pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
-    if s.menu.is_open() || s.palette.is_open() {
+    if s.menu.is_open() || s.palette.is_open() || s.clash.is_some() {
         return false;
     }
     let Some(command) = command_of(ev).filter(|c| s.mounted.offers(*c)) else { return false };
@@ -120,9 +137,21 @@ pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         (Command::Torrents(OnTorrents::Open), true) => {
             details_torrent(&s.table, &s.torrents).map(|t| t.id).into_iter().for_each(|id| open_torrent(s, id))
         }
-        (Command::Torrents(c), _) => run(s, c),
+        (Command::Torrents(c), _) => run(s, c, tx),
         (Command::App(c), _) => crate::commands::run_in_app(s, c, tx),
         (Command::Files(_), _) => unreachable!("the torrent list's keys are no file command's"),
+    }
+    true
+}
+
+/// Space while the torrent list has the focus, before the list itself sees it: the selection pauses
+/// or resumes, once per press. Whether it was that.
+pub fn on_list_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if !TOGGLE_KEY.matches(ev) || s.menu.is_open() || s.palette.is_open() || s.clash.is_some() {
+        return false;
+    }
+    if let Some(command) = toggle(s).filter(|c| s.mounted.offers(*c) && !tx.key_repeat()) {
+        crate::commands::run_on_torrents(s, command, tx);
     }
     true
 }
@@ -131,7 +160,7 @@ pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// the file menu offers them, and are the list's even where it doesn't (nothing is selected, or the
 /// file is off disk), so a key meant for a file never reaches the torrent. Whether it was one.
 pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
-    if s.menu.is_open() || s.palette.is_open() {
+    if s.menu.is_open() || s.palette.is_open() || s.clash.is_some() {
         return false;
     }
     let pressed = OnFiles::ALL.into_iter().find(|c| c.spec().keys.iter().any(|k| k.matches(ev)));
@@ -146,13 +175,14 @@ pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
 /// What a torrent command's key does to the selection: Open and Reveal for exactly one torrent,
 /// looking at the disk first, Remove and Delete for every one selected (only where it applies to
 /// them all, as the menu offers it). The others have no key.
-fn run(s: &mut Phantom, command: OnTorrents) {
+fn run(s: &mut Phantom, command: OnTorrents, tx: &mut Tx) {
     let single = details_torrent(&s.table, &s.torrents).map(|t| t.id);
     match command {
         OnTorrents::Open => single.into_iter().for_each(|id| press_torrent(s, id, Show::Open)),
         OnTorrents::Reveal => single.into_iter().for_each(|id| press_torrent(s, id, Show::Reveal)),
         OnTorrents::Remove => remove_all(s, proto::Action::Remove),
         OnTorrents::Delete => remove_all(s, proto::Action::Delete),
+        OnTorrents::CopyMagnet => crate::model::copy_magnet(s, tx),
         other => unreachable!("{other:?} has no key"),
     }
 }
@@ -199,7 +229,7 @@ mod tests {
         ]
         .into();
         assert_eq!(hints, ["⌘O", "⇧⌘O", "⇧⌘A", "⌫", "⌘⌫", "⌘Z", "⌘P"]);
-        assert_eq!(keys(OnTorrents::Open).iter().map(|k| k.hint()).collect::<Vec<_>>(), ["⌘O", "⌘↓", "↩"]);
+        assert_eq!(keys(OnTorrents::Open).iter().map(|k| k.hint()).collect::<Vec<_>>(), ["⌘O", "↩"]);
     }
 
     /// Option, Control or a missing modifier make it another key.

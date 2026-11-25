@@ -320,6 +320,7 @@ fn file_table(s: &Phantom, ui: &Ui, settable: bool) -> El {
         .grow(1.0)
         .min_h(0.0)
         .on_key(|s: &mut Phantom, ev: &rune::KeyEvent, _: &mut Tx| shortcuts::on_file_key(s, ev))
+        .on_focus_within_change(|s: &mut Phantom, within, _: &mut Tx| s.files_focused = within)
         .child(ui.table(s, table).grow(1.0).min_h(0.0))
 }
 

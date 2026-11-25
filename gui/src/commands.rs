@@ -1,8 +1,7 @@
 //! Every command the app offers, in one list (#33): each with its name, the icon a theme draws for
-//! it, its keys, and when it's available. The row menu, the file menu, the command palette, the
-//! toolbar's Resume and Pause, the empty list's hint and the keys (`shortcuts`) all read from here,
-//! so a name, an icon or a key can't differ between two places. The menu bar doesn't yet; its own
-//! items would read [`Spec`] the same way.
+//! it, its keys, and when it's available. The row menu, the file menu, the command palette, the menu
+//! bar (`menu_bar`), the empty list's hint and the keys (`shortcuts`) all read from here, so a name,
+//! an icon or a key can't differ between two places.
 //!
 //! There are three kinds, each its own type, so a place offers only its own kind (the row menu holds
 //! [`OnTorrents`], the file menu [`OnFiles`]):
@@ -49,7 +48,10 @@ impl Spec {
     }
 }
 
-const OPEN_KEYS: &[Chord] = &[chord(Named::Letter('o'), true, false), chord(Named::Down, true, false), chord(Named::Return, false, false)];
+const OPEN_KEYS: &[Chord] = &[chord(Named::Letter('o'), true, false), chord(Named::Return, false, false)];
+const COPY_KEYS: &[Chord] = &[chord(Named::Letter('c'), true, false)];
+/// Pauses or resumes the selection by its focused torrent ([`toggle`]), in the list.
+pub const TOGGLE_KEY: Chord = chord(Named::Space, false, false);
 const REVEAL_KEYS: &[Chord] = &[chord(Named::Letter('o'), true, true)];
 const DELETE_KEYS: &[Chord] = &[chord(Named::Backspace, true, false)];
 const REMOVE_KEYS: &[Chord] = &[chord(Named::Backspace, false, false)];
@@ -104,7 +106,7 @@ impl OnTorrents {
             OnTorrents::Reveal => ("reveal", display::reveal_in_finder(), Some(Icon::Reveal), REVEAL_KEYS),
             OnTorrents::MoveTo => ("move", display::move_to(), Some(Icon::MoveTo), &[]),
             OnTorrents::Rename => ("rename", display::rename(), Some(Icon::Rename), &[]),
-            OnTorrents::CopyMagnet => ("copy-magnet", "Copy magnet link", Some(Icon::Copy), &[]),
+            OnTorrents::CopyMagnet => ("copy-magnet", "Copy magnet link", Some(Icon::Copy), COPY_KEYS),
             OnTorrents::Remove => ("remove", "Remove", Some(Icon::Remove), REMOVE_KEYS),
             OnTorrents::Delete => ("delete", "Delete", Some(Icon::Trash), DELETE_KEYS),
         };
@@ -189,6 +191,17 @@ impl<'a> Selected<'a> {
 pub fn on_torrents(s: &Phantom) -> Vec<OnTorrents> {
     let selected = Selected::of(&s.table, &s.torrents, s.target_there);
     OnTorrents::ALL.into_iter().filter(|c| s.mounted.offers(*c) && c.available(&selected)).collect()
+}
+
+/// What Space and Torrent ▸ Resume or Pause do to the selection, by its focused torrent (the
+/// selected one the keyboard is on, else the first selected in the list): running, every selected
+/// one pauses; paused, every one resumes. An Error counts as running. None with nothing selected.
+pub fn toggle(s: &Phantom) -> Option<OnTorrents> {
+    let selected = selected_torrents(&s.table);
+    let cursor = s.table.cursor().and_then(|id| id.parse().ok()).filter(|id| selected.contains(id));
+    let focused = s.torrents.iter().find(|t| cursor.is_none_or(|id| t.id == id) && selected.contains(&t.id))?;
+    let running = matches!(focused.status, proto::Status::Error { .. }) || crate::model::toggle_icon(focused) == Action::Pause;
+    Some(if running { OnTorrents::Pause } else { OnTorrents::Resume })
 }
 
 /// The commands the screen shown now offers, as its views registered them while they were built
@@ -298,7 +311,7 @@ impl InApp {
         let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
             InApp::AddFile => ("add-file", "Add file…", Some(Icon::AddFile), ADD_FILE_KEYS),
             InApp::Undo => ("undo", client::display::undo(), Some(Icon::Undo), UNDO_KEYS),
-            InApp::Palette => ("palette", "Commands…", Some(Icon::Search), PALETTE_KEYS),
+            InApp::Palette => ("palette", "Command palette…", Some(Icon::Search), PALETTE_KEYS),
         };
         Spec { id, name, icon, keys }
     }

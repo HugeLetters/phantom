@@ -183,3 +183,15 @@ heading shows only while one of its commands matches. Typing filters by name,
 the letters in order; ↑ ↓ move, Return runs, Escape closes. A command that asks for more starts its
 usual flow (Rename… the header's name field, Move to… the folder picker).
 _Avoid_: launcher, quick open, command bar
+
+**Menu bar**:
+macOS's, at the top of the screen: Phantom, File, Edit, Torrent, View, Window, Help. What doesn't
+apply is greyed there (the right-click menus and the palette leave it out), but Redo and Cut, which
+are left out when no field has the focus. Copy copies the selected torrents' magnet links and Paste
+adds what's pasted (Copy Magnet Link, Paste and Add), in a field the text. Titles are in title case;
+buttons and the window's own menus are in sentence case.
+
+**Focused torrent**:
+The selected torrent the keyboard is on. Space in the list, and Torrent ▸ Pause or Resume, go by
+it: running (Error counts), every selected torrent pauses; paused, every one resumes.
+_Avoid_: current torrent, active torrent

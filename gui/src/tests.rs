@@ -2,6 +2,7 @@
 
 mod files;
 mod generated;
+mod menu_bar;
 mod moving;
 mod notice_actions;
 mod notices;
@@ -886,12 +887,11 @@ fn return_and_a_double_click_on_a_row_whose_location_is_gone_say_so_and_the_comm
     shown.lose(&location);
 
     shortcut(&mut rt, OnTorrents::Open);
-    rt.key(shortcuts::keys(OnTorrents::Open)[1].event());
     shortcut(&mut rt, OnTorrents::Reveal);
     settle(&mut rt);
-    assert_eq!(notice(&rt), None, "⌘O, ⌘↓ and ⇧⌘O say nothing");
+    assert_eq!(notice(&rt), None, "⌘O and ⇧⌘O say nothing");
 
-    let enter = shortcuts::keys(OnTorrents::Open)[2].event();
+    let enter = shortcuts::keys(OnTorrents::Open)[1].event();
     rt.key(enter.clone());
     settle(&mut rt);
     assert_eq!(notice(&rt), Some("Can't open the file"));
@@ -1700,7 +1700,7 @@ fn each_open_key_opens_the_selected_torrent_and_shift_cmd_o_reveals_it() {
             how
         })
         .collect();
-    assert_eq!(hows, [Show::Open, Show::Open, Show::Open, Show::Reveal], "⌘O, ⌘↓ and Return open; ⇧⌘O reveals");
+    assert_eq!(hows, [Show::Open, Show::Open, Show::Reveal], "⌘O and Return open; ⇧⌘O reveals");
 }
 
 #[test]

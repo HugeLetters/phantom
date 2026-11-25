@@ -382,6 +382,11 @@ pub fn copy_magnet_link() -> &'static str {
     "Copy magnet link"
 }
 
+/// That Copy magnet link worked for `n` torrents: "Copied 3 magnet links".
+pub fn copied_magnets(n: usize) -> String {
+    if n == 1 { copied_magnet().to_owned() } else { format!("Copied {n} magnet links") }
+}
+
 /// What an add did, as the bar's line: "Added the torrent", or "Already in the list". The
 /// torrent's name ([`Added::name`]) is the list's.
 pub fn added_line(added: &Added) -> &'static str {
