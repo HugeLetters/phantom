@@ -1210,6 +1210,11 @@ async fn engine_gated(dir: &Path, gate: &Arc<super::files::Gate>) -> Engine {
 
 /// An engine whose storage waits at `gate` at `at` while it's held.
 async fn engine_gated_at(dir: &Path, at: super::files::At, gate: &Arc<super::files::Gate>) -> Engine {
+    engine_guarded(dir, super::files::Guard::default().with_gate(at, gate.clone())).await
+}
+
+/// An engine whose storage is `guard`'s.
+async fn engine_guarded(dir: &Path, guard: super::files::Guard) -> Engine {
     let config = Config {
         data_dir: dir.join("data"),
         download_dir: dir.join("downloads"),
@@ -1225,7 +1230,6 @@ async fn engine_gated_at(dir: &Path, at: super::files::At, gate: &Arc<super::fil
     let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
         Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
     });
-    let guard = super::files::Guard::default().with_gate(at, gate.clone());
     Engine::start_with(config, add_into, guard, super::Looks::real()).await.unwrap()
 }
 
@@ -5579,6 +5583,7 @@ async fn send_end(engine: &Engine, id: u64, task: tokio::task::Id, added: anyhow
     engine.inspect(|_| ()).await;
 }
 
+mod counted;
 mod crashed;
 mod letgo;
 mod links;
