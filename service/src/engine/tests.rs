@@ -5551,11 +5551,8 @@ mod letgo;
 mod links;
 mod moving;
 mod never_cut;
-<<<<<<< HEAD
 mod oracle;
-=======
 mod off_gone;
->>>>>>> e09de924 (A file Off and gone with none had, set Normal, downloads into the file at its path (#402))
 mod renaming;
 
 /// A .torrent that can't be read at a start keeps its torrent (#244's review): listed under its id,
