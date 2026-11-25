@@ -251,6 +251,19 @@ mod macos {
         assert!(!root.performKeyEquivalent(&press), "closed again");
         assert_eq!(item.keyEquivalent().to_string(), "");
 
+        // With the file list focused the items show no key: opened, they have none and a press is
+        // matched by nothing, the menu's ⌫ and ⌘⌫ included.
+        crate::menu_bar::arrange("Torrent", Vec::new());
+        // SAFETY: the menu's delegate, sent what AppKit sends it.
+        unsafe {
+            let delegate: Retained<AnyObject> = msg_send![&menu, delegate];
+            let _: () = msg_send![&delegate, menuNeedsUpdate: &*menu];
+            assert_eq!(item.keyEquivalent().to_string(), "", "open, no key");
+            assert!(!root.performKeyEquivalent(&press), "open, no key: a press does nothing");
+            let _: () = msg_send![&delegate, menuDidClose: &*menu];
+        }
+        crate::menu_bar::arrange("Torrent", shown());
+
         // Help's search looks through a menu that never opens: its keys go as Help closes.
         crate::menu_bar::watch_tracking();
         let post = |name: &str| {

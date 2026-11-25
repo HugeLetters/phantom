@@ -83,6 +83,8 @@ pub struct Phantom {
     pub settings_editing: bool,
     /// A field of Settings has the focus, as Settings last said: Edit is the field's own there.
     pub settings_field: bool,
+    /// The file list of the details pane has the focus, as it last said: ⌫ and ⌘⌫ are the files' then.
+    pub files_focused: bool,
     /// The columns the list last drew, for View ▸ Columns.
     pub drawn_columns: std::cell::RefCell<Vec<layout::Column>>,
     /// The Active Look Preset, and the look each Appearance shows: Settings' too.
@@ -362,6 +364,7 @@ impl Phantom {
             front: Which::Main,
             settings_editing: false,
             settings_field: false,
+            files_focused: false,
             drawn_columns: Default::default(),
             looks: Shared::default(),
             latest: (0, 0),

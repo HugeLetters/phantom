@@ -104,6 +104,10 @@ fn status(rt: &Runtime<Phantom>, id: u64) -> Status {
     rt.state.torrents.iter().find(|t| t.id == id).expect("listed").status.clone()
 }
 
+fn focused_in_files(rt: &Runtime<Phantom>) -> bool {
+    rt.elements().iter().any(|e| e.focused && !e.exiting && e.path.contains("files"))
+}
+
 fn focus_link(rt: &mut Runtime<Phantom>) {
     tap(rt, "magnet-field");
     settle(rt);
@@ -143,6 +147,7 @@ fn the_menus_with_a_torrent_selected() {
     for (id, on) in [("pause", true), ("cancel-check", false), ("cancel-move", false), ("rename", true), ("remove", true)] {
         assert_eq!(enabled(s, MAIN, id), on, "{id}");
     }
+    assert_eq!(menu(s, MAIN, "View").last().map(String::as_str), Some("Command Palette…  ⌘P"));
     assert_eq!(menu(s, MAIN, "Window"), ["Minimize  ⌘M", "Zoom", "—", "Phantom"]);
     assert!(menu(s, MAIN, "Help").is_empty(), "macOS's search only");
 }
@@ -244,6 +249,37 @@ fn a_fields_keys_never_reach_the_torrents() {
     select(&mut rt, 1);
     press(&mut rt, plain(Key::Backspace));
     assert_eq!(rt.state.torrents.len(), 2, "one, once");
+}
+
+/// With the file list focused, ⌘⌫ is the files' (Trash) and ⌫ nothing of the torrent's: Remove and
+/// Delete show no key, stay pickable, and follow the focus back to the list.
+#[test]
+fn the_file_lists_focus_takes_removes_keys_off_its_items() {
+    let file = |index: usize| proto::File {
+        index,
+        path: format!("0{index}.flac").into(),
+        size_bytes: 100,
+        progress_bytes: 0,
+        priority: proto::Priority::Normal,
+        missing: false,
+        on_disk: false,
+    };
+    let mut rt = app(MemoryService::new()
+        .with_torrents(vec![crate::t(1, "Album", Status::Downloading, 10, 100, 0, 0, 0)])
+        .with_files(1, (0..3).map(file).collect()));
+    settle(&mut rt);
+    select(&mut rt, 1);
+    let keys = |rt: &Runtime<Phantom>| (item(&rt.state, MAIN, "remove"), item(&rt.state, MAIN, "delete"));
+    let (remove, delete) = keys(&rt);
+    assert!(matches!(remove.keys, Keys::Shown(_)) && matches!(delete.keys, Keys::Shown(_)), "the list's keys");
+    tap(&mut rt, "files/viewport/rows/0");
+    assert!(focused_in_files(&rt), "the file list has the focus");
+    let (remove, delete) = keys(&rt);
+    assert_eq!((remove.keys, delete.keys), (Keys::None, Keys::None), "no key");
+    assert!(remove.enabled && delete.enabled, "still pickable");
+    select(&mut rt, 1);
+    let (remove, delete) = keys(&rt);
+    assert!(matches!(remove.keys, Keys::Shown(_)) && matches!(delete.keys, Keys::Shown(_)), "the list again");
 }
 
 /// Space in the list, and Torrent ▸ Pause or Resume, go by the focused torrent.

@@ -311,7 +311,7 @@ impl InApp {
         let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
             InApp::AddFile => ("add-file", "Add file…", Some(Icon::AddFile), ADD_FILE_KEYS),
             InApp::Undo => ("undo", client::display::undo(), Some(Icon::Undo), UNDO_KEYS),
-            InApp::Palette => ("palette", "Commands…", Some(Icon::Search), PALETTE_KEYS),
+            InApp::Palette => ("palette", "Command palette…", Some(Icon::Search), PALETTE_KEYS),
         };
         Spec { id, name, icon, keys }
     }

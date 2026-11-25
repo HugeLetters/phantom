@@ -121,7 +121,7 @@ pub fn build(s: &Phantom, around: Around) -> Vec<Menu> {
             ],
         },
         edit(s, field, live, settings),
-        torrent(s, live, field),
+        torrent(s, live, field, main && s.files_focused && s.mounted.offers(commands::OnFiles::MoveToTrash)),
         view(s, live),
         Menu {
             name: "Window",
@@ -165,14 +165,16 @@ fn edit(s: &Phantom, field: bool, live: bool, settings: bool) -> Menu {
     }
 }
 
-fn torrent(s: &Phantom, live: bool, field: bool) -> Menu {
+fn torrent(s: &Phantom, live: bool, field: bool, files: bool) -> Menu {
     use OnTorrents::{CancelCheck, CancelMove, Check, Delete, MoveTo, Open, Pause, Remove, Rename, Reveal};
     let ids = selected_torrents(&s.table);
     // The disk is looked at when the item is picked, not while the menu is built.
     let selected = Selected::of(&s.table, &s.torrents, true);
     let item = |c: OnTorrents, keys: Option<Chord>| {
-        // ⌫ and ⌘⌫ are a focused field's, so the items showing them are greyed then.
+        // ⌫ and ⌘⌫ are a focused field's, so the items showing them are greyed then; the file list's
+        // too, so they show no key then (and AppKit matches none), but still work picked.
         let fields = field && matches!(c, Remove | Delete);
+        let keys = if files && matches!(c, Remove | Delete) { None } else { keys };
         let enabled = live && !fields && s.mounted.offers(c) && c.available(&selected);
         let Spec { id, name, .. } = c.spec();
         own(id, &title_case(name), keys.map_or(Keys::None, Keys::Shown), enabled, Pick::Torrents(c, ids.clone()))

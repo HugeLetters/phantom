@@ -13,7 +13,7 @@
 //! | Copy       | ⌘C: each selected one's link   |
 //! | Resume or Pause | Space in the list ([`on_list_key`]) |
 //! | Undo       | ⌘Z: the newest change          |
-//! | Commands…  | ⌘P: the command palette        |
+//! | Command palette… | ⌘P: the command palette        |
 //!
 //! With the file list focused, Open, Reveal and ⌘⌫ are the file commands with those keys, about the
 //! selected files instead of the torrent (⌘⌫ is Move to Trash, which sets them Off and moves them).
