@@ -1138,3 +1138,84 @@ async fn a_piece_shared_with_a_file_replaced_by_hand_is_let_go_of_for_the_neighb
     assert_eq!(saved_pieces(dir.path(), &hash), 2, "pieces 2 and 3 only");
     engine.stop().await;
 }
+
+/// #369: what a peer is sent of a file written by hand, then moved to the Trash: after its undo, only
+/// what the undo's check read at its path (all of one written back as it was, though librqbit had none of it
+/// before the move; none of one overwritten); after a move the trash refused, none, whatever is there.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_peer_is_sent_of_a_file_written_by_hand_only_what_the_undo_of_its_move_to_trash_checked() {
+    use librqbit::{AddTorrent, AddTorrentOptions, AddTorrentResponse, CreateTorrentOptions, ListenerOptions, SessionOptions};
+    const LEN: u64 = 65536;
+    // (The bytes written are the torrent's, the trash refuses the file, what's had of it then.)
+    for (valid, refused, want) in [(true, false, LEN), (false, false, 0), (true, true, 0)] {
+        let case = format!("valid {valid}, refused {refused}");
+        let dir = temp();
+        let options = SessionOptions {
+            dht: None,
+            disable_trackers: true,
+            disable_local_service_discovery: true,
+            listen: Some(ListenerOptions { listen_addr: ([127, 0, 0, 1], 0).into(), ..Default::default() }),
+            ..Default::default()
+        };
+        let leecher = librqbit::Session::new_with_opts(dir.path().join("leecher-session"), options).await.unwrap();
+        let announce = tracker(leecher.listen_addr().expect("the leecher listens").port());
+        let pack = dir.path().join("downloads/pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
+            std::fs::write(pack.join(name), (0..LEN).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+        }
+        let options = CreateTorrentOptions { name: None, trackers: vec![announce], piece_length: Some(16384) };
+        let created = librqbit::create_torrent(&pack, options, &librqbit::spawn_utils::BlockingSpawner::new(1)).await.unwrap();
+        let bytes = created.as_bytes().unwrap().to_vec();
+        let leech = dir.path().join("leech");
+        std::fs::create_dir_all(&leech).unwrap();
+        let opts = AddTorrentOptions { output_folder: Some(leech.to_str().unwrap().to_owned()), ..Default::default() };
+        let Ok(AddTorrentResponse::Added(_, leeching)) = leecher.add_torrent(AddTorrent::from_bytes(bytes.clone()), Some(opts)).await
+        else {
+            panic!("added")
+        };
+        // Added stopped with the file not there, so librqbit has none of it, then written by hand.
+        let refusing = Arc::new(Mutex::new(Vec::new()));
+        let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), Default::default()).await;
+        let (first, second) = (pack.join("a.bin"), pack.join("b.bin"));
+        let original = std::fs::read(&first).unwrap();
+        std::fs::remove_file(&first).unwrap();
+        let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(bytes), true).await.unwrap().id;
+        wait_for(&engine, id, Status::Paused).await;
+        let file = if name(&engine, id, 0).await == "a.bin" { 0 } else { 1 };
+        assert_eq!(librqbit_progress(&engine, id).await[file], 0, "{case}");
+        let written = if valid { original } else { vec![9u8; LEN as usize] };
+        let new = dir.path().join("new.bin");
+        std::fs::write(&new, &written).unwrap();
+        std::fs::rename(&new, &first).unwrap();
+        if refused {
+            refusing.lock().unwrap().push(first.clone());
+            engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap_err();
+        } else {
+            engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
+            engine.undo().await.unwrap();
+        }
+        assert_eq!(std::fs::read(&first).unwrap(), written, "{case}: what was written is at the path");
+        let counted = until_librqbit_counts(&engine, id, file, want).await;
+        assert_eq!((counted[file], counted[1 - file]), (want, LEN), "{case}");
+        // The engine finds the leecher only now, as it starts.
+        engine.command(id, TorrentCommand::Resume).await.unwrap();
+        for _ in 0..1500 {
+            if leeching.stats().progress_bytes == want + LEN {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stats = leeching.stats();
+        assert_eq!((stats.file_progress[file], stats.file_progress[1 - file]), (want, LEN), "{case}");
+        // Counted as received whatever its hash: nothing else was sent.
+        assert_eq!(stats.live.expect("live").snapshot.fetched_bytes, want + LEN, "{case}");
+        assert_eq!(std::fs::read(leech.join("b.bin")).unwrap(), std::fs::read(&second).unwrap(), "{case}");
+        if want > 0 {
+            assert_eq!(std::fs::read(leech.join("a.bin")).unwrap(), written, "{case}");
+        }
+        engine.stop().await;
+        leecher.stop().await;
+    }
+}
