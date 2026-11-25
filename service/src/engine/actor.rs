@@ -1260,6 +1260,11 @@ impl Actor {
         let seen = self.size_checked(id);
         self.look_at_files(id, seen.as_ref());
         let Some(seen) = seen else { return };
+        if matches!(seen, Observation::Files(_)) && self.torrents.get(&id).is_some_and(|t| !t.record.reached) {
+            // Judged above as it was; known to have been reached from now on.
+            self.torrents.get_mut(&id).expect("just found").record.reached = true;
+            self.save();
+        }
         if let Err(e) = self.event(id, Event::Observed(seen)).await {
             warn!(id, error = ?e, "failed to follow the torrent's files");
         }
@@ -1307,7 +1312,14 @@ impl Actor {
         }
         // Gone while its files were looked at, every one seemed missing: it's the destination that is.
         Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent))) {
-            Ok(disk) => Observation::Files(disk),
+            Ok(mut disk) => {
+                // Away before its files were ever looked at (added, or its info arrived, while the
+                // drive was away): a file not there may never have been made, and the check makes it.
+                if matches!(torrent.lifecycle.phase, Phase::DestinationUnavailable { .. }) && !torrent.record.reached {
+                    disk.files.retain(|_, f| f.at.is_some());
+                }
+                Observation::Files(disk)
+            }
             Err(reason) => Observation::DestinationGone { reason },
         })
     }
@@ -1526,6 +1538,8 @@ impl Actor {
                 torrent.record.name = handle.name().or(torrent.record.name.take());
                 torrent.record.gets = Gets::Every;
                 torrent.record.info = Some(info);
+                // librqbit makes its files as it gets the torrent, unless the destination is away.
+                torrent.record.reached = files::unavailable(&torrent.record.destination).is_none();
             }
             Err(e) => warn!(id, error = %e, "can't read the torrent's info"),
         }

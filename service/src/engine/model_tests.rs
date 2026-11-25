@@ -2055,7 +2055,9 @@ impl ReferenceStateMachine for EngineModel {
             }
             Step::HoldTrash => !model.held,
             Step::ReleaseTrash => model.held,
-            Step::DeleteFile { pack, .. } | Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
+            // A file can be deleted while the destination is away: it's absent when it's back (#385).
+            Step::DeleteFile { .. } => true,
+            Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
             Step::DestinationGone { pack } => !model.unavailable[*pack],
             Step::WriteMine { pack } => !model.unavailable[*pack] && !model.mine[*pack],
             Step::WriteLitter { pack } => !model.unavailable[*pack] && !model.litter[*pack],
@@ -3258,6 +3260,18 @@ fn the_undo_of_a_remove_made_while_the_destination_was_gone_after_it_came_back_i
         Step::Remove(0),
         Step::DestinationBack { pack: 0 },
         Step::Undo,
+    ]);
+}
+
+/// #385: a file deleted while the destination is away is absent when it's back: Missing files, not
+/// made again by the check and downloaded; one set Off isn't missing.
+#[test]
+fn a_file_deleted_while_the_destination_is_away_makes_its_torrent_missing_files_when_it_is_back() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::DestinationGone { pack: 0 },
+        Step::DeleteFile { pack: 0, file: 1 },
+        Step::DestinationBack { pack: 0 },
     ]);
 }
 

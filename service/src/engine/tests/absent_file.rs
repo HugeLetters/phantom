@@ -249,3 +249,188 @@ async fn a_file_missing_before_its_destination_went_stays_missing_until_it_is_pu
         }
     }
 }
+
+/// A torrent and a peer that has it, nothing downloaded: `seeded` is where the peer's files are.
+async fn peer_only(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Vec<u8>, String, u16) {
+    let seeded = dir.join("seed/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    std::fs::create_dir_all(dir.join("downloads")).unwrap();
+    for (i, name) in NAMES.iter().enumerate() {
+        std::fs::write(seeded.join(name), whole(i + 1)).unwrap();
+    }
+    seed(dir, &seeded, PIECE as u32).await
+}
+
+fn assert_whole(dir: &Path, case: &str) {
+    for (i, name) in NAMES.iter().enumerate() {
+        assert!(std::fs::read(file(dir, name)).unwrap() == whole(i + 1), "{case}: {name}");
+    }
+}
+
+/// Never looked at on a reachable destination, so no file of it was ever made: not Missing files
+/// when the drive is first back, it downloads. Added as the drive goes (the destination was parsed
+/// before), or a magnet whose info arrives while it's away.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_never_seen_on_its_destination_downloads_when_the_drive_is_first_back() {
+    for magnet in [false, true] {
+        let case = format!("magnet {magnet}");
+        let temp = temp();
+        let dir = temp.path();
+        let (_seeder, torrent, hash, port) = peer_only(dir).await;
+        let engine = engine(dir).await;
+        let downloads = dir.join("downloads");
+        let destination = parsed(&downloads);
+        take_away(&downloads);
+        let id = if magnet {
+            let link = format!("magnet:?xt=urn:btih:{hash}&tr={}", tracker(port));
+            let fetched = super::super::fetched(AddSource::Magnet(link)).await.unwrap();
+            engine.add(fetched, false, destination).await.unwrap().id
+        } else {
+            let fetched = super::super::fetched(AddSource::TorrentFile(torrent)).await.unwrap();
+            engine.add(fetched, false, destination).await.unwrap().id
+        };
+        // The magnet's info arrives meanwhile.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(is_away(&find(&engine, id).await.status), "{case}: {:?}", find(&engine, id).await.status);
+        bring_back(&downloads);
+        wait_for(&engine, id, Status::Seeding).await;
+        assert_whole(dir, &case);
+        engine.stop().await;
+    }
+}
+
+/// The drive pulled right after the add: its files are there, empty, and nothing had of them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_torrent_whose_drive_is_pulled_right_after_the_add_goes_on_when_it_is_back() {
+    let temp = temp();
+    let dir = temp.path();
+    let (_seeder, torrent, _, _) = peer_only(dir).await;
+    let engine = engine(dir).await;
+    let downloads = dir.join("downloads");
+    let id = add(&engine, &downloads, AddSource::TorrentFile(torrent), true).await.unwrap().id;
+    take_away(&downloads);
+    until(&engine, id, is_away).await;
+    bring_back(&downloads);
+    wait_for(&engine, id, Status::Paused).await;
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+    assert_whole(dir, "pulled after the add");
+    engine.stop().await;
+}
+
+/// A zero-length wanted file absent: the size check says the same with its destination there as
+/// when it comes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_absent_zero_length_file_is_judged_alike_with_the_drive_there_and_as_it_is_back() {
+    let mut seen = Vec::new();
+    for away in [false, true] {
+        let temp = temp();
+        let dir = temp.path();
+        let pack = dir.join("downloads/pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(pack.join("a.bin"), whole(1)).unwrap();
+        std::fs::write(pack.join("z.bin"), b"").unwrap();
+        let (_seeder, torrent, _, _) = seed(dir, &pack, PIECE as u32).await;
+        let engine = engine(dir).await;
+        let id = add(&engine, &dir.join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        if away {
+            let (engine, _) = away_and_back(dir, engine, id, Started::No, |p| std::fs::remove_file(p.join("z.bin")).unwrap()).await;
+            seen.push(find(&engine, id).await.status);
+            engine.stop().await;
+        } else {
+            std::fs::remove_file(pack.join("z.bin")).unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            seen.push(find(&engine, id).await.status);
+            engine.stop().await;
+        }
+    }
+    assert_eq!(seen, [Status::MissingFiles, Status::MissingFiles], "there / back");
+}
+
+/// Not checked (a check cancelled) when the drive goes, and a file absent when it's back: Missing
+/// files, as for any torrent.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unchecked_torrent_with_a_file_absent_as_its_destination_is_back_is_missing_files() {
+    let dir = temp();
+    let dir = dir.path();
+    let gate = Arc::new(super::super::files::Gate::default());
+    let _opens = Opens(gate.clone());
+    let engine = engine_gated(dir, &gate).await;
+    let id = add(&engine, &dir.join("downloads"), valid_pack(dir).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    gate.hold(true);
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    wait_for(&engine, id, Status::Checking).await;
+    engine.command(id, TorrentCommand::CancelCheck).await.unwrap();
+    gate.hold(false);
+    wait_for(&engine, id, Status::Unchecked).await;
+    let (engine, added) = away_and_back(dir, engine, id, Started::No, |p| std::fs::remove_file(p.join("b.bin")).unwrap()).await;
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    assert!(!file(dir, "b.bin").exists(), "not made");
+    assert_eq!(librqbit_torrent(&engine, id).await, added, "not added again");
+    engine.stop().await;
+}
+
+/// A check under way as the drive goes, and a file absent when it's back: Missing files.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_interrupted_by_the_drive_leaving_with_a_file_absent_as_it_is_back_is_missing_files() {
+    let dir = temp();
+    let dir = dir.path();
+    let gate = Arc::new(super::super::files::Gate::default());
+    let _opens = Opens(gate.clone());
+    let engine = engine_gated(dir, &gate).await;
+    let id = add(&engine, &dir.join("downloads"), valid_pack(dir).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    gate.hold(true);
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    wait_for(&engine, id, Status::Checking).await;
+    let (here, away) = (dir.join("downloads"), dir.join("away"));
+    std::fs::rename(&here, &away).unwrap();
+    gate.hold(false);
+    until(&engine, id, is_away).await;
+    std::fs::remove_file(away.join("pack/b.bin")).unwrap();
+    std::fs::rename(&away, &here).unwrap();
+    until(&engine, id, |s| !is_away(s)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    assert!(!file(dir, "b.bin").exists(), "not made");
+    engine.stop().await;
+}
+
+/// A Move under way as the drive goes, and a file absent when it's back: Missing files, as it is
+/// without the drive's coming back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_move_interrupted_by_the_drive_leaving_with_a_file_absent_as_it_is_back_is_missing_files() {
+    let dir = temp();
+    let dir = dir.path();
+    let (here, away, elsewhere) = (dir.join("downloads"), dir.join("away"), dir.join("elsewhere"));
+    std::fs::create_dir_all(elsewhere.join("pack")).unwrap();
+    let engine = engine(dir).await;
+    let id = add(&engine, &here, complete_torrent(dir).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let gate = super::super::trash::Gate::default();
+    engine
+        .inspect({
+            let gate = gate.clone();
+            move |a| a.move_hold = super::super::actor::moving::Hold { gate: Some(gate), copies: true, ..Default::default() }
+        })
+        .await;
+    super::super::trash::hold(&gate, true);
+    let _opens = OpensTrash(gate.clone());
+    let to = AbsolutePath::new(&elsewhere).unwrap();
+    let answer = tokio::spawn(engine.command_later(id, TorrentCommand::Move { to, clash: None, name: None }));
+    until(&engine, id, |s| matches!(s, Status::Moving { done, .. } if *done > 0)).await;
+    std::fs::rename(&here, &away).unwrap();
+    super::super::trash::hold(&gate, false);
+    answer.await.unwrap().unwrap_err();
+    until(&engine, id, |s| !matches!(s, Status::Moving { .. })).await;
+    // Cut short with the drive gone, it ends Missing files (what's left of it isn't where it was).
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    std::fs::remove_file(away.join("pack/a.bin")).unwrap();
+    std::fs::rename(&away, &here).unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
+    assert!(!file(dir, "a.bin").exists(), "not made");
+    engine.stop().await;
+}
