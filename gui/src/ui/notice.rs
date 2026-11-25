@@ -28,6 +28,9 @@ pub const NOTICES_REST: &str = "notices-rest";
 const TAIL_IN: f32 = 18.0;
 const TAIL_DEPTH: f32 = 6.0;
 
+/// The opacity of `std_border` in a tooltip's edge in Dark (the notices panel's is 0.6).
+const TOOLTIP_EDGE_DARK: f32 = 0.3;
+
 impl Ui {
     /// The status bar's notice, keyed `notice`, one button: the newest's `line` (`notice-text`) in
     /// its colour, which truncates; the `undo` after it, a small button of its own; the `pill` (`notice-count`), a count tinted by the worst
@@ -225,11 +228,21 @@ impl Ui {
         trigger
     }
 
-    /// The edge of a surface raised over the page that is to show: the notices popover's panel and
-    /// every tooltip. (A note's own is fainter: `k.c.border_weak`.)
+    /// The edge of the notices popover's panel: `std_border` over the page, a surface raised over
+    /// it that is to show. (A note's own is fainter: `k.c.border_weak`.)
     pub(super) fn raised_edge(&self) -> rune::Color {
+        self.raised_edge_at(if self.k.dark { 0.6 } else { 0.4 })
+    }
+
+    /// A tooltip's edge: the panel's in Light, about half as strong in Dark, where the card is the
+    /// page's own colour and a strong edge would outweigh the small text in it.
+    pub(super) fn tooltip_edge(&self) -> rune::Color {
+        if self.k.dark { self.raised_edge_at(TOOLTIP_EDGE_DARK) } else { self.raised_edge() }
+    }
+
+    fn raised_edge_at(&self, alpha: f32) -> rune::Color {
         let k = &self.k;
-        super::opaque_over(k.alpha(k.c.std_border, if k.dark { 0.6 } else { 0.4 }), k.c.page)
+        super::opaque_over(k.alpha(k.c.std_border, alpha), k.c.page)
     }
 
     /// The fill of a surface raised over the page: the card's in Light; in Dark the window's own

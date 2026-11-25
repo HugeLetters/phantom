@@ -15,6 +15,13 @@ const PATH: &str = "Tears of Steel (2012) Open Movie Project by the Blender Foun
 /// The tooltip's card, as drawn, once the pointer has rested on `key`: its text, its box (points)
 /// and its rectangle.
 fn card_on<S: 'static>(rt: &mut Runtime<S>, key: &str) -> (String, [f32; 4], Instance) {
+    let (text, tip, card, _) = card_over(rt, key);
+    (text, tip, card)
+}
+
+/// [`card_on`], and the fill of the pane the card is drawn over (the last rectangle under its
+/// centre, drawn before it).
+fn card_over<S: 'static>(rt: &mut Runtime<S>, key: &str) -> (String, [f32; 4], Instance, [f32; 4]) {
     let at = super::generated::rect_of(rt, key).unwrap_or_else(|| panic!("no {key}"));
     rt.pointer_move(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
     wait(rt, 0.1);
@@ -28,9 +35,23 @@ fn card_on<S: 'static>(rt: &mut Runtime<S>, key: &str) -> (String, [f32; 4], Ins
         .find(|i| i.params[1] == KIND_RECT && (i.rect[0] - tip[0] * scale).abs() < 1.0 && (i.rect[1] - tip[1] * scale).abs() < 1.0)
         .copied()
         .unwrap_or_else(|| panic!("{key}: no card at {tip:?}"));
+    let (cx, cy) = (card.rect[0] + card.rect[2] / 2.0, card.rect[1] + card.rect[3] / 2.0);
+    let at = rt.instances.iter().position(|i| i.rect == card.rect && i.fill == card.fill).expect("the card");
+    let behind = rt.instances[..at]
+        .iter()
+        .rev()
+        .find(|i| {
+            i.params[1] == KIND_RECT
+                && i.fill[3] == 1.0
+                && i.rect[0] <= cx
+                && cx <= i.rect[0] + i.rect[2]
+                && i.rect[1] <= cy
+                && cy <= i.rect[1] + i.rect[3]
+        })
+        .map_or(card.fill, |i| i.fill);
     rt.pointer_move(1.0, 1.0);
     wait(rt, 0.3);
-    (text, tip, card)
+    (text, tip, card, behind)
 }
 
 fn main_cards(dark: bool) -> Vec<(String, [f32; 4], Instance)> {
@@ -86,10 +107,10 @@ fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
     (hi + 0.05) / (lo + 0.05)
 }
 
-/// In Dark a tooltip's edge stands out from its own fill and from the page behind it at least as
-/// much as the notices popover's edge does from the page it shares its fill with.
+/// In Dark a tooltip's edge is fainter than the notices popover's, yet still shows: at least 2:1
+/// against its own fill and 1.5:1 against the pane behind it (the page, as the list sits on it).
 #[test]
-fn in_dark_a_tooltips_edge_stands_out_as_much_as_the_notices_popovers() {
+fn in_dark_a_tooltips_edge_is_fainter_than_the_notices_popovers_but_shows() {
     let service = MemoryService::new().with_torrents(vec![super::torrent(0, "A"), super::torrent(1, "B")]).trash_refusing("A");
     let mut rt = app_in(service, true);
     wait(&mut rt, 0.5);
@@ -111,9 +132,11 @@ fn in_dark_a_tooltips_edge_stands_out_as_much_as_the_notices_popovers() {
     let wanted = contrast(popover.border, page);
     assert!(wanted > 1.2, "the popover's edge shows: {wanted}");
     let mut tip = app_in(tears(PATH), true);
-    let (_, _, card) = card_on(&mut tip, "add-file");
-    assert!(contrast(card.border, card.fill) >= wanted, "against its fill: {} < {wanted}", contrast(card.border, card.fill));
-    assert!(contrast(card.border, page) >= wanted, "against the page: {} < {wanted}", contrast(card.border, page));
+    let (_, _, card, pane) = card_over(&mut tip, "add-file");
+    let (own, behind) = (contrast(card.border, card.fill), contrast(card.border, pane));
+    assert!(own < wanted && behind < wanted, "fainter than the popover's {wanted}: {own}, {behind}");
+    assert!(own >= 2.0, "against its fill: {own}");
+    assert!(behind >= 1.5, "against the pane behind: {behind}");
 }
 
 fn settle_popover(rt: &mut Runtime<Phantom>) {

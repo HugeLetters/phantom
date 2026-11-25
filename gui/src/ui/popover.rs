@@ -15,15 +15,15 @@ const MAX_WIDTH: f32 = 320.0;
 const PAD_X: f32 = 10.0;
 
 impl Ui {
-    /// How Rune draws every `.help` tooltip: the notices popover's fill and edge, and the corners and
-    /// type of this file's notes, whose own edge is fainter. Told to Rune once a view
+    /// How Rune draws every `.help` tooltip: the notices popover's fill, an edge that is the popover's
+    /// in Light and about half as strong in Dark, and the corners and type of this file's notes, whose own edge is fainter. Told to Rune once a view
     /// (`cx.help_look(ui.help_look())`); on macOS it replaces AppKit's own tooltip.
     pub fn help_look(&self) -> rune::HelpLook {
         let k = &self.k;
         rune::HelpLook::system(false)
             .fill(self.raised_fill())
             .ink(k.c.text_base)
-            .ring(1.0, self.raised_edge())
+            .ring(1.0, self.tooltip_edge())
             .radius(k.radius.md)
             .padding(PAD_X, 6.0)
             .font(k.ty.text_small)
