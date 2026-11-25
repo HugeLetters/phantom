@@ -150,10 +150,16 @@ const STARTED: [Started; 3] = [Started::No, Started::AwayAsItStopped, Started::A
 /// Its destination comes back with `b.bin` as `put`.
 async fn back_with(put: &[u8], started: Started) -> (tempfile::TempDir, Engine, u64, u32) {
     let temp = temp();
-    let dir = temp.path();
+    let source = complete_torrent(temp.path()).await;
+    let (engine, id, added) = source_back_with(temp.path(), source, put, started).await;
+    (temp, engine, id, added)
+}
+
+/// [`back_with`], the torrent `source`, whose files are in the download dir.
+async fn source_back_with(dir: &Path, source: AddSource, put: &[u8], started: Started) -> (Engine, u64, u32) {
     let (here, away) = (dir.join("downloads"), dir.join("away"));
     let mut engine = engine(dir).await;
-    let id = add(&engine, &here, complete_torrent(dir).await, false).await.unwrap().id;
+    let id = add(&engine, &here, source, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
     let is_away = |s: &Status| matches!(s, Status::DestinationUnavailable { .. });
     if started == Started::AwaySinceItStopped {
@@ -173,7 +179,7 @@ async fn back_with(put: &[u8], started: Started) -> (tempfile::TempDir, Engine, 
     std::fs::rename(&away, &here).unwrap();
     until(&engine, id, |s| !is_away(s)).await;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    (temp, engine, id, added)
+    (engine, id, added)
 }
 
 /// Not added to librqbit, so nothing of it is written, until the own file is back.
@@ -192,6 +198,75 @@ async fn a_file_of_an_impossible_size_as_its_destination_is_back_is_missing_unti
             engine.stop().await;
         }
     }
+}
+
+/// The person's own file, cut off by a drive pulled as it was written: Resume, or Check and Resume
+/// of one paused meanwhile, keeps what's valid of it and downloads the rest.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_cut_off_as_its_drive_went_is_checked_and_downloaded_by_resume() {
+    for started in STARTED {
+        for paused in [false, true] {
+            let case = format!("{started:?}, paused {paused}");
+            let temp = temp();
+            let dir = temp.path();
+            let (seeded, pack) = (dir.join("seed/pack"), dir.join("downloads/pack"));
+            std::fs::create_dir_all(&seeded).unwrap();
+            std::fs::create_dir_all(&pack).unwrap();
+            let whole = |seed: usize| -> Vec<u8> { (0..4 * PIECE).map(|n| (n % 241) as u8 ^ seed as u8).collect() };
+            for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {
+                std::fs::write(seeded.join(name), whole(i + 1)).unwrap();
+                std::fs::write(pack.join(name), whole(i + 1)).unwrap();
+            }
+            let (_seeder, torrent, _, _) = seed(dir, &seeded, PIECE as u32).await;
+            let cut = whole(2)[..PIECE + 10].to_vec();
+            let (engine, id, _) = source_back_with(dir, AddSource::TorrentFile(torrent), &cut, started).await;
+            assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "{case}");
+            assert!(std::fs::read(file(dir, "b.bin")).unwrap() == cut, "{case}: as it was");
+            if paused {
+                engine.command(id, TorrentCommand::Pause).await.unwrap();
+                engine.command(id, TorrentCommand::Check).await.unwrap();
+                wait_for(&engine, id, Status::Paused).await;
+                let b = files_on(&engine, id).await[1].clone();
+                assert_eq!(b, ("b.bin".into(), PIECE as u64, false), "{case}: its whole piece kept");
+            }
+            engine.command(id, TorrentCommand::Resume).await.unwrap();
+            wait_for(&engine, id, Status::Seeding).await;
+            for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {
+                assert!(std::fs::read(file(dir, name)).unwrap() == whole(i + 1), "{case}: {name}");
+            }
+            engine.stop().await;
+        }
+    }
+}
+
+/// Set Normal on a running torrent, a longer file isn't handed to librqbit while it runs: it would
+/// be downloaded into until the size check after it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_longer_file_set_normal_isnt_given_to_librqbit_while_it_runs() {
+    let dir = temp();
+    let dir = dir.path();
+    let engine = engine(dir).await;
+    let id = add(&engine, &dir.join("downloads"), complete_torrent(dir).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let b = index_of(&engine, id, "b.bin").await;
+    let set = async |priority| {
+        engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority }).await.unwrap();
+        engine.inspect(move |a| a.torrents[&id].chosen_running).await
+    };
+    let off = set(Priority::Off).await;
+    let normal = set(Priority::Normal).await;
+    assert_eq!(normal, off + 1, "its own file is, as it runs");
+    let off = set(Priority::Off).await;
+    let theirs = longer(&std::fs::read(file(dir, "b.bin")).unwrap());
+    std::fs::write(file(dir, "b.bin"), &theirs).unwrap();
+    let longer = set(Priority::Normal).await;
+    assert_eq!(longer, off, "not given while it ran");
+    wait_for(&engine, id, Status::MissingFiles).await;
+    // The way out: set Off, the rest runs.
+    set(Priority::Off).await;
+    wait_for(&engine, id, Status::Seeding).await;
+    assert!(std::fs::read(file(dir, "b.bin")).unwrap() == theirs);
+    engine.stop().await;
 }
 
 /// Found of an impossible size, then set Off: the rest is checked in full all the same, as after any
