@@ -32,6 +32,8 @@ async fn removed_then(dir: &Path, engine: &Engine, delete: bool, other: Other) -
         }
         Other::InsideItsFolder => {
             std::fs::create_dir_all(downloads.join("A")).unwrap();
+            // A removed torrent's is there still, too long for the other's: never cut short (#374).
+            let _ = std::fs::remove_file(downloads.join("A/x.bin"));
             (add(engine, &downloads.join("A"), torrent_file("x.bin"), false).await.unwrap().id, "x.bin")
         }
         Other::InAnotherCase => (add(engine, &downloads, album(dir, "a", 2).await, false).await.unwrap().id, "a"),
