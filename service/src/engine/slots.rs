@@ -252,6 +252,35 @@ mod tests {
         }
     }
 
+    /// One that waits for its file as its handle is handed on, behind another under way: it's late too.
+    #[test]
+    fn a_write_still_waiting_for_its_file_at_a_hand_on_is_refused() {
+        let (dir, slots) = (Dir::new(), Arc::new(Slots::default()));
+        let old = dir.open(&slots);
+        let (begun_tx, begun) = mpsc::channel();
+        let (go, go_rx) = mpsc::channel::<()>();
+        std::thread::scope(|s| {
+            let old = &old;
+            s.spawn(move || {
+                old.change(0, |_, _| {
+                    begun_tx.send(()).unwrap();
+                    Ok(go_rx.recv().unwrap())
+                })
+                .unwrap()
+            });
+            begun.recv().unwrap();
+            let reading = s.spawn(|| old.read(0, |_, opened| Ok(matches!(opened, Opened::HandedOn))).unwrap());
+            let changing = s.spawn(|| old.change(0, |_, _| Ok(())).is_err());
+            // Both wait for the file.
+            std::thread::sleep(Duration::from_millis(200));
+            let next = s.spawn(|| old.hand_on());
+            std::thread::sleep(Duration::from_millis(100));
+            go.send(()).unwrap();
+            assert!(reading.join().unwrap() && changing.join().unwrap(), "late");
+            assert!(write(&next.join().unwrap(), 0, 1));
+        });
+    }
+
     /// The same files stay open across a hand-on, and the handle that has them closes them, however
     /// long librqbit keeps one handed on: a torrent taken out leaves nothing open on its drive.
     #[test]
@@ -291,6 +320,23 @@ mod tests {
         assert!(!write(&check, 0, 3) && !write(&later, 0, 4) && write(&again, 0, 5));
         drop((check, later));
         assert!(write(&again, 0, 6), "nothing closed");
+    }
+
+    /// A check's end and a Remove at once, each taking the same storage: one of them has the files.
+    #[test]
+    fn of_two_hand_ons_at_once_one_has_the_files() {
+        let (dir, slots) = (Dir::new(), Arc::new(Slots::default()));
+        for _ in 0..2000 {
+            let old = dir.open(&slots);
+            let at_once = std::sync::Barrier::new(2);
+            let hand_on = || {
+                at_once.wait();
+                old.hand_on()
+            };
+            let both = std::thread::scope(|s| [s.spawn(hand_on), s.spawn(hand_on)].map(|t| t.join().unwrap()));
+            let has = both.each_ref().map(|handle| [0, 1].map(|index| write(handle, index, 1)));
+            assert!(has == [[true; 2], [false; 2]] || has == [[false; 2], [true; 2]], "{has:?}");
+        }
     }
 
     /// A storage's `init` opens each file anew: what's at its path then, not what was open before.
