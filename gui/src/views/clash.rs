@@ -159,5 +159,8 @@ fn name_field(clash: &Clash, ui: &Ui) -> El {
             _ => false,
         })
         .build();
-    col().w_full().child(field)
+    match naming.note() {
+        Some(why) if crate::ui::a_mode() => col().w_full().child(field).help(display::name_problem(why)).help_open(true),
+        _ => col().w_full().child(field),
+    }
 }

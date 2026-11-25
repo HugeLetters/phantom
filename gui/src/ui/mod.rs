@@ -17,6 +17,7 @@ mod menu;
 mod notice;
 mod palette;
 mod popover;
+pub use popover::a_mode;
 mod progress;
 mod sheet;
 mod status;
