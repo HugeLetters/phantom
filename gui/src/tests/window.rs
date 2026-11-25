@@ -1409,7 +1409,10 @@ fn a_passed_column_slides_and_the_dragged_one_does_not() {
     rt.frame(FRAME);
     let mut step = 0.0;
     while shown(&rt)[3] == Column::Size {
-        step += 10.0;
+        // Two moves a frame, as a mouse makes them.
+        step += 5.0;
+        rt.pointer_move(gx + step, gy);
+        step += 5.0;
         rt.pointer_move(gx + step, gy);
         rt.frame(FRAME);
     }

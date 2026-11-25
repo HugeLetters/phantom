@@ -172,7 +172,7 @@ fn slide(s: &Phantom, c: Column) -> Option<Anim> {
 /// The columns' headers, over the table's own header.
 fn header(s: &Phantom, ui: &Ui, columns: &[(Column, TableColumn)]) -> El {
     let mut header = row().key("columns").pin(Some(0.0), Some(0.0), Some(0.0), None).h(layout::TABLE_HEADER);
-    header = header.child(el().w(layout::TOGGLE));
+    header = header.child(el().key(TOGGLE_ID).w(layout::TOGGLE).h_full().child(ui.header_rule()));
     for (i, (c, column)) in columns.iter().enumerate() {
         let sorted = s.table.sort().filter(|(id, _)| *id == c.id()).map(|(_, dir)| dir);
         header = header.child(ui.column_header(column, sorted, i + 1 == columns.len(), slide(s, *c)));
@@ -255,10 +255,10 @@ fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
                 }
                 Phase::Move if d.dx.abs() > DRAG_SLOP || s.prefs.moved => {
                     s.prefs.moved = true;
-                    // Rune applies a drag's moves at once: a new order slides instead.
-                    if s.prefs.move_to(&shown, layout::drop_index(&all, c, d.data + d.dx)) {
-                        tx.animated();
-                    }
+                    s.prefs.move_to(&shown, layout::drop_index(&all, c, d.data + d.dx));
+                    // Rune applies a drag's moves at once, and a frame with one such among several
+                    // too: each asks for its motion, changing the order or not.
+                    tx.animated();
                 }
                 Phase::Move => {}
                 Phase::Up => {

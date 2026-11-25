@@ -148,6 +148,13 @@ impl Ui {
         }
     }
 
+    /// The hairline at a header cell's right edge. At once as it comes or goes: the last column has none.
+    pub fn header_rule(&self) -> El {
+        let style = TableStyle::from_kit(&self.k);
+        let rule = rune::el().key("rule").pin(None, Some(8.0), Some(0.0), Some(8.0)).w(1.0).fill(style.rule);
+        rule.transition(rune::Transition::identity()).transition_motion(Anim::INSTANT, Anim::INSTANT).a11y_hidden()
+    }
+
     /// A column's header as the table's own draws it, its presses aside (the grips take those).
     pub fn column_header(&self, column: &TableColumn, sorted: Option<SortDir>, last: bool, moved: Option<Anim>) -> El {
         let style = TableStyle::from_kit(&self.k);
@@ -173,7 +180,7 @@ impl Ui {
             .center_y();
         let mut cell = justify(column.size_el(cell, None), column.alignment()).key(column.id().to_owned()).child(inner);
         if !last {
-            cell = cell.child(rune::el().key("rule").pin(None, Some(8.0), Some(0.0), Some(8.0)).w(1.0).fill(style.rule).a11y_hidden());
+            cell = cell.child(self.header_rule());
         }
         match moved {
             Some(anim) => cell.frame_motion(anim),

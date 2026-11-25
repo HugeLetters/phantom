@@ -485,14 +485,12 @@ impl WindowPrefs {
     }
 
     /// The dragged column is over index `to` of those `shown` (in order, the dragged one among
-    /// them): it goes there, the others shown shifting, the rest keeping their places. Whether that
-    /// changed the order.
-    pub fn move_to(&mut self, shown: &[Column], to: usize) -> bool {
-        let Some(moving) = &self.moving else { return false };
+    /// them): it goes there, the others shown shifting, the rest keeping their places.
+    pub fn move_to(&mut self, shown: &[Column], to: usize) {
+        let Some(moving) = &self.moving else { return };
         let mut moved: Vec<Column> = shown.iter().copied().filter(|c| *c != moving.column).collect();
         moved.insert(to.min(moved.len()), moving.column);
-        let order = self.kept.order.with_shown(shown, &moved);
-        std::mem::replace(&mut self.kept.order, order) != self.kept.order
+        self.kept.order = self.kept.order.with_shown(shown, &moved);
     }
 
     /// The clock is at `now`: once the drag ended, its slide runs out [`SLIDE`] later.
