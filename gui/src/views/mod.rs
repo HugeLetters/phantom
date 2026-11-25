@@ -34,6 +34,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     s.mounted.begin();
     let look = s.looks.borrow().shown(Appearance::of(cx.system_dark())).clone();
     let ui = &look.ui;
+    cx.help_look(ui.help_look());
     let mut overlays = Vec::new();
     // The room the list and the pane share, as last laid out; the window's default size before
     // the first layout.

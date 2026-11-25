@@ -11,8 +11,28 @@ use super::Ui;
 const EXPLAIN_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 /// The widest a note gets before its text wraps.
 const MAX_WIDTH: f32 = 320.0;
+/// A note's space either side of its text.
+const PAD_X: f32 = 10.0;
 
 impl Ui {
+    /// How Rune draws every `.help` tooltip: the notices popover's fill, an edge that is the popover's
+    /// in Light and about half as strong in Dark, and the corners and type of this file's notes, whose own edge is fainter. Told to Rune once a view
+    /// (`cx.help_look(ui.help_look())`); on macOS it replaces AppKit's own tooltip.
+    pub fn help_look(&self) -> rune::HelpLook {
+        let k = &self.k;
+        rune::HelpLook::system(false)
+            .fill(self.raised_fill())
+            .ink(k.c.text_base)
+            .ring(1.0, self.tooltip_edge())
+            .radius(k.radius.md)
+            .padding(PAD_X, 6.0)
+            .font(k.ty.text_small)
+            .max_width(Some(MAX_WIDTH - 2.0 * PAD_X))
+            .gap(4.0)
+            .delay(EXPLAIN_AFTER.as_secs_f64())
+            .shadows(k.elevation.md.iter().copied())
+    }
+
     /// `trigger`, with a note of `message` under it while `open`. The note goes into `layer`,
     /// which the page hands to [`Ui::root`]; pressing outside it calls `on_close`. What's known
     /// before anything is sent (why a button is off, why the text can't be added) says so here,
@@ -67,7 +87,7 @@ impl Ui {
     fn tooltip(&self, key: &str, message: &str) -> El {
         let k = &self.k;
         let message = text(message.to_owned()).font(k.ty.text_small).color(k.c.text_base).max_lines(3);
-        let body = col().key(format!("{key}-content")).role("tooltip").max_w(MAX_WIDTH).px(10.0).py(6.0).child(message);
+        let body = col().key(format!("{key}-content")).role("tooltip").max_w(MAX_WIDTH).px(PAD_X).py(6.0).child(message);
         popover::raised(k, body, k.radius.md).border(1.0, super::opaque_over(k.c.border_weak, k.c.page))
     }
 }

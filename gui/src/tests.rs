@@ -10,6 +10,7 @@ mod palette;
 mod renaming;
 mod settings;
 mod space;
+mod tooltips;
 mod undo;
 mod undo_place;
 mod window;
