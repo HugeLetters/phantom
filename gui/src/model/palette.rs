@@ -183,7 +183,7 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
             }));
         }
     }
-    // Worded as the file menu words them.
+    // Worded as the file menu words them, but for the priorities ([`label_of`]).
     entries.extend(on_files(s).into_iter().map(|c| entry(Command::Files(c), Group::Files, label_of(c))));
     entries.extend(InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| entry(Command::App(c), Group::App, c.wording(s))));
     entries
