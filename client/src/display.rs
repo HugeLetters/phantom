@@ -349,6 +349,11 @@ pub fn priority(priority: Priority) -> &'static str {
     }
 }
 
+/// A priority item in the command palette, which has no title over them: "Priority: Normal".
+pub fn priority_command(priority: Priority) -> String {
+    format!("{}: {}", priority_title(), self::priority(priority))
+}
+
 /// What `n` selected torrents are called in a menu: "torrent", "3 torrents".
 fn torrents(n: usize) -> String {
     if n == 1 { "torrent".into() } else { format!("{n} torrents") }

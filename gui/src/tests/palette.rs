@@ -42,7 +42,7 @@ fn drawn_palette(rt: &Runtime<Phantom>) -> Vec<(String, Option<String>)> {
             // Every command has its icon but the priorities, which have none (the file menu marks the
             // current one with a check).
             let icon = elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon"));
-            let priority = matches!(row.label.as_deref(), Some("Normal" | "Off"));
+            let priority = matches!(row.label.as_deref(), Some("Priority: Normal" | "Priority: Off"));
             assert_eq!(icon, !priority, "{:?} has its icon, a priority has none", row.label);
             (row.label.clone().expect("a row has its label"), hint)
         })
@@ -183,7 +183,7 @@ fn the_palette_lists_the_selected_files_commands_as_the_file_menu_words_them() {
     select(&mut rt, 1);
     cmd_p(&mut rt);
     let without = labels(&rt);
-    assert!(!without.iter().any(|l| l == "Normal" || l == "Off" || l == "Move to Trash"), "no file selected: {without:?}");
+    assert!(!without.iter().any(|l| l.starts_with("Priority") || l == "Move to Trash"), "no file selected: {without:?}");
     press(&mut rt, Key::Escape);
 
     tap(&mut rt, "files/viewport/rows/0");
@@ -213,7 +213,21 @@ fn the_palette_lists_the_selected_files_commands_as_the_file_menu_words_them() {
     let drawn = drawn_palette(&rt);
     let torrent_commands = without.len() - 1;
     let files: Vec<(String, Option<String>)> = drawn[torrent_commands..drawn.len() - 1].to_vec();
-    assert_eq!(files, file_menu, "the file commands, worded and keyed as the file menu has them, before the app's");
+    // The palette has no heading over the priorities, so each item names what it sets.
+    let in_palette: Vec<(String, Option<String>)> = file_menu
+        .iter()
+        .map(|(l, k)| (if matches!(l.as_str(), "Normal" | "Off") { format!("Priority: {l}") } else { l.clone() }, k.clone()))
+        .collect();
+    assert_eq!(files, in_palette, "the file commands, as the file menu has them but for the priorities, before the app's");
+    for query in ["priority", "normal", "off"] {
+        type_text(&mut rt, query);
+        let found = labels(&rt);
+        assert!(found.iter().any(|l| l == "Priority: Normal") || query == "off", "{query:?} finds Priority: Normal: {found:?}");
+        assert!(found.iter().any(|l| l == "Priority: Off") || query == "normal", "{query:?} finds Priority: Off: {found:?}");
+        for _ in query.chars() {
+            press(&mut rt, Key::Backspace);
+        }
+    }
     assert_eq!(drawn.last().map(|(l, _)| l.as_str()), Some("Add file…"));
     type_text(&mut rt, "move to trash");
     assert!(labels(&rt).iter().any(|l| l == "Move to Trash"), "filtering finds a file command: {:?}", labels(&rt));
@@ -616,7 +630,7 @@ fn return_runs_the_highlighted_command_not_a_heading() {
     settle(&mut rt);
     cmd_p(&mut rt);
     let all = labels(&rt);
-    let off = all.iter().position(|l| l == "Off").expect("the Off priority");
+    let off = all.iter().position(|l| l == "Priority: Off").expect("the Off priority");
     for _ in 0..off {
         press(&mut rt, Key::Down);
     }

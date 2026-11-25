@@ -25,7 +25,7 @@
 use rune::{TextEdit, Tx};
 
 use super::{Phantom, details_torrent, look_at_disk, look_at_file, reveal_target, selected_in_pane};
-use crate::commands::{Command, InApp, OnTorrents, Selected, on_files, on_torrents};
+use crate::commands::{Command, InApp, OnFiles, OnTorrents, Selected, on_files, on_torrents};
 use crate::ui::Icon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -184,9 +184,18 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
         }
     }
     // Worded as the file menu words them.
-    entries.extend(on_files(s).into_iter().map(|c| entry(Command::Files(c), Group::Files, c.spec().name.to_owned())));
+    entries.extend(on_files(s).into_iter().map(|c| entry(Command::Files(c), Group::Files, label_of(c))));
     entries.extend(InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| entry(Command::App(c), Group::App, c.wording(s))));
     entries
+}
+
+/// A file command's label in the palette: the priorities say what they set, as the file menu's
+/// title does over them.
+fn label_of(c: OnFiles) -> String {
+    match c {
+        OnFiles::Priority(p) => client::display::priority_command(p),
+        _ => c.spec().name.to_owned(),
+    }
 }
 
 /// What the palette lists for its text: the commands offered whose label matches it, group by

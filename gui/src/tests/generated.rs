@@ -1942,8 +1942,8 @@ fn check_palette(s: &Phantom, listed: &[String], query: &str) {
             let names = [
                 (only_on_disk && t.actions.does(Do::Open), "Open"),
                 (only_on_disk && t.actions.does(Do::Reveal), "Reveal in Finder"),
-                (t.actions.does(Do::SetPriority), "Normal"),
-                (t.actions.does(Do::SetPriority), "Off"),
+                (t.actions.does(Do::SetPriority), "Priority: Normal"),
+                (t.actions.does(Do::SetPriority), "Priority: Off"),
                 (files.iter().any(on_disk) && t.actions.does(Do::TrashFiles), "Move to Trash"),
             ];
             offered.extend(names.into_iter().filter(|(shown, _)| *shown).map(|(_, name)| name.to_owned()));
