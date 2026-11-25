@@ -138,6 +138,44 @@ fn order() -> impl Strategy<Value = ColumnOrder> {
     Just(Column::ALL.to_vec()).prop_shuffle().prop_map(|o| ColumnOrder::try_from(o).unwrap())
 }
 
+/// The most a rect read back is off the height the layout used: the window is laid out at scale 2,
+/// so rects snap to the device pixel, 0.5 point, and rounding to the nearest moves one at most half
+/// of that.
+const SNAP: f32 = 0.25;
+
+fn pane_is_as_tall_as_its_content(w: f32, h: f32, n: usize) -> Result<(), TestCaseError> {
+    let mut rt = app(album(n));
+    resize(&mut rt, w, h);
+    tap(&mut rt, "rows/1");
+    for _ in 0..3 {
+        settle(&mut rt);
+    }
+    let room = rect(&rt, "body")[3];
+    let pane = rect(&rt, "details")[3];
+    let list = rect(&rt, "list")[3];
+    let under =
+        |header: Header| header.height() + TABS + (TABLE_HEADER + n as f32 * ROW).max(2.0 * INFO_PAD + INFO_LINES as f32 * INFO_LINE);
+    let whole = under(Header::Whole);
+    prop_assert!(pane <= whole + 0.5, "no blank under the files: {} of {}", pane, whole);
+    prop_assert!(list >= layout::LIST_MIN - 0.5, "the list keeps its header and three rows: {}", list);
+    if whole <= layout::pane_most(room) {
+        prop_assert!((pane - whole).abs() < 0.5, "all of it, a list of two leaving the room: {} of {}", pane, whole);
+    }
+    let header = rect(&rt, "details-header")[3];
+    if (header - Header::OneLine.height()).abs() < 0.5 {
+        prop_assert!(pane - Header::Whole.height() - TABS - TABLE_HEADER < 2.0 * ROW + SNAP, "one line only when short: {pane}");
+        prop_assert!(pane <= under(Header::OneLine) + 0.5);
+    }
+    Ok(())
+}
+
+/// #388: at 640 x 371.4992 the list's room is 293.9992 and the layout, short of two files by that
+/// much, draws a one-line header over a pane whose snapped height, 170, reads as exactly two.
+#[test]
+fn the_pane_is_as_tall_as_its_content_at_a_fractional_height() {
+    pane_is_as_tall_as_its_content(640.0, 371.4992, 1).unwrap();
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(12).min(64), ..ProptestConfig::default() })]
 
@@ -172,27 +210,8 @@ proptest! {
     /// whole one would leave fewer than two files showing.
     #[test]
     fn the_pane_is_as_tall_as_its_content(w in 640.0f32..1400.0, h in 320.0f32..1000.0, n in 1usize..14) {
-        let mut rt = app(album(n));
-        resize(&mut rt, w, h);
-        tap(&mut rt, "rows/1");
-        for _ in 0..3 {
-            settle(&mut rt);
-        }
-        let room = rect(&rt, "body")[3];
-        let pane = rect(&rt, "details")[3];
-        let list = rect(&rt, "list")[3];
-        let under = |header: Header| header.height() + TABS + (TABLE_HEADER + n as f32 * ROW).max(2.0 * INFO_PAD + INFO_LINES as f32 * INFO_LINE);
-        let whole = under(Header::Whole);
-        prop_assert!(pane <= whole + 0.5, "no blank under the files: {} of {}", pane, whole);
-        prop_assert!(list >= layout::LIST_MIN - 0.5, "the list keeps its header and three rows: {}", list);
-        if whole <= layout::pane_most(room) {
-            prop_assert!((pane - whole).abs() < 0.5, "all of it, a list of two leaving the room: {} of {}", pane, whole);
-        }
-        let header = rect(&rt, "details-header")[3];
-        if (header - Header::OneLine.height()).abs() < 0.5 {
-            prop_assert!(pane - Header::Whole.height() - TABS - TABLE_HEADER < 2.0 * ROW, "one line only when short");
-            prop_assert!(pane <= under(Header::OneLine) + 0.5);
-        }
+        pane_is_as_tall_as_its_content(w, h, n)?;
+
     }
 }
 
