@@ -18,21 +18,20 @@ pub fn open(s: &mut Phantom, press: PointerEvent, _: &mut Tx) {
     }
 }
 
+/// Every column in the list's order, and whether it's ticked: while wanted; the one column left when
+/// every other is hidden shows, so it's ticked too. `shown` is what the list draws.
+pub fn wanted(s: &Phantom, shown: &[Column]) -> Vec<(Column, bool)> {
+    s.prefs.order().columns().iter().map(|&c| (c, !s.prefs.hidden().contains(&c) || shown == [c])).collect()
+}
+
 /// The open menu, in `layer`; `window` is the window's size, when known, which the menu stays inside;
 /// `shown` is what the list draws now.
 pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, shown: &[Column], layer: &mut Vec<El>) {
     let Menu::Open(Open::Columns { at }) = s.menu else { return };
     let shown_now = shown.to_vec();
-    let entries: Vec<Entry> = s
-        .prefs
-        .order()
-        .columns()
-        .iter()
-        .copied()
-        .map(|c| {
-            // Ticked while wanted; the one column left when every other is hidden shows, so it's
-            // ticked too.
-            let wanted = !s.prefs.hidden().contains(&c) || shown == [c];
+    let entries: Vec<Entry> = wanted(s, shown)
+        .into_iter()
+        .map(|(c, wanted)| {
             let (id, label, icon, checked) = (c.id().into(), c.title().into(), wanted.then_some(Icon::Check), Some(wanted));
             if shown == [c] {
                 return Entry::Disabled { id, label, icon, checked };

@@ -3,7 +3,7 @@
 //! use.
 
 mod clash;
-mod columns_menu;
+pub(crate) mod columns_menu;
 pub(crate) mod details;
 mod empty;
 pub(crate) mod file_menu;
@@ -40,6 +40,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let [width, room] = cx.layout_size("body").map_or([936.0, 420.0], |[w, h]| [w - 2.0 * MARGIN, h]);
     let fitted = table::fitted(s, ui, width);
     let shown: Vec<Column> = fitted.iter().map(|(c, _)| *c).collect();
+    s.drawn_columns.borrow_mut().clone_from(&shown);
     let list = ui.panel().key("list").w_full().grow(1.0).min_h(0.0).on_layout_tx(keep_selection_in_view).child(if s.torrents.is_empty() {
         empty::empty(ui)
     } else {

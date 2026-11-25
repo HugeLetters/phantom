@@ -81,6 +81,10 @@ pub struct Phantom {
     pub front: Which,
     /// A field of Settings is being edited, as Settings last said: ⌘Z there is the field's own.
     pub settings_editing: bool,
+    /// A field of Settings has the focus, as Settings last said: Edit is the field's own there.
+    pub settings_field: bool,
+    /// The columns the list last drew, for View ▸ Columns.
+    pub drawn_columns: std::cell::RefCell<Vec<layout::Column>>,
     /// The Active Look Preset, and the look each Appearance shows: Settings' too.
     pub looks: Shared<Looks>,
     /// The `(epoch, version)` of the snapshot the list and the pane are from: an older one, from
@@ -357,6 +361,8 @@ impl Phantom {
             inbox: crate::windows::link(|| {}).1,
             front: Which::Main,
             settings_editing: false,
+            settings_field: false,
+            drawn_columns: Default::default(),
             looks: Shared::default(),
             latest: (0, 0),
             service_reset: Vec::new(),
@@ -731,11 +737,18 @@ pub fn cycle_priority(service: &mut dyn Service, pane: &DetailsPane, index: usiz
     command(service, &[details.id], TorrentCommand::SetPriority { files, priority: next_priority(clicked.priority) });
 }
 
-/// Copies the magnet link of the one selected torrent, and says so in the status bar.
+/// Copies the magnet link of each selected torrent, a line each in the list's order, and says so in
+/// the status bar.
 pub fn copy_magnet(s: &mut Phantom, tx: &mut Tx) {
-    let Some(t) = details_torrent(&s.table, &s.torrents) else { return };
-    s.bar.tell(Notice::new(display::copied_magnet()).brief().with_names(t.display_name()));
-    tx.copy(client::magnet_link(t));
+    let selected = selected_torrents(&s.table);
+    let torrents: Vec<&TorrentInfo> = s.torrents.iter().filter(|t| selected.contains(&t.id)).collect();
+    if torrents.is_empty() {
+        return;
+    }
+    let lines = |of: fn(&TorrentInfo) -> String| torrents.iter().map(|t| of(t)).collect::<Vec<_>>().join("\n");
+    let (names, links) = (lines(|t| t.display_name().to_owned()), lines(client::magnet_link));
+    s.bar.tell(Notice::new(display::copied_magnets(torrents.len())).brief().with_names(names));
+    tx.copy(links);
 }
 
 /// "Size of Full size" when some files are Off, else just the Size.
@@ -1175,6 +1188,13 @@ fn tell_happened(s: &mut Phantom, happened: Happened, action: proto::UndoAction,
     }
     let notice = Notice::new(display::happened(action, names.len())).long().with_listing(display::happened_listing(action, count, names));
     s.bar.tell(Notice { of: vec![happened.seq], ..notice.with_actions(vec![undo]) });
+}
+
+/// The list sorts by `c`, the other way if it already does: a click on its header, View ▸ Sort By.
+pub fn sort_by(s: &mut Phantom, c: layout::Column) {
+    let dir = s.table.next_sort(c.id());
+    s.table.set_sort(c.id(), dir);
+    sort(&mut s.torrents, c.id(), dir);
 }
 
 pub fn sort(torrents: &mut [TorrentInfo], column: &str, dir: SortDir) {

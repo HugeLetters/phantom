@@ -12,6 +12,7 @@ mod bar;
 mod changes;
 mod commands;
 mod menu;
+mod menu_bar;
 mod model;
 mod notice;
 mod overlay;
@@ -64,7 +65,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane);
     model::close_empty_menu(s);
     model::renaming::follow_focus(s);
-    platform::menu_bar::name_undo(&changes::menu_title(s));
+    platform::menu_bar::sync(s, tx);
     scripted_drag(now, tx);
     // After the answers, so a notice they tell starts its clock in this frame.
     let changed = s.bar.passed(now) || changed;
@@ -365,9 +366,7 @@ fn settings_poll(s: &mut SettingsWindow, _: f64, tx: &mut Tx) -> bool {
 fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
-        // A sheet over it first (a Look Preset's, the App icon's), then the window.
-        Key::Command('w') if s.sheet.as_ref().is_some_and(SettingsSheet::over) => model::settings::close_over(s),
-        Key::Command('w') => model::settings::close(s),
+        Key::Command('w') => model::settings::close_front(s),
         Key::Command('q') => tx.quit(),
         _ if shortcuts::command_of(ev) == Some(commands::InApp::Undo.into()) => s.main.post(|s, _| changes::press(s)),
         _ => return false,
@@ -1277,13 +1276,12 @@ fn main() {
     let reset = if !headless { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
     // The toolbar is in the titlebar band (#33): only its empty parts move the window.
     let main_app = App::new(spec()).chrome(rune::Chrome { drag_regions: true, ..rune::Chrome::DEFAULT });
-    let app = platform::menu_bar::items().into_iter().fold(main_app, App::menu_item);
-    let mut app = app.standard_menus().keep_running().on_open_url(platform::open_url).on_focus(on_focus).on_reopen(on_reopen);
+    let mut app = main_app.standard_menus().keep_running().on_open_url(platform::open_url).on_focus(on_focus).on_reopen(on_reopen);
     let handle = app.handle();
     let looks = looks(headless);
     #[cfg(target_os = "macos")]
     if !headless {
-        platform::menu_bar::install();
+        platform::menu_bar::install(handle.clone());
         let opened = handle.clone();
         platform::open_documents::listen(move |paths| opened.update(move |s, tx| platform::open_files(s, &paths, tx)));
         platform::app_icon::appkit::install(looks.app_icons());

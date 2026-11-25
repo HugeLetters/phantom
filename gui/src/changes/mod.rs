@@ -343,6 +343,14 @@ pub fn press_action(s: &mut Phantom, seq: u64) {
     }
 }
 
+/// Whether ⌘Z has a change to take back ([`press`]).
+pub fn can_undo(s: &Phantom) -> bool {
+    match &s.changes.session {
+        Some(session) => session.top(&s.changes.state).is_some(),
+        None => s.changes.state.top().is_some(),
+    }
+}
+
 /// What Edit ▸ Undo says: the change ⌘Z would take back, "Undo Port Change", "Undo Remove of
 /// Album"; else "Undo", as while a field of Settings is being edited with Settings in front, whose
 /// own undo ⌘Z then is.

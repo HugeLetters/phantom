@@ -374,7 +374,7 @@ fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError, of: Option<T
     s.bar.tell(notice.with_actions(folder.map(crate::notice::NoticeAction::folder).into_iter().chain(check).collect()));
 }
 
-/// A command key's Open or Reveal for torrent `id` (⌘O, ⌘↓, ⇧⌘O): done only if its location is on
+/// A command key's Open or Reveal for torrent `id` (⌘O, ⇧⌘O): done only if its location is on
 /// disk now, as for any item not offered nothing happens otherwise (#307).
 pub fn press_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
     if located(s, id, how).is_some_and(|p| s.finder.exists(&p)) {

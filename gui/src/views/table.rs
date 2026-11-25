@@ -135,7 +135,12 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
         })
         .on_select(|s: &mut Phantom, _, _| follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane));
     // A right-click on the header (the rows' cells have their own menu) lists the columns.
-    ui.table(s, table).grow(1.0).min_h(0.0).on_secondary_press_local(columns_menu::open).child(grips(s, ui, fitted, width - layout::TOGGLE))
+    ui.table(s, table)
+        .grow(1.0)
+        .min_h(0.0)
+        .on_secondary_press_local(columns_menu::open)
+        .on_key_preview(crate::shortcuts::on_list_key)
+        .child(grips(s, ui, fitted, width - layout::TOGGLE))
 }
 
 /// The toggle's column id.
@@ -268,9 +273,7 @@ fn sort_by(s: &mut Phantom, c: Column) {
     if std::mem::take(&mut s.prefs.moved) {
         return;
     }
-    let dir = s.table.next_sort(c.id());
-    s.table.set_sort(c.id(), dir);
-    sort(&mut s.torrents, c.id(), dir);
+    crate::model::sort_by(s, c);
 }
 
 /// Statuses that need the user look like errors; the rest are secondary.

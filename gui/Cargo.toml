@@ -32,9 +32,9 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSAppleEventDescriptor", "NSArray", "NSAppleEventManager", "NSData", "NSKeyValueObserving", "NSNotification", "NSString", "NSURL"] }
-# AppKit for the App icon, Edit ▸ Undo's title and the Settings window's frame, typed; the version
+# AppKit for the App icon, the menu bar's standard items and the Settings window's frame, typed; the version
 # Rune already builds (through rfd).
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAppearance", "NSApplication", "NSEvent", "NSImage", "NSMenu", "NSMenuItem", "NSResponder", "NSScreen", "NSView", "NSWindow", "NSWorkspace"] }
 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }
