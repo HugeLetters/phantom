@@ -120,6 +120,23 @@ fn copy_magnet_link_in_the_refusal_copies_the_torrent_that_stays_off_the_list() 
     assert_eq!(shorts(&rt).last().map(String::as_str), Some("Copied the magnet link"));
 }
 
+/// A refused undo offers only its own buttons: Copy magnet link (and Reveal in Finder, while its
+/// path is on disk), never a failure's Try again, Move to…, Rename… or Check (#367).
+#[test]
+fn the_refusal_offers_no_retry_buttons_and_pressing_copy_keeps_its_notice() {
+    let mut rt = album_removed_then("Album", Status::Downloading, false);
+    undo(&mut rt);
+    let id = rt.state.bar.entries().last().expect("a notice").id;
+    super::generated::show_notice(&mut rt, id);
+    let drawn = super::generated::texts_under(&mut rt, &format!("notice/{id}"));
+    for other in ["Try again", "Move to…", "Rename…", "Check"] {
+        assert!(!drawn.iter().any(|l| l == other), "{other} isn't for a refusal: {drawn:?}");
+    }
+    assert_eq!(drawn.last().map(String::as_str), Some("Copy magnet link"), "{drawn:?}");
+    tap(&mut rt, "notice-action");
+    assert!(rt.state.bar.entries().iter().any(|e| e.id == id), "Copy magnet link isn't a once button");
+}
+
 /// The Remove's own notice, back in its place, has its Undo off and says why, with both names.
 #[test]
 fn the_removes_notice_says_why_its_undo_is_off() {
