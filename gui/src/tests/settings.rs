@@ -3182,7 +3182,7 @@ fn a_refusal_goes_with_the_field_a_split_takes_away() {
 }
 
 /// Settings on Appearance, two saved presets, the window 600 pt wide.
-fn appearance_tab() -> Desk {
+pub(super) fn appearance_tab() -> Desk {
     let mut d = desk(MemoryService::new());
     let fresh = LookPreset::fresh();
     let list = ["System", "Night"].map(|n| SavedPreset { name: Name::parse(n).unwrap(), preset: fresh.clone() }).to_vec();

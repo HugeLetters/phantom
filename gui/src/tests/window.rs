@@ -503,7 +503,7 @@ fn the_tabs_switch_and_the_last_is_kept() {
 }
 
 /// A torrent of 3.3 GiB with 4.1 GiB Off, which uploaded 960 MiB, its disk full, named `name`.
-fn tears(name: &str) -> MemoryService {
+pub(super) fn tears(name: &str) -> MemoryService {
     let t = TorrentInfo { status: Status::Error { failure: TorrentFailure::DiskFull }, uploaded_bytes: 960 * MIB, ..torrent(1, name) };
     let file = |index, size_bytes, priority| File {
         index,

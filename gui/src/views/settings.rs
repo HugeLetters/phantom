@@ -75,6 +75,7 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     let appearance = Appearance::of(cx.system_dark());
     let look = s.looks().shown(appearance).clone();
     let ui = &look.ui;
+    cx.help_look(ui.help_look());
     let Some(sheet) = &s.sheet else {
         return ui.root(ui.window_page("settings", "Settings", el(), None, |_: &mut SettingsWindow| {}), Vec::new());
     };
