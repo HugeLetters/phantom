@@ -9,13 +9,13 @@ use std::borrow::Cow;
 
 use client::display;
 use proto::{Action, Status, TorrentInfo};
-use rune::{Align, Cursor, Drag, El, Phase, Tx, el, row};
+use rune::{Align, Anim, Cursor, Curve, Drag, Easing, El, Phase, Tx, el, row};
 
 use super::{columns_menu, row_menu, space, speed, status_reason};
 use crate::model::layout::{self, Column, Fitted};
 use crate::model::{Phantom, follow_selection, sort};
 use crate::platform::open_torrent;
-use crate::ui::{Table, TableColumn, Tone, Ui};
+use crate::ui::{Cell, Table, TableColumn, Tone, Ui};
 
 /// The room the space warning's icon takes in a Status cell.
 const SPACE_ICON: f32 = 18.0;
@@ -65,7 +65,7 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
     // header offers it, as its field is the header's name (ADR 0013).
     s.mounted.offer(crate::commands::OnTorrents::ALL.into_iter().filter(|c| *c != crate::commands::OnTorrents::Rename));
     let cui = ui.clone();
-    let mut table = Table::new(
+    let table = Table::new(
         |s: &Phantom| &s.table,
         |s: &mut Phantom| &mut s.table,
         |s: &Phantom| s.torrents.len(),
@@ -73,58 +73,33 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
     )
     .name("Torrents");
     // The toggle first, whatever the order: no column the person can move or hide.
-    table = table.column(TableColumn::new(TOGGLE_ID, "").width(layout::TOGGLE).min(layout::TOGGLE).max(layout::TOGGLE).resizable(false));
-    for (c, width) in fitted {
-        table = table.column(match width {
-            None => declared(*c).flex(1.0).min(dragged(s, ui, *c)),
-            Some(w) => declared(*c).width(*w),
-        });
-    }
+    let table =
+        table.column(TableColumn::new(TOGGLE_ID, "").width(layout::TOGGLE).min(layout::TOGGLE).max(layout::TOGGLE).resizable(false));
+    let columns: Vec<(Column, TableColumn)> = fitted.iter().map(|(c, width)| (*c, sized(s, ui, *c, *width))).collect();
+    // The table itself holds only the toggle: its own cells can't slide (rune-kit has no hook for a
+    // cell), so each row and the header get the columns' cells here, drawn as its own would be.
+    let (rows, rui) = (columns.clone(), ui.clone());
     let table = table
-        .cell(move |s: &Phantom, i, column| {
+        .cell(move |s: &Phantom, i, _| {
             let t = &s.torrents[i];
             let id = t.id;
-            let content = match (column, t.content) {
-                (TOGGLE_ID, _) => {
-                    let toggle = layout_toggle(s, &cui, t);
-                    return cui.hover_cell(
-                        toggle,
-                        Align::Center,
-                        move |s: &mut Phantom, press, tx| row_menu::open(s, id, press, tx),
-                        hover(id),
-                    );
-                }
-                ("name", _) => cui.cell_text(t.display_name(), Tone::Normal, false),
-                // The free-space warning, while its disk is short for the torrents that need it (#127,
-                // #209): its status as ever, in the warning colour with a warning icon, and the
-                // disk's picture on hover.
-                ("status", _) => match (space::short_on_space(s, id), status_reason(t)) {
-                    (Some(why), _) => cui.warned_text(client::display::status(&t.status), why, format!("short-on-space/{id}")),
-                    (None, Some(reason)) => cui.text_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
-                    // Moving, what's copied of what it copies, on hover (#24).
-                    (None, None) => match display::move_progress(&t.status) {
-                        Some(copied) => cui.text_with_help(client::display::status(&t.status), status_tone(&t.status), copied),
-                        None => cui.cell_text(client::display::status(&t.status), status_tone(&t.status), false),
-                    },
-                },
-                // Nothing to show until the torrent's info arrives. Not an indeterminate bar: a
-                // magnet can fetch for minutes, and a looping animation would keep the window
-                // drawing the whole time.
-                (_, None) => cui.cell_text("–", Tone::Muted, true),
-                // Moving, what's copied of what it copies (#24); its status says how much on hover.
-                ("progress", _) if matches!(t.status, Status::Moving { total, .. } if total > 0) => {
-                    let Status::Moving { done, total } = t.status else { unreachable!() };
-                    cui.progress_bar((done as f64 / total as f64) as f32)
-                }
-                ("progress", Some(c)) => cui.progress_bar(c.progress()),
-                ("size", Some(c)) => cui.cell_text(display::bytes(c.size_bytes), Tone::Normal, true),
-                ("down", _) => cui.cell_text(speed(t.download_bytes_per_sec), Tone::Normal, true),
-                ("up", _) => cui.cell_text(speed(t.upload_bytes_per_sec), Tone::Normal, true),
-                ("peers", _) => cui.cell_text(t.live_peers.to_string(), Tone::Normal, true),
-                _ => cui.cell_text(t.eta().map(display::duration).unwrap_or_else(|| "–".into()), Tone::Muted, true),
-            };
-            let align = if matches!(column, "size" | "down" | "up" | "peers" | "eta") { Align::End } else { Align::Start };
-            cui.hover_cell(content, align, move |s: &mut Phantom, press, tx| row_menu::open(s, id, press, tx), hover(id))
+            let toggle = layout_toggle(s, &cui, t);
+            Cell::el(cui.hover_cell(toggle, Align::Center, move |s: &mut Phantom, press, tx| row_menu::open(s, id, press, tx), hover(id)))
+        })
+        .row(move |s: &Phantom, i, mut row| {
+            let t = &s.torrents[i];
+            let id = t.id;
+            for (c, column) in &rows {
+                let content = rui.hover_cell(
+                    content(s, &rui, t, *c),
+                    column.alignment(),
+                    move |s: &mut Phantom, press, tx| row_menu::open(s, id, press, tx),
+                    hover(id),
+                );
+                row = row.child(rui.column_cell(column, content, slide(s, *c)));
+            }
+            // A list's rows lay their cells out at once unless they say so.
+            if s.prefs.slide.is_some() { row.animate_layout() } else { row }
         })
         .on_sort(|s: &mut Phantom, column, dir, _| sort(&mut s.torrents, column, dir))
         // Double-click, or Return: Open.
@@ -135,7 +110,74 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
         })
         .on_select(|s: &mut Phantom, _, _| follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane));
     // A right-click on the header (the rows' cells have their own menu) lists the columns.
-    ui.table(s, table).grow(1.0).min_h(0.0).on_secondary_press_local(columns_menu::open).child(grips(s, ui, fitted, width - layout::TOGGLE))
+    let header = header(s, ui, &columns);
+    ui.table(s, table).grow(1.0).min_h(0.0).on_secondary_press_local(columns_menu::open).child(header).child(grips(
+        s,
+        ui,
+        fitted,
+        width - layout::TOGGLE,
+    ))
+}
+
+/// What a torrent's cell in column `c` shows.
+fn content(s: &Phantom, ui: &Ui, t: &TorrentInfo, c: Column) -> El {
+    let id = t.id;
+    match (c.id(), t.content) {
+        ("name", _) => ui.cell_text(t.display_name(), Tone::Normal, false),
+        // The free-space warning, while its disk is short for the torrents that need it (#127,
+        // #209): its status as ever, in the warning colour with a warning icon, and the
+        // disk's picture on hover.
+        ("status", _) => match (space::short_on_space(s, id), status_reason(t)) {
+            (Some(why), _) => ui.warned_text(client::display::status(&t.status), why, format!("short-on-space/{id}")),
+            (None, Some(reason)) => ui.text_with_help(client::display::status(&t.status), status_tone(&t.status), reason),
+            // Moving, what's copied of what it copies, on hover (#24).
+            (None, None) => match display::move_progress(&t.status) {
+                Some(copied) => ui.text_with_help(client::display::status(&t.status), status_tone(&t.status), copied),
+                None => ui.cell_text(client::display::status(&t.status), status_tone(&t.status), false),
+            },
+        },
+        // Nothing to show until the torrent's info arrives. Not an indeterminate bar: a
+        // magnet can fetch for minutes, and a looping animation would keep the window
+        // drawing the whole time.
+        (_, None) => ui.cell_text("–", Tone::Muted, true),
+        // Moving, what's copied of what it copies (#24); its status says how much on hover.
+        ("progress", _) if matches!(t.status, Status::Moving { total, .. } if total > 0) => {
+            let Status::Moving { done, total } = t.status else { unreachable!() };
+            ui.progress_bar((done as f64 / total as f64) as f32)
+        }
+        ("progress", Some(c)) => ui.progress_bar(c.progress()),
+        ("size", Some(c)) => ui.cell_text(display::bytes(c.size_bytes), Tone::Normal, true),
+        ("down", _) => ui.cell_text(speed(t.download_bytes_per_sec), Tone::Normal, true),
+        ("up", _) => ui.cell_text(speed(t.upload_bytes_per_sec), Tone::Normal, true),
+        ("peers", _) => ui.cell_text(t.live_peers.to_string(), Tone::Normal, true),
+        _ => ui.cell_text(t.eta().map(display::duration).unwrap_or_else(|| "–".into()), Tone::Muted, true),
+    }
+}
+
+/// A column as the list shows it, `width` wide or taking the rest.
+fn sized(s: &Phantom, ui: &Ui, c: Column, width: Option<f32>) -> TableColumn {
+    match width {
+        None => declared(c).flex(1.0).min(dragged(s, ui, c)),
+        Some(w) => declared(c).width(w),
+    }
+}
+
+/// How `c` goes to a new place: at once if it's the one dragged, else sliding. `None` while no
+/// column is dragged. Rune lands it at once under Reduce Motion.
+fn slide(s: &Phantom, c: Column) -> Option<Anim> {
+    let slide = s.prefs.slide?;
+    Some(if slide.column == c { Anim::INSTANT } else { Curve::tween(layout::SLIDE, Easing::EASE_OUT).into() })
+}
+
+/// The columns' headers, over the table's own header.
+fn header(s: &Phantom, ui: &Ui, columns: &[(Column, TableColumn)]) -> El {
+    let mut header = row().key("columns").pin(Some(0.0), Some(0.0), Some(0.0), None).h(layout::TABLE_HEADER);
+    header = header.child(el().w(layout::TOGGLE));
+    for (i, (c, column)) in columns.iter().enumerate() {
+        let sorted = s.table.sort().filter(|(id, _)| *id == c.id()).map(|(_, dir)| dir);
+        header = header.child(ui.column_header(column, sorted, i + 1 == columns.len(), slide(s, *c)));
+    }
+    header
 }
 
 /// The toggle's column id.
@@ -205,7 +247,7 @@ fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
         let active = s.prefs.moving.as_ref().is_some_and(|m| m.column == c);
         let (all, shown, left) = (spans.clone(), shown.clone(), start + GRIP_INSET);
         let grip = ui.column_grip(active).key("grip").on_press(move |s: &mut Phantom| sort_by(s, c)).on_drag(
-            move |s: &mut Phantom, d: &mut Drag, _: &mut Tx| match d.phase {
+            move |s: &mut Phantom, d: &mut Drag, tx: &mut Tx| match d.phase {
                 Phase::Down => {
                     s.prefs.moved = false;
                     s.prefs.start_move(c);
@@ -213,14 +255,25 @@ fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
                 }
                 Phase::Move if d.dx.abs() > DRAG_SLOP || s.prefs.moved => {
                     s.prefs.moved = true;
-                    s.prefs.move_to(&shown, layout::drop_index(&all, c, d.data + d.dx));
+                    // Rune applies a drag's moves at once: a new order slides instead.
+                    if s.prefs.move_to(&shown, layout::drop_index(&all, c, d.data + d.dx)) {
+                        tx.animated();
+                    }
                 }
                 Phase::Move => {}
-                Phase::Up => s.prefs.end_move(d.cancelled()),
+                Phase::Up => {
+                    s.prefs.end_move(d.cancelled());
+                    if d.cancelled() {
+                        tx.animated();
+                    }
+                }
             },
         );
         let drawn = spans.iter().find(|(s, _)| *s == c).map_or(0.0, |(_, w)| *w);
         let mut cell = cell.key(c.id()).h_full().px(GRIP_INSET).child(grip);
+        if let Some(anim) = slide(s, c) {
+            cell = cell.frame_motion(anim);
+        }
         // Status is as wide as its longest word: no edge to drag.
         if c != Column::Status {
             let bounds = declared(c);

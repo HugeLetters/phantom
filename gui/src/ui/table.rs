@@ -2,10 +2,10 @@
 //! [`Ui::table`], which draws it in the current look. Cells that need the look's colours come
 //! from here too.
 
-use rune::{Align, El, PointerPress, Tx, icon, row, text};
+use rune::{Align, Anim, El, PointerPress, Tx, icon, row, text};
 
 use rune_kit::TableStyle;
-pub use rune_kit::{Cell, Table, TableColumn};
+pub use rune_kit::{Cell, SortDir, Table, TableColumn};
 
 use super::{Icon, Tone, Ui};
 
@@ -122,7 +122,7 @@ impl Ui {
         align: Align,
         on_menu: impl Fn(&mut S, PointerPress, &mut Tx) + 'static,
         on_hover: impl Fn(&mut S, bool) -> bool + 'static,
-    ) -> Cell {
+    ) -> El {
         let cell = row()
             .w_full()
             .h_full()
@@ -134,11 +134,51 @@ impl Ui {
                 }
             })
             .child(content);
-        Cell::el(match align {
-            Align::Start => cell,
-            Align::Center => cell.justify_center(),
-            Align::End => cell.justify_end(),
-        })
+        justify(cell, align)
+    }
+
+    /// `content` in a row as the table's own cell of `column` holds it, `moved` as its column slides.
+    pub fn column_cell(&self, column: &TableColumn, content: El, moved: Option<Anim>) -> El {
+        let style = TableStyle::from_kit(&self.k);
+        let cell = row().role("gridcell").h_full().px(style.cell_pad).center_y().clip_soft(0.0);
+        let cell = justify(column.size_el(cell, None), column.alignment()).key(column.id().to_owned()).child(content);
+        match moved {
+            Some(anim) => cell.frame_motion(anim),
+            None => cell,
+        }
+    }
+
+    /// A column's header as the table's own draws it, its presses aside (the grips take those).
+    pub fn column_header(&self, column: &TableColumn, sorted: Option<SortDir>, last: bool, moved: Option<Anim>) -> El {
+        let style = TableStyle::from_kit(&self.k);
+        let title = text(column.title().to_owned())
+            .key("title")
+            .font(style.header_font)
+            .color(if sorted.is_some() { style.text } else { style.header_text })
+            .truncate()
+            .shrink()
+            .min_w(0.0)
+            .help_when_truncated(column.title().to_owned());
+        let mut inner = row().key("inner").gap(2.0).center_y().min_w(0.0).shrink().child(title).a11y_hidden();
+        if let Some(d) = sorted {
+            let glyph = if d == SortDir::Ascending { self.k.glyph.chevron_up } else { self.k.glyph.chevron_down };
+            inner = inner.child(icon(glyph, 14.0).key("sort").color(style.text));
+        }
+        let cell = row()
+            .role("columnheader")
+            .label(column.title().to_owned())
+            .sorted(sorted.map(|d| d == SortDir::Ascending))
+            .h_full()
+            .px(style.cell_pad)
+            .center_y();
+        let mut cell = justify(column.size_el(cell, None), column.alignment()).key(column.id().to_owned()).child(inner);
+        if !last {
+            cell = cell.child(rune::el().key("rule").pin(None, Some(8.0), Some(0.0), Some(8.0)).w(1.0).fill(style.rule).a11y_hidden());
+        }
+        match moved {
+            Some(anim) => cell.frame_motion(anim),
+            None => cell,
+        }
     }
 
     /// A cell whose whole area answers a right-click with `on_menu`: the table has no hook for a
@@ -165,5 +205,13 @@ impl Ui {
             Some(f) => cell.key("press").on_press(f),
             None => cell,
         })
+    }
+}
+
+fn justify(cell: El, align: Align) -> El {
+    match align {
+        Align::Start => cell,
+        Align::Center => cell.justify_center(),
+        Align::End => cell.justify_end(),
     }
 }

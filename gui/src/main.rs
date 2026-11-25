@@ -65,6 +65,7 @@ fn poll(s: &mut Phantom, now: f64, tx: &mut Tx) -> bool {
     model::close_empty_menu(s);
     model::renaming::follow_focus(s);
     platform::menu_bar::name_undo(&changes::menu_title(s));
+    s.prefs.slide_passed(now);
     scripted_drag(now, tx);
     // After the answers, so a notice they tell starts its clock in this frame.
     let changed = s.bar.passed(now) || changed;

@@ -39,7 +39,7 @@ pub use palette::PaletteRow;
 pub(crate) use sheet::NAME_LINE;
 pub use sheet::{Halves, IMAGES, LookChip, TRAFFIC_LIGHTS};
 pub use status::Tone;
-pub use table::{Table, TableColumn};
+pub use table::{Cell, Table, TableColumn};
 pub use tabs::BandSide;
 pub use text_field::TEXT_INSET;
 

@@ -362,6 +362,16 @@ pub struct Moving {
     before: ColumnOrder,
 }
 
+/// How long a column a drag passes takes to slide into its place, in seconds.
+pub const SLIDE: f32 = 0.15;
+
+/// The columns sliding aside for `column`, which itself doesn't slide.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slide {
+    pub column: Column,
+    until: Option<f64>,
+}
+
 /// The person's choices about the main window, kept in `gui.json`: the columns' order and those
 /// they hid, the height they dragged the details pane to and its tab. Each change is kept at once
 /// through `keep` (nowhere in headless runs and tests, unless a test gives one).
@@ -372,6 +382,8 @@ pub struct WindowPrefs {
     pub dragging: Option<f32>,
     /// The column being dragged along the header: the order changes as it goes, kept when let go.
     pub moving: Option<Moving>,
+    /// The columns a drag passes slide while it's on and for [`SLIDE`] after it ends.
+    pub slide: Option<Slide>,
     /// The last press on a header moved its column: it doesn't sort too.
     pub moved: bool,
     /// The column whose edge is being dragged: kept when let go.
@@ -389,7 +401,7 @@ pub const PANE_TAB: &str = "details_tab";
 impl WindowPrefs {
     /// As `kept` says, each change kept through `keep`.
     pub fn new(kept: Kept, keep: impl Fn(&'static str, serde_json::Value) + 'static) -> Self {
-        Self { kept, dragging: None, moving: None, moved: false, resizing: None, keep: Some(Rc::new(keep)) }
+        Self { kept, dragging: None, moving: None, slide: None, moved: false, resizing: None, keep: Some(Rc::new(keep)) }
     }
 
     /// As `kept` says, kept nowhere.
@@ -469,15 +481,30 @@ impl WindowPrefs {
     /// A drag on `column`'s header began.
     pub fn start_move(&mut self, column: Column) {
         self.moving = Some(Moving { column, before: self.kept.order.clone() });
+        self.slide = Some(Slide { column, until: None });
     }
 
     /// The dragged column is over index `to` of those `shown` (in order, the dragged one among
-    /// them): it goes there, the others shown shifting, the rest keeping their places.
-    pub fn move_to(&mut self, shown: &[Column], to: usize) {
-        let Some(moving) = &self.moving else { return };
+    /// them): it goes there, the others shown shifting, the rest keeping their places. Whether that
+    /// changed the order.
+    pub fn move_to(&mut self, shown: &[Column], to: usize) -> bool {
+        let Some(moving) = &self.moving else { return false };
         let mut moved: Vec<Column> = shown.iter().copied().filter(|c| *c != moving.column).collect();
         moved.insert(to.min(moved.len()), moving.column);
-        self.kept.order = self.kept.order.with_shown(shown, &moved);
+        let order = self.kept.order.with_shown(shown, &moved);
+        std::mem::replace(&mut self.kept.order, order) != self.kept.order
+    }
+
+    /// The clock is at `now`: once the drag ended, its slide runs out [`SLIDE`] later.
+    pub fn slide_passed(&mut self, now: f64) {
+        let Some(slide) = &mut self.slide else { return };
+        if self.moving.is_some() {
+            return;
+        }
+        // A frame more than the slide, so nothing lands early.
+        if now > *slide.until.get_or_insert(now + SLIDE as f64 + 0.05) {
+            self.slide = None;
+        }
     }
 
     /// The drag let go: the order is kept, or, `cancelled`, put back.

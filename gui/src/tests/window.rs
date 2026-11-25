@@ -26,7 +26,7 @@ const INFO_LINES: usize = 4;
 fn header(rt: &Runtime<Phantom>) -> Vec<(Column, [f32; 4])> {
     rt.elements()
         .into_iter()
-        .filter(|e| !e.exiting && e.role == "columnheader" && e.path.contains("/list/table/header/"))
+        .filter(|e| !e.exiting && e.role == "columnheader" && e.path.contains("/list/table/columns/"))
         .filter_map(|e| Some((Column::from_id(e.key.as_deref()?)?, e.rect)))
         .collect()
 }
@@ -1393,4 +1393,94 @@ fn the_columns_menu_stays_open_across_picks() {
     rt.pointer_up(2.0, 2.0);
     settle(&mut rt);
     assert!(columns_menu(&rt).is_empty(), "a press outside closes it");
+}
+
+/// A column a drag passes slides into its place, the dragged one goes there at once; Escape slides
+/// them back.
+#[test]
+fn a_passed_column_slides_and_the_dragged_one_does_not() {
+    let x = |rt: &Runtime<Phantom>, path: &str| rt.elements().into_iter().find(|e| e.path.ends_with(path)).unwrap().rect[0];
+    let at = |rt: &Runtime<Phantom>| ["columns/size", "rows/0/size", "columns/down", "rows/0/down"].map(|p| x(rt, p));
+    let mut rt = app(listed());
+    resize(&mut rt, 1400.0, 540.0);
+    let before = at(&rt);
+    let (gx, gy) = rt.find("grips/size/grip").unwrap();
+    rt.pointer_down(gx, gy);
+    rt.frame(FRAME);
+    let mut step = 0.0;
+    while shown(&rt)[3] == Column::Size {
+        step += 10.0;
+        rt.pointer_move(gx + step, gy);
+        rt.frame(FRAME);
+    }
+    let early = at(&rt);
+    settle(&mut rt);
+    let rest = at(&rt);
+    for i in [2, 3] {
+        assert!(early[i] < before[i] && early[i] > rest[i], "mid-slide: {before:?} {early:?} {rest:?}");
+    }
+    for i in [0, 1] {
+        assert!((early[i] - rest[i]).abs() < 0.5, "at once: {early:?} {rest:?}");
+    }
+    rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    rt.frame(FRAME);
+    let back = at(&rt);
+    assert!(back[3] > rest[3] && back[3] < before[3], "sliding back: {rest:?} {back:?} {before:?}");
+    rt.pointer_up(gx + step, gy);
+    settle(&mut rt);
+    assert_eq!(at(&rt), before);
+}
+
+/// Reduce Motion: at once.
+#[test]
+fn reduce_motion_moves_passed_columns_at_once() {
+    let mut rt = app(listed());
+    rt.set_system_reduced_motion(true);
+    resize(&mut rt, 1400.0, 540.0);
+    let before = shown(&rt);
+    let (x, y) = rt.find("grips/size/grip").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_move(x + 120.0, y);
+    rt.frame(FRAME);
+    assert_ne!(shown(&rt), before);
+    let cells = |rt: &Runtime<Phantom>| -> Vec<[f32; 4]> {
+        rt.elements().into_iter().filter(|e| e.role == "gridcell" || e.role == "columnheader").map(|e| e.rect).collect()
+    };
+    let now = cells(&rt);
+    settle(&mut rt);
+    assert_eq!(now, cells(&rt));
+}
+
+/// Not a check: what frames cost while a column is dragged back and forth over a list of 500.
+#[test]
+#[ignore]
+fn column_drag_frame_cost() {
+    let mut rt = app(MemoryService::new().with_torrents((0..500).map(|i| torrent(i, &format!("Torrent number {i}"))).collect()));
+    resize(&mut rt, 1400.0, 900.0);
+    let mut at_rest = vec![];
+    for _ in 0..200 {
+        let t = std::time::Instant::now();
+        rt.frame(FRAME);
+        at_rest.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    let (x, y) = rt.find("grips/eta/grip").unwrap();
+    rt.pointer_down(x, y);
+    let mut costs = vec![];
+    for i in 0..600 {
+        let t = std::time::Instant::now();
+        rt.pointer_move(x - 400.0 + 400.0 * (i as f32 / 20.0).cos(), y);
+        rt.frame(FRAME);
+        costs.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    for c in [&mut at_rest, &mut costs] {
+        c.sort_by(f64::total_cmp);
+        println!("frames {} median {:.3} ms p95 {:.3} max {:.3}", c.len(), c[c.len() / 2], c[c.len() * 95 / 100], c[c.len() - 1]);
+    }
+    rt.pointer_up(x, y);
+    let mut drawing = 0;
+    while rt.frame(FRAME) && drawing < 600 {
+        drawing += 1;
+    }
+    let rows = rt.elements().iter().filter(|e| e.role == "row" && e.path.contains("/rows/")).count();
+    println!("frames drawing after the drop: {drawing}; rows mounted {rows}");
 }
