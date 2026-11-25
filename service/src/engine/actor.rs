@@ -186,7 +186,7 @@ pub(super) struct Actor {
     data_dir: PathBuf,
     pub(super) download_dir: PathBuf,
     /// Which torrents librqbit may create files for: not those whose destination is unavailable.
-    guard: Guard,
+    pub(super) guard: Guard,
     /// The ids given so far, and where the records are kept.
     pub(super) store: Store,
     pub(super) torrents: BTreeMap<TorrentId, Torrent>,
@@ -1048,6 +1048,15 @@ impl Actor {
                 // Not while it has pieces to let go of (#234): librqbit would offer some it can't read,
                 // and drop each peer that asks. It starts once it's added back without them.
                 (lib::Do::Start, Some(_)) if matches!(torrent.record.letting_go, machine::letgo::State::Gone { .. }) => return Ok(()),
+                // Nor is a file to let go of, set Normal again, handed to it as it runs (#402): one in use
+                // isn't closed yet, and would be downloaded into where it went. Added back, it gets it.
+                (lib::Do::Priorities, Some(handle))
+                    if handle.live().is_some()
+                        && matches!(&torrent.record.letting_go, machine::letgo::State::Gone { pieces }
+                            if pieces.keys().any(|i| torrent.record.gets(*i))) =>
+                {
+                    return Ok(());
+                }
                 // Nor with a file there of a size it can't have (#374), nor is such a file handed to it
                 // as it runs: it would be downloaded into until the next size check, which judges the
                 // files the same way and makes it Missing files, or, put right by then, carries this out.
@@ -1748,10 +1757,11 @@ impl Actor {
     /// Torrent `id`'s files `indices`, set Normal, that aren't at their paths (#276): each is
     /// downloaded from nothing, not Missing files, which is for a file it gets that vanished.
     /// librqbit's pieces of each are let go of, as they're of a file that's elsewhere (in the Trash
-    /// for an undo, `in_trash`, which it reads there) or gone; and each is made at its path, as an
-    /// add makes a file a torrent gets, so the size check finds it there, and librqbit, added back,
-    /// opens it there. Not one just put `back` by an
-    /// undo, nor one missing already: that one vanished while it was Normal.
+    /// for an undo, `in_trash`, which it reads there) or gone. So is one it has open with none had
+    /// (#402), or it would be downloaded into where it went, not at its path. Each is made at its path,
+    /// as an add makes a file a torrent gets, so the size check finds it there, and librqbit, added
+    /// back, opens it there. Not one just put `back` by an undo, nor one missing already: that one
+    /// vanished while it was Normal.
     fn normal_again(&mut self, id: TorrentId, indices: &[usize], in_trash: &BTreeSet<usize>, back: &BTreeSet<usize>) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(info) = &torrent.record.info else { return };
@@ -1769,9 +1779,10 @@ impl Actor {
             return;
         }
         let hash = torrent.record.info_hash.clone();
+        let open = self.guard.trashed().open(&hash);
         let gone: machine::letgo::Pieces = again
             .iter()
-            .filter(|i| in_trash.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
+            .filter(|i| in_trash.contains(i) || open.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
             .map(|&i| (i, (info.files[i].pieces.start, info.files[i].pieces.end)))
             .collect();
         let made: Vec<(usize, PathBuf, u64)> = again.iter().map(|&i| (i, paths[i].clone(), info.files[i].len)).collect();

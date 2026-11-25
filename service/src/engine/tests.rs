@@ -5552,6 +5552,7 @@ mod links;
 mod moving;
 mod never_cut;
 mod oracle;
+mod off_gone;
 mod renaming;
 
 /// A .torrent that can't be read at a start keeps its torrent (#244's review): listed under its id,

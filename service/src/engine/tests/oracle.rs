@@ -205,13 +205,10 @@ impl Open {
     }
 }
 
-/// A file Off and gone from its path, set Normal while its torrent is stopped, stays a file of zeros
-/// at its path, shown as downloaded: new, found by this test.
-const OFF_GONE: &str = "a file Off and gone, set Normal while stopped";
 /// A piece under way as the torrent is paused isn't asked for again until a start.
 const PAUSED: &str = "#375: a piece under way at a pause";
 /// What leaves a torrent stuck today.
-const STUCK_OPEN: &[&str] = &[PAUSED, OFF_GONE];
+const STUCK_OPEN: &[&str] = &[PAUSED];
 
 /// Whether the person allowed their file to be written over.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -606,8 +603,6 @@ struct World {
     made: usize,
     paused: bool,
     ever_paused: bool,
-    /// Files set Normal while gone from their path.
-    off_gone: BTreeSet<usize>,
     renames: usize,
     /// What may still be under way: since it last settled.
     recent: BTreeSet<Route>,
@@ -658,7 +653,6 @@ impl World {
             made: 0,
             paused: case.paused,
             ever_paused: false,
-            off_gone: BTreeSet::new(),
             renames: 0,
             recent: BTreeSet::new(),
             missing: Default::default(),
@@ -1112,7 +1106,6 @@ impl World {
                 }
             }
             Do::Normal { file } => {
-                self.set_normal(&[file]);
                 self.off.remove(&file);
                 TorrentCommand::SetPriority { files: vec![file], priority: Priority::Normal }
             }
@@ -1205,11 +1198,6 @@ impl World {
         if moves && meanwhile.is_some() {
             self.theirs.iter_mut().for_each(|t| t.relocated = true);
         }
-    }
-
-    fn set_normal(&mut self, files: &[usize]) {
-        let gone: Vec<usize> = files.iter().copied().filter(|f| inode(&self.at(*f)).is_none()).collect();
-        self.off_gone.extend(gone);
     }
 
     fn release(&self) {
@@ -1392,7 +1380,6 @@ impl World {
         self.refresh().await;
         let files: Vec<usize> = self.off.iter().copied().collect();
         if !files.is_empty() {
-            self.set_normal(&files);
             let _ = self.command(TorrentCommand::SetPriority { files, priority: Priority::Normal }).await;
         }
         let mut presses = 0;
@@ -1404,14 +1391,6 @@ impl World {
             self.judge("what's theirs is taken");
             let status = self.status().await;
             if status == Some(Status::Seeding) && (0..3).all(|f| self.whole(f)) {
-                break;
-            }
-            if !self.strict
-                && STUCK_OPEN.contains(&OFF_GONE)
-                && status == Some(Status::Seeding)
-                && (0..3).all(|f| self.whole(f) || self.off_gone.contains(&f))
-            {
-                self.power.known.insert(OFF_GONE);
                 break;
             }
             // Nothing more comes of one that has everything, to it.
@@ -1712,10 +1691,16 @@ open! {
         [Step::By(By::TakeAway { file: B }), Step::Settle, put(Same)];
     open_a_shared_piece_goes_into_another_file_at_an_off_ones: "file-trust A: Off, another file there", Nothing, false,
         [Step::Do(Do::Off { file: B }), put(Same), Step::Restart];
-    open_a_file_off_and_gone_set_normal_while_stopped_stays_zeros: "#374: found by this test", Half, false,
-        [Step::Do(Do::Pause), Step::Do(Do::Off { file: B }), Step::By(By::TakeAway { file: B }), Step::Settle, Step::Do(Do::Normal { file: B })];
-    open_a_file_in_the_trash_set_normal_while_stopped_stays_zeros: "#374: found by this test", Half, false,
-        [Step::Do(Do::Pause), Step::Do(Do::TrashFile { file: B }), Step::Settle, Step::Do(Do::Normal { file: B })];
+}
+
+/// #402: gone by hand, or to the Trash: it's downloaded again, not zeros shown as had.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_off_and_gone_set_normal_while_stopped_is_downloaded() {
+    let peers = Peers::start().await;
+    for gone in [vec![Step::Do(Do::Off { file: B }), Step::By(By::TakeAway { file: B })], vec![Step::Do(Do::TrashFile { file: B })]] {
+        let steps = [vec![Step::Do(Do::Pause)], gone, vec![Step::Settle, Step::Do(Do::Normal { file: B })]].concat();
+        World::run(&peers, &Case { start: Start::Half, peer: false, paused: false, before: None, steps }, true).await;
+    }
 }
 
 /// One that depends on when its steps come: some runs of it pass.
