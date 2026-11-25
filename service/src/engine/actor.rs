@@ -43,7 +43,7 @@
 //! Delete moved, on a blocking task like the trashing, then adds the torrent again from what was
 //! kept of it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -1063,6 +1063,7 @@ impl Actor {
                 (lib::Do::Start, Some(_)) if self.any_impossible(id) => return Ok(()),
                 (lib::Do::Priorities, Some(handle)) if handle.live().is_some() && self.any_impossible(id) => return Ok(()),
                 (lib::Do::Start, Some(handle)) => {
+                    self.ask_for_all_not_had(&handle).await?;
                     self.session.unpause(&handle).await?;
                     // librqbit's upload counter starts again with the torrent.
                     if let Some(torrent) = self.torrents.get_mut(&id) {
@@ -1085,6 +1086,23 @@ impl Actor {
                 (lib::Do::Start | lib::Do::Stop | lib::Do::Priorities, None) => unreachable!("only on a torrent librqbit has"),
             }
         }
+        Ok(())
+    }
+
+    /// Has librqbit, stopped, ask its peers for every piece it doesn't have of the files it gets.
+    /// One whose hash it was checking as it was paused it neither has nor asks for again (#375,
+    /// ikatson/rqbit#773), but a file it's told to get has all its missing pieces asked for: so it's
+    /// told to get none, then the same files. No piece is had or lost by it. Both run before the
+    /// actor polls again, so no client sees it getting none. Once librqbit queues such a
+    /// piece itself, this can go.
+    async fn ask_for_all_not_had(&self, handle: &Arc<ManagedTorrent>) -> Result<()> {
+        let stats = handle.stats();
+        if !matches!(stats.state, TorrentStatsState::Paused) || stats.finished {
+            return Ok(());
+        }
+        let files = handle.gets().into_iter().collect();
+        self.session.update_only_files(handle, &HashSet::new()).await?;
+        self.session.update_only_files(handle, &files).await?;
         Ok(())
     }
 
