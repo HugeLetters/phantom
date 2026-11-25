@@ -3159,6 +3159,28 @@ fn join_applies_the_colour_being_typed_first() {
     assert_eq!(accents(&d), [blue, Some(Value::Colour(Rgb([0, 0, 0])))], "⌘Z: the join's copy undone, the colour typed kept");
 }
 
+/// A refusal goes with its field: Split, pressed while text that's no colour is typed into the field
+/// for both, then Join, gives a new field for both, which shows the colour and no refusal (#408).
+/// The old field's came back under it.
+#[test]
+fn a_refusal_goes_with_the_field_a_split_takes_away() {
+    let refused = |d: &Desk| {
+        let of_accent = |key: &str| key.starts_with("edit-accent") && key.ends_with("-refused");
+        d.settings.elements().into_iter().any(|e| !e.exiting && e.key.as_deref().is_some_and(of_accent))
+    };
+    let mut d = accent_sheet();
+    type_into(&mut d, "edit-accent-both", "#123");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    assert!(refused(&d), "Return says why it's no colour");
+    press(&mut d, "edit-accent-split");
+    assert!(!refused(&d), "the two new fields were refused nothing");
+    press(&mut d, "edit-accent-join");
+    assert!(!refused(&d), "nor was the new field for both");
+    let black = Some(Value::Colour(Rgb([0, 0, 0])));
+    assert_eq!(accents(&d), [black, black], "nothing changed");
+}
+
 /// Settings on Appearance, two saved presets, the window 600 pt wide.
 fn appearance_tab() -> Desk {
     let mut d = desk(MemoryService::new());
