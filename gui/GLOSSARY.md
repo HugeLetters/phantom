@@ -112,7 +112,10 @@ the likeliest first, named by what happens, in sentence case. **Try again** (a f
 Delete, Pause or Resume) runs the same command as before, on the failed torrents only, so every
 safety rule, refusal and clash dialog applies again; an add goes again into the folder
 chosen for it; pressing it takes its notice away, so it runs once, and the focus rests in the list, on no
-other notice's button. A failed Move also has **Move to…** (the torrents left); a failed Open of a file that isn't on
+other notice's button. A failed Move also has **Move to…** (the torrents left), and a failed Rename **Rename…**: these two
+keep their notice, with its buttons, until the Move or Rename is sent (cancelling the folder picker, the
+clash dialog or the name field, or leaving the name as it was, sends nothing), then it goes; a Move of
+several sent in part takes it away too; one picker opens at a time; a failed Open of a file that isn't on
 disk has **Check** after Show folder. A button that no longer applies is not shown: its torrent is
 gone (a torrent removed and added again is another, as is one whose id a new torrent list gave out
 again), its command already went through, or the

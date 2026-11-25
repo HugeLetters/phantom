@@ -80,9 +80,10 @@ pub fn move_to(s: &Phantom, ids: &[TorrentId]) -> NoticeAction {
     let listed = of.clone();
     NoticeAction::with_tx(client::display::move_to(), move |s: &mut Phantom, tx: &mut rune::Tx| {
         let ids = applicable(s, &of, Action::Move);
-        moving::pick_folder(s, ids, tx);
+        let leaves = s.leaving;
+        moving::pick_folder(s, ids, leaves, tx);
     })
-    .once()
+    .leaves_when_sent()
     .shown_while(move |s| !applicable(s, &listed, Action::Move).is_empty())
 }
 
@@ -111,9 +112,10 @@ pub fn rename(s: &Phantom, id: TorrentId) -> NoticeAction {
         s.table.select(&id.to_string());
         s.table.reveal(id.to_string(), tx);
         crate::model::renaming::open(s, id);
+        s.rename.leaves = s.leaving;
         s.bar.close();
     })
-    .once()
+    .leaves_when_sent()
     .shown_while(move |s| !applicable(s, &listed, Action::Rename).is_empty())
 }
 

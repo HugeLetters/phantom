@@ -21,6 +21,7 @@ use proto::{AbsolutePath, Action, FileName, Found, MoveOf, NameProblem, NotMoved
 use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::{AddFailure, Phantom, retry};
+use crate::bar::machine::NoticeId;
 use crate::notice::{Listing, Notice, NoticeAction};
 use crate::platform::Show;
 
@@ -97,6 +98,8 @@ pub struct Asking {
     chosen: BTreeMap<TorrentId, (Choice, Vec<Found>)>,
     /// How many clashed when the service answered: the dialogs' counter.
     of: usize,
+    /// The notice whose Move to… asked: it goes once a Move is sent.
+    leaves: Option<NoticeId>,
 }
 
 /// A torrent of the selection that didn't move, and why: what the notice's list says.
@@ -125,11 +128,15 @@ pub fn move_selection_to(s: &mut Phantom, to: AbsolutePath) {
 /// move, and moves those that can.
 pub fn move_to(s: &mut Phantom, tx: &mut Tx) {
     let ids = selection(s);
-    pick_folder(s, ids, tx);
+    pick_folder(s, ids, None, tx);
 }
 
-/// [`move_to`] for `ids`.
-pub fn pick_folder(s: &mut Phantom, ids: Vec<TorrentId>, tx: &mut Tx) {
+/// [`move_to`] for `ids`; the notice `leaves` goes once the Move is sent. While a picker is open
+/// no second opens.
+pub fn pick_folder(s: &mut Phantom, ids: Vec<TorrentId>, leaves: Option<NoticeId>, tx: &mut Tx) {
+    if s.picking {
+        return;
+    }
     let Some(first) = s.torrents.iter().find(|t| ids.contains(&t.id) && t.actions.does(Action::Move)) else { return };
     let directory = first.location.as_ref().and_then(|l| l.parent()).map(|p| p.to_path_buf());
     let title = match ids.as_slice() {
@@ -137,13 +144,17 @@ pub fn pick_folder(s: &mut Phantom, ids: Vec<TorrentId>, tx: &mut Tx) {
         _ => display::move_picker_several(ids.len()),
     };
     let options = FileDialogOptions { title, directory, ..Default::default() };
-    tx.open_folder(options, move |s: &mut Phantom, chosen, _| match chosen {
-        Ok(Some(folder)) => match client::absolute(&folder) {
-            Ok(to) => start(s, ids, to),
-            Err(e) => unasked(s, &ids, &format!("{e:#}")),
-        },
-        Ok(None) => {}
-        Err(e) => unasked(s, &ids, &format!("can't ask for a folder: {e}")),
+    s.picking = true;
+    tx.open_folder(options, move |s: &mut Phantom, chosen, _| {
+        s.picking = false;
+        match chosen {
+            Ok(Some(folder)) => match client::absolute(&folder) {
+                Ok(to) => start_leaving(s, ids, to, leaves),
+                Err(e) => unasked(s, &ids, &format!("{e:#}")),
+            },
+            Ok(None) => {}
+            Err(e) => unasked(s, &ids, &format!("can't ask for a folder: {e}")),
+        }
     });
 }
 
@@ -157,6 +168,11 @@ fn unasked(s: &mut Phantom, ids: &[TorrentId], why: &str) {
 /// the service which clash, then each dialog in turn, then sends the Moves. `to` is the newest of
 /// the recent folders (Move to ▸) from now.
 pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
+    start_leaving(s, ids, to, None);
+}
+
+/// [`start`], for the button of notice `leaves`: it goes once a Move is sent.
+fn start_leaving(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath, leaves: Option<NoticeId>) {
     let (order, skipped): (Vec<TorrentId>, Vec<Unmoved>) = {
         let mut order = Vec::new();
         let mut skipped = Vec::new();
@@ -186,6 +202,7 @@ pub fn start(s: &mut Phantom, ids: Vec<TorrentId>, to: AbsolutePath) {
         clashing: VecDeque::new(),
         chosen: BTreeMap::new(),
         of: 0,
+        leaves,
     };
     s.service.clashes(
         order,
@@ -357,7 +374,7 @@ pub fn reveal(s: &mut Phantom) {
 
 /// Sends the Moves of those that weren't skipped, in the list's order, and tells how they went.
 fn send(s: &mut Phantom, asking: Asking) {
-    let Asking { to, order, mut skipped, selected, chosen, .. } = asking;
+    let Asking { to, order, mut skipped, selected, chosen, leaves, .. } = asking;
     let mut moves = Vec::new();
     for id in order {
         match chosen.get(&id) {
@@ -374,6 +391,11 @@ fn send(s: &mut Phantom, asking: Asking) {
     if moves.is_empty() {
         // The only torrent, its Move cancelled in its dialog: as asked, nothing to tell.
         return if selected == 1 { () } else { tell_selection(s, selected, 0, skipped, &to) };
+    }
+    // Sent, even if only some: the notice's buttons were for the whole, and what's not sent was
+    // answered for in a dialog.
+    if let Some(notice) = leaves {
+        s.bar.take(notice);
     }
     let sent: Vec<TorrentId> = moves.iter().map(|m| m.id).collect();
     s.service.moves(

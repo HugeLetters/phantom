@@ -22,6 +22,8 @@ pub struct Rename {
     pub refused: Option<(String, NameProblem)>,
     /// The field had the focus at the last frame: losing it renames.
     had_focus: bool,
+    /// The notice whose Rename… opened the field: it goes once the rename is sent.
+    pub leaves: Option<crate::bar::machine::NoticeId>,
 }
 
 impl Rename {
@@ -46,7 +48,7 @@ pub fn open(s: &mut Phantom, id: TorrentId) {
     field.anchor = 0;
     field.focus = selected_end(&name, one_file);
     field.focused = true;
-    s.rename = Rename { id: Some(id), field, refused: None, had_focus: false };
+    s.rename = Rename { id: Some(id), field, refused: None, had_focus: false, leaves: None };
 }
 
 /// Where the selection of a name just opened for editing ends (it starts at 0), for the inline
@@ -80,9 +82,13 @@ pub fn submit(s: &mut Phantom) {
         }
     };
     let same = s.torrents.iter().find(|t| t.id == id).is_some_and(|t| t.display_name() == name.as_str());
+    let leaves = s.rename.leaves;
     close(s);
     if !same {
         super::rename(s, id, name);
+        if let Some(notice) = leaves {
+            s.bar.take(notice);
+        }
     }
 }
 

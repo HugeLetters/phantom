@@ -459,3 +459,120 @@ fn a_double_click_on_try_again_runs_it_once() {
     wait(&mut rt, 1.0);
     assert_eq!(probe.commands().len(), 2, "the Delete, and its one Try again");
 }
+
+// Move to… and Rename… keep their notice until the Move or the Rename is sent.
+
+fn notice_is_there(rt: &Runtime<Phantom>, id: NoticeId) -> bool {
+    rt.state.bar.entries().iter().any(|e| e.id == id)
+}
+
+fn pick(rt: &mut Runtime<Phantom>, folder: Option<&str>) {
+    rt.resolve_file_dialog(folder.map(Into::into)).unwrap();
+    settle(rt);
+}
+
+/// Move to… is the second button of a partial Move's notice.
+const MOVE_TO: usize = 1;
+
+#[test]
+fn move_to_keeps_its_notice_when_the_folder_picker_is_cancelled() {
+    let (mut rt, id) = partial_move();
+    press(&mut rt, id, MOVE_TO);
+    settle(&mut rt);
+    assert!(rt.file_dialog().is_some(), "the picker is open");
+    assert!(notice_is_there(&rt, id), "kept while the folder is asked for");
+    pick(&mut rt, None);
+    assert!(notice_is_there(&rt, id));
+    assert_eq!(list_of(&mut rt, id).last().map(String::as_str), Some("Move to…"));
+    // And again: it asks again.
+    press(&mut rt, id, MOVE_TO);
+    settle(&mut rt);
+    assert!(rt.file_dialog().is_some());
+}
+
+#[test]
+fn move_to_keeps_its_notice_when_its_clash_is_cancelled_and_drops_it_once_sent() {
+    let (mut rt, id) = partial_move();
+    press(&mut rt, id, MOVE_TO);
+    settle(&mut rt);
+    pick(&mut rt, Some("/Films"));
+    tap(&mut rt, "clash-cancel");
+    wait(&mut rt, 1.0);
+    assert!(notice_is_there(&rt, id), "nothing was sent");
+    press(&mut rt, id, MOVE_TO);
+    settle(&mut rt);
+    pick(&mut rt, Some("/Films"));
+    tap(&mut rt, "clash-use-existing");
+    wait(&mut rt, 1.0);
+    assert!(!notice_is_there(&rt, id), "one was sent: the notice goes");
+}
+
+#[test]
+fn move_to_pressed_twice_opens_one_picker_and_only_its_notice_goes() {
+    let (mut rt, id) = partial_move();
+    let other = told(&mut rt, Notice::error("Couldn't pause").with_actions(vec![]));
+    let _ = other;
+    press(&mut rt, id, MOVE_TO);
+    press(&mut rt, id, MOVE_TO);
+    settle(&mut rt);
+    pick(&mut rt, Some("/Elsewhere"));
+    assert!(rt.file_dialog().is_none(), "one picker only");
+    wait(&mut rt, 1.0);
+    assert!(!notice_is_there(&rt, id));
+    assert!(notice_is_there(&rt, other), "another notice stays");
+}
+
+#[test]
+fn move_to_whose_notice_was_dismissed_meanwhile_still_moves() {
+    let (mut rt, id) = partial_move();
+    press(&mut rt, id, MOVE_TO);
+    settle(&mut rt);
+    rt.update(|s, _| s.bar.dismiss(id));
+    settle(&mut rt);
+    pick(&mut rt, Some("/Elsewhere"));
+    wait(&mut rt, 1.0);
+    assert!(!notice_is_there(&rt, id));
+}
+
+fn a_rename_clash() -> (Runtime<Phantom>, NoticeId) {
+    let taken = std::path::Path::new(crate::service::DOWNLOADS).join("Live");
+    let service = MemoryService::new().with_torrents(vec![torrent(0, "a"), torrent(1, "Album")]).taken_on_disk(&taken);
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::rename(s, 1, proto::FileName::new("Live".to_owned()).unwrap()));
+    wait(&mut rt, 1.0);
+    let id = newest(&rt);
+    (rt, id)
+}
+
+fn escape(rt: &mut Runtime<Phantom>) {
+    rt.key(rune::KeyEvent { key: rune::Key::Escape, mods: Default::default() });
+    settle(rt);
+}
+
+#[test]
+fn rename_keeps_its_notice_until_the_rename_is_sent() {
+    let (mut rt, id) = a_rename_clash();
+    press(&mut rt, id, 0);
+    settle(&mut rt);
+    assert_eq!(rt.state.rename.id, Some(1));
+    assert!(!rt.state.bar.is_open(), "the popover closes");
+    assert!(notice_is_there(&rt, id), "kept while the field is open");
+    // Cancelled.
+    escape(&mut rt);
+    assert!(notice_is_there(&rt, id));
+    assert_eq!(list_of(&mut rt, id).first().map(String::as_str), Some("Couldn't rename the torrent"));
+    // Left with the same name: not sent.
+    press(&mut rt, id, 0);
+    settle(&mut rt);
+    rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() });
+    settle(&mut rt);
+    assert!(rt.state.rename.id.is_none() && notice_is_there(&rt, id), "same name: nothing sent, notice kept");
+    // A new name: sent, the notice goes.
+    press(&mut rt, id, 0);
+    settle(&mut rt);
+    rt.update(|s, _| s.rename.field.text = "Fresh".into());
+    rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() });
+    wait(&mut rt, 1.0);
+    assert!(!notice_is_there(&rt, id));
+}

@@ -187,7 +187,7 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction], id: crate::bar::machi
         .iter()
         .enumerate()
         .map(|(i, action)| {
-            let (run, once, copy) = (action.run.clone(), action.once, action.copy.clone());
+            let (run, once, leaves, copy) = (action.run.clone(), action.once, action.leaves_when_sent, action.copy.clone());
             let off = action.off.as_ref().and_then(|off| off(s));
             if off.is_some() && s.why_off_note == off {
                 why_shown = off.clone();
@@ -203,10 +203,14 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction], id: crate::bar::machi
                     if once && !s.bar.take(id) {
                         return;
                     }
+                    if leaves {
+                        s.leaving = Some(id);
+                    }
                     run(s, tx);
                     if let Some(text) = &copy {
                         tx.copy(text.clone());
                     }
+                    s.leaving = None;
                     // It left, and the focus with it: to the list itself, not to the next notice's
                     // button, where the same key would press that.
                     if s.bar.is_open() && s.bar.entries().iter().all(|e| e.id != id) {

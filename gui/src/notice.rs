@@ -195,6 +195,10 @@ pub struct NoticeAction {
     /// Pressing it takes its notice out of the list (Try again: pressed twice runs once; what it
     /// runs may tell a notice of its own).
     pub once: bool,
+    /// Its notice goes when what it asks for is sent, not when it's pressed (Move to…, Rename…):
+    /// cancelled before, it stays with its buttons. Pressing it sets [`Phantom::leaving`] to its
+    /// notice for the command to carry.
+    pub leaves_when_sent: bool,
     /// Its shortcut, from the table, shown inside it, muted, while it's that key's.
     pub hint: Option<Rc<dyn Fn(&Phantom) -> Option<String>>>,
     /// Why it's off now, if it is: then it's drawn disabled, and a press on it says why, as a
@@ -215,12 +219,27 @@ impl NoticeAction {
 
     /// A button whose command needs the window's [`Tx`] (a folder picker).
     pub fn with_tx(title: impl Into<String>, run: impl Fn(&mut Phantom, &mut Tx) + 'static) -> Self {
-        Self { title: title.into(), run: Rc::new(run), once: false, hint: None, off: None, undo: false, shown: None, copy: None }
+        Self {
+            title: title.into(),
+            run: Rc::new(run),
+            once: false,
+            leaves_when_sent: false,
+            hint: None,
+            off: None,
+            undo: false,
+            shown: None,
+            copy: None,
+        }
     }
 
     /// Pressing it takes its notice away.
     pub fn once(self) -> Self {
         Self { once: true, ..self }
+    }
+
+    /// Its notice goes once what it asks for is sent.
+    pub fn leaves_when_sent(self) -> Self {
+        Self { leaves_when_sent: true, ..self }
     }
 
     /// Offered only while `shown` holds. Drawing asks it each frame: it never looks at the disk

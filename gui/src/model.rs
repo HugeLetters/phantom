@@ -116,6 +116,10 @@ pub struct Phantom {
     pub mounted: crate::commands::Mounted,
     /// A Move of a selection, while its clash dialogs ask: nothing is sent till they're answered.
     pub asking: Option<moving::Asking>,
+    /// The notice whose button is being run, if its notice goes once what it asks for is sent.
+    pub leaving: Option<crate::bar::machine::NoticeId>,
+    /// A folder picker of a Move is open: another press opens no second.
+    pub picking: bool,
     /// The torrent whose row the pointer is on, for its toggle's strength (#33).
     pub hot: Option<TorrentId>,
     /// The columns hidden and the pane's dragged height, kept in `gui.json` (#33).
@@ -369,6 +373,8 @@ impl Phantom {
             palette: Default::default(),
             mounted: Default::default(),
             asking: None,
+            leaving: None,
+            picking: false,
             prefs: layout::WindowPrefs::default(),
             list_height: 0.0,
             recent: Default::default(),
