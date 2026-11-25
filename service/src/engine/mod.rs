@@ -28,6 +28,7 @@ mod moving;
 mod places;
 #[cfg(test)]
 mod race_tests;
+mod slots;
 mod snapshot;
 mod space;
 mod store;
