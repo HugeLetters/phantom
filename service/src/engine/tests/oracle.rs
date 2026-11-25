@@ -8,11 +8,14 @@
 //!   again with a few presses, never stuck.
 //!
 //! What's known to fail is [`KNOWN_OPEN`], each with a named, ignored case below. A gate PR that closes
-//! one deletes its entry and its `#[ignore]`.
+//! one deletes its entry and moves its cases out of `open!`, to pass: those whose failure ends with
+//! `open: [its why]` (run them with `--ignored`). A class holds from what led to it until the torrent
+//! settles where nothing more comes by itself ([`World::settled`]).
 
 use std::fmt::Debug;
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, Weak};
 
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
@@ -143,6 +146,8 @@ enum Which {
     Part,
     /// Put where the torrent's was known missing.
     Missing,
+    /// As `Missing`, no more of it had than it may have.
+    PieceHad,
     /// As `Missing`, nothing of it had.
     NoneHad,
     /// Set Off.
@@ -176,9 +181,9 @@ const KNOWN_OPEN: &[Open] = &[
     known(SAME_SIZE, &[Route::DriveBack], Which::There, "#373"),
     known(SAME_SIZE, &[Route::Restart, Route::Crash], Which::There, "file-trust A: replaced, same size, then a start"),
     known(SHORT, &[Route::DriveBack, Route::Restart, Route::Crash], Which::Part, "file-trust A: shorter, where less was had"),
-    known(SHORT, &[Route::Crash], Which::There, "file-trust A: shorter than had, a crash"),
     known(ANY_SIZE, &[Route::Check, Route::Resume], Which::GoneMeanwhile, "found by this test: the folder or drive gone during a check"),
     known(OTHERS, &[Route::DriveBack], Which::Missing, "#373: what was known missing is forgotten"),
+    known(&[Shorter], &[Route::PutBack], Which::PieceHad, "file-trust A: missing known, then a shorter one: grown, then refused"),
     known(OTHERS, &[Route::Running], Which::NoneHad, "file-trust A: missing known, nothing had"),
     known(ANY_SIZE, &[Route::Running], Which::Off, "file-trust A: Off, another file there"),
 ];
@@ -193,6 +198,7 @@ impl Open {
                 Which::Off => class.off,
                 Which::GoneMeanwhile => class.gone_meanwhile,
                 Which::Missing => class.missing != Missing::No,
+                Which::PieceHad => class.missing == Missing::PieceHad,
                 Which::NoneHad => class.missing == Missing::NoneHad,
                 Which::Any => true,
             }
@@ -220,6 +226,76 @@ enum Allow {
     Unsaid,
 }
 
+/// The bytes of a person's file, looked at all the time: damage later repaired is damage.
+#[derive(Debug)]
+struct Watched {
+    /// Keeps its inode, wherever it goes. Of a link, what it leads to.
+    handle: std::fs::File,
+    bytes: Vec<u8>,
+    /// Only this much of it is the person's.
+    range: Option<std::ops::Range<usize>>,
+    /// What was first seen wrong.
+    damage: Mutex<Option<String>>,
+    /// When it last changed, as last looked at.
+    looked: Mutex<Option<(i64, i64)>>,
+}
+
+impl Watched {
+    /// What's wrong with it, now or earlier.
+    fn damage(&self) -> Option<String> {
+        let mut damage = self.damage.lock().unwrap();
+        if damage.is_none() {
+            *damage = self.look();
+        }
+        damage.clone()
+    }
+
+    fn look(&self) -> Option<String> {
+        let meta = self.handle.metadata().unwrap();
+        let mut now = vec![0; meta.len() as usize];
+        let read = self.handle.read_exact_at(&mut now, 0);
+        let was = self.bytes.len();
+        if now.len() != was {
+            let how = if now.len() < was { "cut" } else { "grown" };
+            return Some(format!("{how} from {was} to {} bytes", now.len()));
+        }
+        // Cut as it was read.
+        let n = self.range.clone().unwrap_or(0..was).filter(|n| now[*n] != self.bytes[*n]).count();
+        (read.is_err() || n > 0).then(|| format!("{n} of its bytes changed"))
+    }
+
+    /// Looks at each of `all` that changed, until the case is over.
+    async fn watch(all: Weak<Mutex<Vec<Weak<Watched>>>>) {
+        while let Some(all) = all.upgrade() {
+            for one in all.lock().unwrap().iter().filter_map(Weak::upgrade) {
+                let changed = one.handle.metadata().map(|m| (m.ctime(), m.ctime_nsec())).ok();
+                if std::mem::replace(&mut *one.looked.lock().unwrap(), changed) != changed {
+                    one.damage();
+                }
+            }
+            drop(all);
+            tokio::time::sleep(Duration::from_millis(3)).await;
+        }
+    }
+}
+
+/// How much a case can show.
+#[derive(Debug, Default, Clone)]
+struct Power {
+    /// It had a person's file that must stay as it is.
+    theirs: bool,
+    /// At some look at one, a known class held: damage would be excused.
+    excusable: bool,
+    /// Looks at such a file, and how many of them a known class held at.
+    looks: (usize, usize),
+    /// The steps are over: what's left is only whether it ends complete.
+    ending: bool,
+    /// The peer sent pieces while such a file was there.
+    sent: bool,
+    /// The known classes whose damage was seen.
+    known: BTreeSet<&'static str>,
+}
+
 /// A file a person put.
 #[derive(Debug)]
 struct Theirs {
@@ -227,14 +303,14 @@ struct Theirs {
     file: usize,
     /// Where it was put.
     path: PathBuf,
-    /// Keeps its inode, wherever it goes. Of a link, what it leads to.
-    handle: std::fs::File,
+    watched: Arc<Watched>,
     /// Of what's at `path` itself.
     ino: u64,
-    bytes: Vec<u8>,
-    /// Only this much of it is the person's.
-    range: Option<std::ops::Range<usize>>,
-    /// Something that may take it elsewhere, whole, was asked since.
+    /// Where a link leads, or a hard link's other name; and what's there.
+    other: Option<(PathBuf, u64)>,
+    /// What the peer had sent as it was put.
+    sent: u64,
+    /// Something that may take it elsewhere, whole, was asked since it last settled.
     relocated: bool,
     whole: bool,
     missing: Missing,
@@ -244,6 +320,25 @@ struct Theirs {
     seen: bool,
     routes: BTreeSet<Route>,
     allow: Allow,
+}
+
+impl Theirs {
+    /// Where it is under `home`, but for its other name.
+    fn places(&self, home: &Path) -> Vec<PathBuf> {
+        let other = self.other.as_ref().map(|(path, _)| path.as_path());
+        places(home, self.ino).into_iter().filter(|p| Some(p.as_path()) != other).collect()
+    }
+
+    fn class(&self) -> Class {
+        Class {
+            kind: self.kind,
+            routes: self.routes.clone(),
+            whole: self.whole,
+            missing: self.missing,
+            off: self.off,
+            gone_meanwhile: self.gone_meanwhile,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -388,9 +483,9 @@ impl Peers {
         Self { _dir: dir, _sessions: sessions, infos }
     }
 
-    /// A .torrent whose tracker, asked each second, names a peer once `open`: one at a new address
+    /// What the peer sends is added to `sent`. A .torrent whose tracker, asked each second, names a peer once `open`: one at a new address
     /// whenever none is connected, as one that went is tried again only after 10 s, then 60 s.
-    async fn torrent(&self, which: usize, open: Arc<AtomicBool>) -> AddSource {
+    async fn torrent(&self, which: usize, open: Arc<AtomicBool>, sent: Arc<AtomicU64>) -> AddSource {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::{TcpListener, TcpStream};
         let (info, port) = self.infos[which].clone();
@@ -406,13 +501,26 @@ impl Peers {
                     let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
                     peers.extend([127, 0, 0, 1]);
                     peers.extend(relay.local_addr().unwrap().port().to_be_bytes());
-                    let connected = connected.clone();
+                    let (connected, sent) = (connected.clone(), sent.clone());
                     tokio::spawn(async move {
                         let accepted = tokio::time::timeout(Duration::from_secs(5), relay.accept()).await;
                         if let Ok(Ok((mut from, _))) = accepted
                             && let Ok(mut to) = TcpStream::connect(("127.0.0.1", port)).await
                         {
-                            let _ = tokio::io::copy_bidirectional(&mut from, &mut to).await;
+                            let ((mut asks, mut gets), (mut gives, mut asked)) = (from.split(), to.split());
+                            let give = async {
+                                let mut buf = [0; 16384];
+                                while let Ok(n @ 1..) = gives.read(&mut buf).await {
+                                    sent.fetch_add(n as u64, Ordering::SeqCst);
+                                    if gets.write_all(&buf[..n]).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            };
+                            tokio::select! {
+                                () = give => {}
+                                _ = tokio::io::copy(&mut asks, &mut asked) => {}
+                            }
                         }
                         drop(connected);
                     });
@@ -491,17 +599,21 @@ struct World {
     off: BTreeSet<usize>,
     /// Something was done after which the torrent may need a press, or other bytes.
     disturbed: Option<String>,
-    /// The known classes seen.
-    known: BTreeSet<&'static str>,
+    watched: Arc<Mutex<Vec<Weak<Watched>>>>,
+    sent: Arc<AtomicU64>,
+    power: Power,
     strict: bool,
     made: usize,
     paused: bool,
     ever_paused: bool,
-    ever_off: BTreeSet<usize>,
+    /// Files set Normal while gone from their path.
+    off_gone: BTreeSet<usize>,
     renames: usize,
     /// What may still be under way: since it last settled.
     recent: BTreeSet<Route>,
     missing: std::collections::BTreeMap<usize, Missing>,
+    /// The engine had every piece, when last asked.
+    had_all: bool,
 }
 
 impl World {
@@ -513,7 +625,7 @@ impl World {
         self.engine.as_ref().expect("running")
     }
 
-    async fn run(peers: &Peers, case: &Case, strict: bool) -> BTreeSet<&'static str> {
+    async fn run(peers: &Peers, case: &Case, strict: bool) -> Power {
         let temp = temp();
         // As the engine names it: `/var` is a link.
         let dir = temp.path().canonicalize().unwrap();
@@ -521,12 +633,15 @@ impl World {
             std::fs::create_dir_all(dir.join(folder)).unwrap();
         }
         let open = Arc::new(AtomicBool::new(case.peer));
+        let sent: Arc<AtomicU64> = Arc::default();
+        let watched = Arc::default();
+        tokio::spawn(Watched::watch(Arc::downgrade(&watched)));
         let mut world = World {
             gate: Arc::default(),
             trash: Default::default(),
             engine: None,
-            source: peers.torrent(0, open.clone()).await,
-            other: peers.torrent(1, open.clone()).await,
+            source: peers.torrent(0, open.clone(), sent.clone()).await,
+            other: peers.torrent(1, open.clone(), sent.clone()).await,
             open,
             id: None,
             folder: dir.join("downloads/pack"),
@@ -536,15 +651,18 @@ impl World {
             renamed: false,
             off: BTreeSet::new(),
             disturbed: None,
-            known: BTreeSet::new(),
+            watched,
+            sent: sent.clone(),
+            power: Power::default(),
             strict,
             made: 0,
             paused: case.paused,
             ever_paused: false,
-            ever_off: BTreeSet::new(),
+            off_gone: BTreeSet::new(),
             renames: 0,
             recent: BTreeSet::new(),
             missing: Default::default(),
+            had_all: false,
             temp,
         };
         let _opens = (Opens(world.gate.clone()), OpensTrash(world.trash.clone()));
@@ -580,7 +698,7 @@ impl World {
         }
         world.end().await;
         world.engine().stop().await;
-        world.known
+        world.power
     }
 
     async fn start(&mut self) {
@@ -653,10 +771,35 @@ impl World {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        self.recent.clear();
+        if same.1.elapsed() > SIZE_CHECK_EVERY * 3 {
+            self.settled(same.0.flatten().map(|(status, _)| status));
+        }
         if self.status().await == Some(Status::MissingFiles) {
             let here: Vec<PathBuf> = NAMES.iter().map(|n| self.folder.join(n)).collect();
             self.theirs.iter_mut().filter(|t| here.iter().any(|p| inode(p) == Some(t.ino))).for_each(|t| t.seen = true);
+        }
+    }
+
+    /// Nothing is under way. Where nothing more comes by itself, what was done before is over: damage
+    /// from here on needs a new route.
+    fn settled(&mut self, status: Option<Status>) {
+        self.judge("it settled");
+        self.recent.clear();
+        if !matches!(status, None | Some(Status::Seeding | Status::Done { .. } | Status::Paused | Status::MissingFiles)) {
+            return;
+        }
+        let home = self.dir().canonicalize().unwrap();
+        for t in &mut self.theirs {
+            t.routes = BTreeSet::from([Route::Running]);
+            t.off = self.off.contains(&t.file);
+            t.gone_meanwhile = false;
+            if t.relocated
+                && let [place] = &t.places(&home)[..]
+            {
+                t.path =
+                    place.strip_prefix(home.join("away")).map(|rest| home.join("downloads").join(rest)).unwrap_or_else(|_| place.clone());
+                t.relocated = false;
+            }
         }
     }
 
@@ -691,6 +834,8 @@ impl World {
     fn register(&mut self, file: usize, kind: Kind, path: &Path, range: Option<std::ops::Range<usize>>, missing: Missing) {
         let handle = std::fs::File::open(path).unwrap();
         let bytes = std::fs::read(path).unwrap();
+        let watched = Arc::new(Watched { handle, bytes, range, damage: Mutex::default(), looked: Mutex::default() });
+        self.watched.lock().unwrap().push(Arc::downgrade(&watched));
         let home = self.dir().canonicalize().unwrap();
         let path = path.strip_prefix(home.join("away")).map(|rest| home.join("downloads").join(rest)).unwrap_or_else(|_| path.to_owned());
         self.theirs.push(Theirs {
@@ -698,9 +843,9 @@ impl World {
             kind,
             file,
             path,
-            handle,
-            bytes,
-            range,
+            watched,
+            other: None,
+            sent: self.sent.load(Ordering::SeqCst),
             relocated: self.renamed,
             whole: false,
             missing,
@@ -716,13 +861,18 @@ impl World {
     async fn know_missing(&mut self) {
         let Some(id) = self.id else { return };
         let known = |record: &super::super::store::Record| (0..3).filter_map(|f| Some((f, missing_in(record, f)?))).collect();
-        self.missing = self.engine().inspect(move |a| a.torrents.get(&id).map(|t| known(&t.record))).await.unwrap_or_default();
+        let looked = self.engine().inspect(move |a| {
+            let t = a.torrents.get(&id)?;
+            Some((known(&t.record), super::super::actor::progress(t).iter().map(|b| *b as usize).eq(SIZES)))
+        });
+        (self.missing, self.had_all) = looked.await.unwrap_or_default();
     }
 
     async fn put(&mut self, file: usize, kind: Kind, path: PathBuf) {
         let missing = self.missing.get(&file).copied().unwrap_or(Missing::No);
         let had_all = self.whole(file);
-        let complete = (0..3).all(|f| self.whole(f));
+        // What the engine has, not what's on disk: one it hasn't checked since is had by nobody's word.
+        let complete = self.had_all && (0..3).all(|f| self.whole(f));
         self.made += 1;
         let dir = self.dir().canonicalize().unwrap();
         let mine = dir.join("theirs").join(self.made.to_string());
@@ -766,7 +916,9 @@ impl World {
         }
         std::fs::rename(&staged, &path).unwrap();
         self.register(file, kind, &path, None, missing);
-        self.theirs.last_mut().unwrap().whole = complete;
+        let put = self.theirs.last_mut().unwrap();
+        put.whole = complete;
+        put.other = inode(&mine).map(|ino| (mine, ino));
         if !kind.equal() {
             self.disturb(kind);
         }
@@ -780,7 +932,13 @@ impl World {
         if self.engine.is_some() {
             self.know_missing().await;
         }
-        if !self.missing.is_empty() {
+        // Of the missing ones' paths only: nothing else has one looked at.
+        let back = match by {
+            By::Put { file, .. } | By::PutBack { file } | By::Touch { file } => self.missing.contains_key(&file),
+            By::RenameFolderBack => !self.missing.is_empty(),
+            _ => false,
+        };
+        if back {
             self.route(Route::PutBack);
         }
         match by {
@@ -842,6 +1000,7 @@ impl World {
                 let (to, from) = (self.now(&self.folder), self.dir().join("aside/folder"));
                 if self.renamed && !to.exists() && std::fs::rename(from, to).is_ok() {
                     self.renamed = false;
+                    self.theirs.iter_mut().for_each(|t| t.relocated = true);
                 }
             }
             By::DriveGone => {
@@ -880,6 +1039,9 @@ impl World {
     /// `what` pressed, `meanwhile` done while it's under way.
     async fn did(&mut self, what: Do, meanwhile: Option<By>) {
         let status = self.status().await;
+        self.judge("what came before");
+        let before: Vec<_> = self.theirs.iter().map(|t| (t.ino, t.allow, t.routes.clone())).collect();
+        let recent = self.recent.clone();
         if (!self.absent.is_empty() || self.renamed) && !matches!(what, Do::Pause) {
             self.disturb(format!("{what:?} with files taken away"));
         }
@@ -940,7 +1102,6 @@ impl World {
             }
             Do::Off { file } | Do::TrashFile { file } => {
                 self.off.insert(file);
-                self.ever_off.insert(file);
                 self.theirs.iter_mut().filter(|t| t.file == file).for_each(|t| t.off = true);
                 match what {
                     Do::Off { .. } => TorrentCommand::SetPriority { files: vec![file], priority: Priority::Off },
@@ -951,6 +1112,7 @@ impl World {
                 }
             }
             Do::Normal { file } => {
+                self.set_normal(&[file]);
                 self.off.remove(&file);
                 TorrentCommand::SetPriority { files: vec![file], priority: Priority::Normal }
             }
@@ -1029,7 +1191,13 @@ impl World {
             (Do::Add, Ok(Some(id))) => self.id = Some(id),
             (Do::Resume, Ok(_)) => self.paused = false,
             (Do::Pause, Ok(_)) => self.paused = true,
-            // Refused: nothing is asked of it.
+            // Refused: nothing is asked of it, so nothing allowed or excused by it.
+            (_, Err(_)) if meanwhile.is_none() => {
+                self.recent = recent;
+                for (ino, allow, routes) in before {
+                    self.theirs.iter_mut().filter(|t| t.ino == ino).for_each(|t| (t.allow, t.routes) = (allow, routes.clone()));
+                }
+            }
             _ => {}
         }
         let _ = by(|| async { self.status().await != Some(Status::FetchingInfo) }).await;
@@ -1037,6 +1205,11 @@ impl World {
         if moves && meanwhile.is_some() {
             self.theirs.iter_mut().for_each(|t| t.relocated = true);
         }
+    }
+
+    fn set_normal(&mut self, files: &[usize]) {
+        let gone: Vec<usize> = files.iter().copied().filter(|f| inode(&self.at(*f)).is_none()).collect();
+        self.off_gone.extend(gone);
     }
 
     fn release(&self) {
@@ -1093,11 +1266,13 @@ impl World {
             Step::Restart | Step::Crash => {
                 let crash = matches!(step, Step::Crash);
                 self.stop(crash).await;
+                self.judge("the stop");
                 self.route(if crash { Route::Crash } else { Route::Restart });
                 self.start().await;
             }
             Step::Between { by, crash } => {
                 self.stop(crash).await;
+                self.judge("the stop");
                 self.by(by).await;
                 self.route(if crash { Route::Crash } else { Route::Restart });
                 self.start().await;
@@ -1113,21 +1288,26 @@ impl World {
         let home = self.dir().canonicalize().unwrap();
         let mut broken = Vec::new();
         for (i, t) in self.theirs.iter().enumerate().filter(|(_, t)| t.allow == Allow::No) {
-            let mut now = vec![0; t.handle.metadata().unwrap().len() as usize];
-            let read = t.handle.read_exact_at(&mut now, 0);
-            let places = places(&home, t.ino);
+            self.power.theirs = true;
+            if !self.power.ending {
+                let excusable = KNOWN_OPEN.iter().any(|open| open.holds(&t.class()));
+                self.power.excusable |= excusable;
+                self.power.looks.0 += 1;
+                self.power.looks.1 += usize::from(excusable);
+            }
+            self.power.sent |= !self.power.ending && self.sent.load(Ordering::SeqCst) > t.sent + PIECE as u64;
+            let places = t.places(&home);
             let expected = self.now(&t.path);
-            let what = if now.len() < t.bytes.len() {
-                format!("cut from {} to {} bytes", t.bytes.len(), now.len())
-            } else if now.len() > t.bytes.len() {
-                format!("grown from {} to {} bytes", t.bytes.len(), now.len())
-            } else if read.is_err() || t.range.clone().unwrap_or(0..now.len()).any(|n| now[n] != t.bytes[n]) {
-                let n = (0..now.len()).filter(|n| now[*n] != t.bytes[*n]).count();
-                format!("{n} of its bytes changed")
+            let what = if let Some(damage) = t.watched.damage() {
+                damage
             } else if places.is_empty() {
                 "removed".into()
             } else if !t.relocated && !places.contains(&expected) {
                 format!("moved from {expected:?} to {places:?}")
+            } else if let Some((path, ino)) = &t.other
+                && inode(path) != Some(*ino)
+            {
+                format!("other name, or what it leads to, removed or replaced at {path:?}")
             } else {
                 continue;
             };
@@ -1136,17 +1316,11 @@ impl World {
         for (i, what) in broken {
             let t = &mut self.theirs[i];
             t.allow = Allow::Unsaid;
-            let class = Class {
-                kind: t.kind,
-                routes: t.routes.clone(),
-                whole: t.whole,
-                missing: t.missing,
-                off: t.off,
-                gone_meanwhile: t.gone_meanwhile,
-            };
-            match KNOWN_OPEN.iter().find(|open| !self.strict && open.holds(&class)) {
-                Some(open) => drop(self.known.insert(open.why)),
-                None => panic!("after {after}: the person's {} {what}; {class:?}", NAMES[t.file]),
+            let class = t.class();
+            let open: Vec<&str> = KNOWN_OPEN.iter().filter(|open| open.holds(&class)).map(|open| open.why).collect();
+            match open.first() {
+                Some(why) if !self.strict => drop(self.power.known.insert(why)),
+                _ => panic!("after {after}: the person's {} {what}; {class:?}; open: {open:?}", NAMES[t.file]),
             }
         }
     }
@@ -1154,11 +1328,19 @@ impl World {
     async fn end(&mut self) {
         self.open.store(true, Ordering::SeqCst);
         self.by(By::DriveBack).await;
-        self.settle().await;
+        self.power.ending = true;
+        let pause_open = !self.strict && self.ever_paused && STUCK_OPEN.contains(&PAUSED);
+        if pause_open {
+            // Not for as long as a settle waits: some of these don't finish.
+            let _ = tokio::time::timeout(PATIENCE / 6, self.settle()).await;
+        } else {
+            self.settle().await;
+        }
         self.refresh().await;
         self.judge("the end");
         // A piece under way as it's paused is lost until a start (#375).
-        if !self.strict && self.ever_paused && STUCK_OPEN.contains(&PAUSED) {
+        if pause_open && self.status().await == Some(Status::Downloading) {
+            self.power.known.insert(PAUSED);
             self.step(Step::Restart).await;
             self.settle().await;
         }
@@ -1210,6 +1392,7 @@ impl World {
         self.refresh().await;
         let files: Vec<usize> = self.off.iter().copied().collect();
         if !files.is_empty() {
+            self.set_normal(&files);
             let _ = self.command(TorrentCommand::SetPriority { files, priority: Priority::Normal }).await;
         }
         let mut presses = 0;
@@ -1226,9 +1409,9 @@ impl World {
             if !self.strict
                 && STUCK_OPEN.contains(&OFF_GONE)
                 && status == Some(Status::Seeding)
-                && (0..3).all(|f| self.whole(f) || self.ever_off.contains(&f))
+                && (0..3).all(|f| self.whole(f) || self.off_gone.contains(&f))
             {
-                self.known.insert(OFF_GONE);
+                self.power.known.insert(OFF_GONE);
                 break;
             }
             // Nothing more comes of one that has everything, to it.
@@ -1261,7 +1444,23 @@ fn file_at() -> impl Strategy<Value = usize> {
 
 fn kind() -> impl Strategy<Value = Kind> {
     use Kind::*;
-    prop::sample::select(vec![Same, Longer, OwnAndMore, Shorter, Empty, OnePiece, Cut, Equal, Link, HardLink, EqualHardLink, Edit])
+    // The ones nothing excuses come more often.
+    prop::sample::select(vec![
+        Longer,
+        Link,
+        Same,
+        Longer,
+        OwnAndMore,
+        Shorter,
+        Empty,
+        OnePiece,
+        Cut,
+        Equal,
+        Link,
+        HardLink,
+        EqualHardLink,
+        Edit,
+    ])
 }
 
 fn person() -> impl Strategy<Value = By> {
@@ -1330,21 +1529,48 @@ fn taken() -> impl Strategy<Value = Vec<Step>> {
         let by = By::Put { file, kind };
         steps.push(closed.map_or(Step::By(by), |crash| Step::Between { by, crash }));
         steps.extend(trigger);
-        steps.push(Step::Settle);
+        steps.extend([Step::Settle, Step::PeerOpens, Step::Settle]);
         steps
     })
 }
 
+/// A file put just where the engine is to put one: at a Move's target, or where an undo brings one back.
+fn in_the_way() -> impl Strategy<Value = Vec<Step>> {
+    prop_oneof![
+        (any::<bool>(), file_at(), kind())
+            .prop_map(|(replace, file, kind)| vec![Step::During(Do::Move { replace }, By::PutAtTarget { file, kind }), Step::Settle]),
+        (any::<bool>(), file_at(), kind()).prop_map(|(all, file, kind)| {
+            let taken = if all { Do::Delete } else { Do::TrashFile { file } };
+            vec![Step::Do(taken), Step::During(Do::Undo, By::Put { file, kind }), Step::Settle]
+        }),
+    ]
+}
+
+/// One partly had and known missing, another file there as the service starts, then a peer sending.
+fn partly() -> impl Strategy<Value = Case> {
+    (0..2usize, kind(), any::<bool>(), prop::collection::vec(step(), 0..2)).prop_map(|(file, kind, crash, then)| {
+        let mut steps =
+            vec![Step::By(By::TakeAway { file }), Step::Settle, Step::Between { by: By::Put { file, kind }, crash }, Step::Settle];
+        steps.extend(then);
+        steps.extend([Step::PeerOpens, Step::Settle]);
+        Case { start: Start::Half, peer: false, paused: false, before: None, steps }
+    })
+}
+
 fn case() -> impl Strategy<Value = Case> {
-    let start = prop_oneof![1 => Just(Start::Nothing), 1 => Just(Start::Half), 3 => Just(Start::Whole)];
+    prop_oneof![4 => mixed(), 1 => partly()]
+}
+
+fn mixed() -> impl Strategy<Value = Case> {
+    let start = prop_oneof![2 => Just(Start::Nothing), 2 => Just(Start::Half), 3 => Just(Start::Whole)];
     let before = prop::option::weighted(0.15, (file_at(), kind()));
-    let steps = prop_oneof![3 => step().prop_map(|s| vec![s]), 1 => taken()];
-    (start, prop::bool::weighted(0.7), prop::bool::weighted(0.15), before, prop::collection::vec(steps, 1..6))
+    let steps = prop_oneof![3 => step().prop_map(|s| vec![s]), 2 => taken(), 1 => in_the_way()];
+    (start, prop::bool::weighted(0.4), prop::bool::weighted(0.15), before, prop::collection::vec(steps, 1..5))
         .prop_map(|(start, peer, paused, before, steps)| Case { start, peer, paused, before, steps: steps.concat() })
 }
 
 /// Why `case` fails, if it does.
-async fn fails(peers: &Arc<Peers>, case: &Case) -> Result<BTreeSet<&'static str>, String> {
+async fn fails(peers: &Arc<Peers>, case: &Case) -> Result<Power, String> {
     let (peers, case) = (peers.clone(), case.clone());
     let failed = tokio::spawn(async move { World::run(&peers, &case, false).await }).await;
     failed.map_err(|e| match e.into_panic().downcast::<String>() {
@@ -1374,18 +1600,31 @@ async fn a_persons_bytes_stay_and_a_torrents_own_files_work() {
         }
     }
     let mut seen = std::collections::BTreeMap::<&str, usize>::new();
-    let mut failed = None;
+    let (mut failed, mut theirs, mut excusable, mut sent, mut looks) = (None, 0, 0, 0, (0, 0));
     while let Some(done) = running.join_next().await {
         match done.unwrap() {
-            (_, Ok(known)) => known.into_iter().for_each(|k| *seen.entry(k).or_default() += 1),
+            (_, Ok(power)) => {
+                power.known.into_iter().for_each(|k| *seen.entry(k).or_default() += 1);
+                theirs += usize::from(power.theirs);
+                excusable += usize::from(power.excusable);
+                sent += usize::from(power.sent);
+                looks = (looks.0 + power.looks.0, looks.1 + power.looks.1);
+            }
             (n, Err(why)) => {
                 failed = Some((n, why));
                 break;
             }
         }
     }
-    println!("{cases} cases; known open, seen: {seen:#?}");
-    let Some((n, mut why)) = failed else { return };
+    println!(
+        "{cases} cases, {theirs} with a person's file: {sent} with a peer sending then, {excusable} excusable at some look, {} of {} looks",
+        looks.1, looks.0
+    );
+    println!("known open, seen: {seen:#?}");
+    let Some((n, mut why)) = failed else {
+        assert!(cases < 256 || sent * 16 >= theirs, "the peer hardly sends: nothing is tested");
+        return;
+    };
     // The rest is over before it's shrunk: they'd load the machine.
     running.shutdown().await;
     let tree = trees.get_mut(&n).unwrap();
@@ -1463,6 +1702,12 @@ open! {
     open_another_file_before_a_start: "file-trust A: replaced, same size", Nothing, false, [put(Same), Step::Restart];
     open_another_file_before_a_start_after_a_crash: "file-trust A: replaced, same size", Nothing, false, [put(Same), Step::Crash];
     open_a_shorter_file_where_less_was_had: "file-trust A: shorter", Nothing, false, [put(Empty), Step::Restart];
+    open_a_shorter_file_where_a_piece_was_had_grows: "file-trust A: missing known, then a shorter one", Nothing, true,
+        [
+            Step::Do(Do::Pause), Step::By(By::Put { file: 2, kind: OnePiece }), Step::By(By::Put { file: 0, kind: OnePiece }),
+            Step::By(By::DriveGone), Step::Settle, Step::By(By::DriveBack), Step::Settle,
+            Step::By(By::TakeAway { file: B }), Step::Settle, put(Shorter), Step::Settle
+        ];
     open_another_file_where_nothing_was_had: "file-trust A: missing known, nothing had", Half, false,
         [Step::By(By::TakeAway { file: B }), Step::Settle, put(Same)];
     open_a_shared_piece_goes_into_another_file_at_an_off_ones: "file-trust A: Off, another file there", Nothing, false,
