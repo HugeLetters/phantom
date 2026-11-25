@@ -882,6 +882,10 @@ fn spec() -> AppSpec<Phantom> {
                 };
                 let why = proto::CantUndo::AnotherHasFiles {
                     other: proto::Named { id: 10, name: "Big Buck Bunny (2008) [1080p]".into() },
+                    path: proto::AbsolutePath::new(
+                        "/Users/me/Downloads/Big Buck Bunny (2008)/Big_Buck_Bunny_1080p_surround_FrostWire.com.avi",
+                    )
+                    .expect("absolute"),
                     magnet: Some("magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big%20Buck%20Bunny".into()),
                 };
                 let refused = client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded: Vec::new() });

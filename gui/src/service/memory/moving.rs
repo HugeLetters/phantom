@@ -173,28 +173,30 @@ impl MemoryService {
 
     /// The torrent in the list that has the place `left`, a torrent that left it, goes back to, or is
     /// moving there: Move's rule for another torrent's place (`anothers`), as the engine's undo takes
-    /// it: one of its files is at the path of one of `left`'s, in any case.
-    pub(super) fn another_has(&self, left: &super::Left) -> Option<&proto::TorrentInfo> {
-        let paths = |destination: &std::path::Path, name: &str, files: &[proto::File]| -> std::collections::BTreeSet<String> {
+    /// it: one of its files is at the path of one of `left`'s, in any case. With that path, as `left`
+    /// spells it.
+    pub(super) fn another_has(&self, left: &super::Left) -> Option<(&proto::TorrentInfo, PathBuf)> {
+        let paths = |destination: &std::path::Path, name: &str, files: &[proto::File]| -> std::collections::BTreeMap<String, PathBuf> {
             let at = |f: &proto::File| match files {
                 [_] => destination.join(&f.path),
                 _ => destination.join(name).join(&f.path),
             };
-            files.iter().map(|f| at(f).to_string_lossy().to_lowercase()).collect()
+            files.iter().map(|f| (at(f).to_string_lossy().to_lowercase(), at(f))).collect()
         };
         let ours = paths(
             &left.destination.clone().unwrap_or_else(super::downloads),
             left.info.display_name(),
             left.files.as_deref().unwrap_or_default(),
         );
-        let takes = |o: &&proto::TorrentInfo| {
-            let Some(files) = self.files.get(&o.id) else { return false };
+        let shared = |o: &&proto::TorrentInfo| {
+            let files = self.files.get(&o.id)?;
             let here = self.destinations.get(&o.id).cloned().unwrap_or_else(super::downloads);
             let there = self.moving.get(&o.id);
             let there = there.map(|m| paths(&m.to, m.name.as_deref().unwrap_or(o.display_name()), files));
-            !ours.is_disjoint(&paths(&here, o.display_name(), files)) || there.is_some_and(|t| !ours.is_disjoint(&t))
+            let theirs = [Some(paths(&here, o.display_name(), files)), there];
+            theirs.iter().flatten().find_map(|t| ours.iter().find(|(key, _)| t.contains_key(*key)).map(|(_, path)| path.clone()))
         };
-        self.torrents.iter().filter(|o| o.id != left.info.id).find(takes)
+        self.torrents.iter().filter(|o| o.id != left.info.id).find_map(|o| shared(&o).map(|path| (o, path)))
     }
 
     /// The files of torrent `id` that a Move into `to` would find there already, if it would find

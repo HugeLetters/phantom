@@ -12,6 +12,9 @@ use crate::notice::Severity;
 use crate::service::MemoryService;
 use crate::shortcuts;
 
+/// Where `Album` and the other torrent clash: the fake keeps a torrent's files in `Downloads`.
+const PATH: &str = "/Users/me/Downloads/Album";
+
 fn quiet(rt: &mut Runtime<Phantom>) {
     for _ in 0..8 {
         settle(rt);
@@ -90,7 +93,7 @@ fn cmd_z_is_refused_while_another_torrent_has_the_place() {
         assert_eq!((notice.short.as_str(), notice.severity), ("Couldn't undo the Remove", Severity::Error), "{other}");
         assert_eq!(
             list_of(&mut rt),
-            ["Couldn't undo the Remove", "Album", "Another torrent in the list has its files:", name, "Copy magnet link"],
+            ["Couldn't undo the Remove", "Album", "Its files would clash with another torrent's:", name, PATH, "Copy magnet link"],
             "{other}: both names, told apart"
         );
         assert_eq!(notice.actions.iter().map(|a| a.title.as_str()).collect::<Vec<_>>(), ["Copy magnet link"], "{other}");
@@ -124,7 +127,10 @@ fn the_removes_notice_says_why_its_undo_is_off() {
     undo(&mut rt);
     let first = rt.state.bar.entries().first().expect("the Remove's notice");
     let off = first.notice.actions.iter().find(|a| a.undo).and_then(|a| a.off.as_ref()).and_then(|off| off(&rt.state));
-    assert_eq!(off.as_deref(), Some("Couldn't be undone: another torrent, Album, has its files now"));
+    assert_eq!(
+        off.as_deref(),
+        Some(format!("Couldn't be undone: its files would clash with another torrent's, Album, at {PATH}").as_str())
+    );
 }
 
 /// Several removed together: the one whose place is free comes back by itself, the other is told

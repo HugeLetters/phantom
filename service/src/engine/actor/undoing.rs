@@ -374,14 +374,14 @@ impl Actor {
     fn another_has(&self, entry: &Entry) -> Option<CantUndo> {
         let record = self.coming(entry)?;
         let files = super::moving::inside(&record);
-        let (_, other) = super::super::moving::anothers(&record.destination, &files, self.others_files(entry.id))?;
+        let (clash, other) = super::super::moving::anothers(&record.destination, &files, self.others_files(entry.id))?;
         let name = self.torrents.get(&other).map(name_of).or_else(|| self.guard.places().name(other))?;
         // Kept in the refusal: the step is dropped, and this is all that's left of a torrent off the
         // list to add again. Its info's own name, as the app's Copy magnet link has it, not one a
         // Rename gave it.
         let magnet =
             matches!(entry.back, Back::Gone { .. }).then(|| undo::magnet(&entry.info_hash, record.name.as_deref(), &record.trackers));
-        Some(CantUndo::AnotherHasFiles { other: proto::Named { id: other, name }, magnet })
+        Some(CantUndo::AnotherHasFiles { other: proto::Named { id: other, name }, path: absolute(clash), magnet })
     }
 
     /// The torrent's own new copies of the files `entry`, a Move to Trash, took (#276): files it gets

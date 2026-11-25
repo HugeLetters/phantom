@@ -731,7 +731,9 @@ pub fn cant_undo_line(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]
     let names: Vec<String> = undo.torrents.iter().map(|t| t.name.clone()).collect();
     let reason = match why {
         // The other torrent's name is a line of its own, so the two names read apart (#371).
-        CantUndo::AnotherHasFiles { other, .. } => vec![Line::Muted(another_has_its_files().into()), Line::Name(other.name.clone())],
+        CantUndo::AnotherHasFiles { other, path, .. } => {
+            vec![Line::Muted(files_would_clash().into()), Line::Name(other.name.clone()), Line::Path(path.display().to_string())]
+        }
         why => cant_undo_reason(why).lines(),
     };
     let listing = Listing::new(&names_listed(&names), "").then(reason);
@@ -741,9 +743,10 @@ pub fn cant_undo_line(undo: &Undoable, why: &CantUndo, stranded: &[AbsolutePath]
     (format!("Couldn't undo the {}", undo_action(undo.action)), listing.then(stranded.unwrap_or_default()))
 }
 
-/// What leads into the name of the torrent that has the files of one an Undo would bring back.
-fn another_has_its_files() -> &'static str {
-    "Another torrent in the list has its files:"
+/// What leads into the name of the torrent whose files clash with those of one an Undo would bring
+/// back, and the path where they do.
+fn files_would_clash() -> &'static str {
+    "Its files would clash with another torrent's:"
 }
 
 /// A torrent of an undo of several that didn't come back, as [`cant_undo_line`] words it; one added
@@ -784,7 +787,9 @@ fn cant_undo_why(why: &CantUndo) -> String {
     match why {
         // As the app says it ("Already in the list"): added again since, nothing touched.
         CantUndo::InList => already_in_list().to_lowercase(),
-        CantUndo::AnotherHasFiles { other, .. } => format!("another torrent, {}, has its files now", other.name),
+        CantUndo::AnotherHasFiles { other, path, .. } => {
+            format!("its files would clash with another torrent's, {}, at {}", other.name, path.display())
+        }
         CantUndo::NotInList => "it isn't in the list any more".into(),
         CantUndo::Deleting => "it's being deleted".into(),
         CantUndo::NotInTrash { path } => format!("{} isn't in the Trash any more", path.display()),
@@ -1692,6 +1697,25 @@ mod tests {
 
     /// What the stranded files of a refused Delete's undo are listed as: names, the reason, then
     /// "Still in place:" and a path a line.
+    #[test]
+    fn a_refused_undo_names_both_torrents_and_the_path_where_their_files_clash() {
+        let undo = Undoable { seq: 1, action: UndoAction::Remove, torrents: vec![proto::Named { id: 1, name: "Album".into() }] };
+        let why =
+            CantUndo::AnotherHasFiles { other: proto::Named { id: 2, name: "Album".into() }, path: at("/d/Album/a.flac"), magnet: None };
+        let (short, list) = cant_undo_line(&undo, &why, &[]);
+        assert_eq!(short, "Couldn't undo the Remove");
+        assert_eq!(
+            list.lines().cloned().collect::<Vec<_>>(),
+            [
+                Line::Name("Album".into()),
+                Line::Muted("Its files would clash with another torrent's:".into()),
+                Line::Name("Album".into()),
+                Line::Path("/d/Album/a.flac".into()),
+            ]
+        );
+        assert_eq!(cant_undo(&undo, &why, &[]).1, "Its files would clash with another torrent's, Album, at /d/Album/a.flac");
+    }
+
     #[test]
     fn a_refused_undos_stranded_paths_are_listed_each_on_a_line() {
         let undo = Undoable {

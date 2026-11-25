@@ -76,9 +76,10 @@ async fn an_undo_is_refused_and_dropped_while_another_torrent_has_the_files() {
             let (undo, why) = cant_undo(engine.undo().await);
             let action = if delete { proto::UndoAction::Delete } else { proto::UndoAction::Remove };
             assert_eq!(undo, undoable(action, a, "A"), "{case}");
-            let proto::CantUndo::AnotherHasFiles { other: named, magnet } = why else { panic!("{case}: {why:?}") };
+            let proto::CantUndo::AnotherHasFiles { other: named, path, magnet } = why else { panic!("{case}: {why:?}") };
             assert_eq!(named, proto::Named { id: b, name: name.into() }, "{case}");
             assert_eq!(magnet, Some(the_magnet_of(&hash, "A")), "{case}: the undone torrent's own link");
+            assert_eq!(path.to_path_buf(), dir.path().join("downloads/A/x.bin"), "{case}: the file of the undone torrent where they clash");
 
             assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [b], "{case}: the other, alone");
             assert_eq!(find(&engine, b).await.status, status, "{case}: not paused, resumed or checked");
@@ -120,7 +121,11 @@ async fn an_undo_is_refused_while_another_torrent_is_moving_to_its_place() {
 
     let (undo, why) = cant_undo(engine.undo().await);
     assert_eq!(undo, undoable(proto::UndoAction::Delete, a, "A"));
-    assert!(matches!(&why, proto::CantUndo::AnotherHasFiles { other, .. } if other.id == b), "{why:?}");
+    assert!(
+        matches!(&why, proto::CantUndo::AnotherHasFiles { other: named, path, .. }
+            if named.id == b && **path == other.join("A/x.bin")),
+        "{why:?}"
+    );
     assert_eq!(top(&engine).await, None, "dropped");
     assert_eq!(bytes_in(&dir.path().join("trash")), trash, "nothing taken out of the Trash");
 
@@ -244,7 +249,7 @@ async fn a_selection_undone_brings_back_the_torrent_whose_files_are_free_and_say
     let refused: Vec<u64> = undone.refused.iter().map(|r| r.torrent.id).collect();
     assert_eq!(refused, [a]);
     assert!(
-        matches!(&undone.refused[0].why, proto::CantUndo::AnotherHasFiles { other, magnet: Some(_) } if other.id == b),
+        matches!(&undone.refused[0].why, proto::CantUndo::AnotherHasFiles { other, magnet: Some(_), .. } if other.id == b),
         "{:?}",
         undone.refused
     );

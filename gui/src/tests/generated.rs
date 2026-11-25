@@ -1016,7 +1016,7 @@ impl StateMachineTest for Screen {
                 match note.undo {
                     true => {
                         assert_eq!(drawn.first(), Some(&note.title()), "the notice says what failed");
-                        let apart = "Another torrent in the list has its files:";
+                        let apart = "Its files would clash with another torrent's:";
                         assert!(
                             drawn.iter().any(|l| l == apart) && drawn.last().map(String::as_str) == Some("Copy magnet link"),
                             "{drawn:?}"
