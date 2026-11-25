@@ -1385,6 +1385,7 @@ impl Model {
             for f in std::mem::take(&mut p.missing).into_keys() {
                 p.have[f] = false;
             }
+            p.uncounted.extend(p.checking.take().into_iter().flat_map(BTreeMap::into_keys));
             p.unchecked = false;
         }
     }
@@ -3869,5 +3870,25 @@ fn a_file_replaced_by_hand_that_the_trash_refuses_is_let_go_of() {
         PutBack { pack: 1, file: 1 },
         Refuse(Some((1, Some(1)))),
         TrashFiles { id: 0, files: vec![1] },
+    ]);
+}
+
+/// #379, found by a 256-case run: the model was wrong. A destination that goes during a check ends
+/// it, so a Cancel check is refused, before the checks go on or after; back, the torrent is checked.
+#[test]
+fn a_cancel_check_once_the_destination_is_gone_is_refused() {
+    use Step::*;
+    let gone = [HoldChecks, Add { pack: Some(1), paused: false }, DestinationGone { pack: 1 }, CancelCheck(0)];
+    replay(&gone);
+    let then = [ReleaseChecks, CancelCheck(0), DestinationBack { pack: 1 }];
+    replay(&gone.iter().cloned().chain(then).collect::<Vec<_>>());
+    replay(&[
+        Add { pack: Some(0), paused: false },
+        HoldChecks,
+        Add { pack: Some(1), paused: true },
+        DestinationGone { pack: 1 },
+        CancelCheck(1),
+        DestinationBack { pack: 1 },
+        CancelCheck(1),
     ]);
 }
