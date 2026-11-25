@@ -86,6 +86,9 @@ fn all_had(mut had: (Vec<u64>, Vec<u64>)) -> bool {
 fn a_piece_had_as_the_torrent_is_paused_is_counted() {
     let gate = Arc::new(Gate::default());
     let dispatch = tracing::Dispatch::new(BeforeCounted(gate.clone()));
+    // With one only, tracing asks just the thread that gets to an event first, maybe another test's,
+    // whether anyone wants it.
+    let _second = tracing::Dispatch::new(BeforeCounted(gate.clone()));
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(8)
         .enable_all()
