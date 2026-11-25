@@ -1011,8 +1011,10 @@ impl StateMachineTest for Screen {
                 let id = before[*n];
                 show_notice(rt, id);
                 // A batch is one notice, its list as the view: what failed, and why.
+                // Its buttons (Try again, Move to…, #367) are offered while their torrents are there:
+                // `notice_actions` tests them; here, only what failed and why.
                 let note = rows.dismissed.as_ref().expect("dismissed");
-                let drawn = texts_under(rt, &format!("notice/{id}"));
+                let mut drawn = texts_under(rt, &format!("notice/{id}"));
                 match note.undo {
                     true => {
                         assert_eq!(drawn.first(), Some(&note.title()), "the notice says what failed");
@@ -1022,7 +1024,12 @@ impl StateMachineTest for Screen {
                             "{drawn:?}"
                         );
                     }
-                    false => assert_eq!(drawn, note.lines(), "the notice says what failed"),
+                    false => {
+                        while matches!(drawn.last().map(String::as_str), Some("Try again" | "Move to…")) {
+                            drawn.pop();
+                        }
+                        assert_eq!(drawn, note.lines(), "the notice says what failed");
+                    }
                 }
                 let (x, y) = rt.find("notice-dismiss").expect("× on an error notice");
                 rt.pointer_down(x, y);

@@ -31,6 +31,7 @@ pub mod palette;
 pub mod picker;
 pub mod recent;
 pub mod renaming;
+pub mod retry;
 pub mod settings;
 pub mod undone;
 
@@ -144,7 +145,9 @@ impl FailedAdds {
     /// The entry as a [`Notice`]: "Couldn't add 2 of 5", and each failure as its view.
     pub fn notice(&self) -> Notice {
         let list = Listing::of_entries(self.failed.iter().map(|f| (f.what.as_str(), &f.why)));
-        Notice { more: Some(list), ..Notice::error(display::adds_failed(self.failed.len(), self.total)) }
+        let again: Vec<AddRequest> = self.failed.iter().filter_map(|f| f.request.clone()).collect();
+        let actions = if again.is_empty() { Vec::new() } else { vec![retry::add(again)] };
+        Notice { more: Some(list), ..Notice::error(display::adds_failed(self.failed.len(), self.total)) }.with_actions(actions)
     }
 }
 
@@ -153,21 +156,23 @@ impl FailedAdds {
 pub struct AddFailure {
     pub what: String,
     pub why: display::Reason,
+    /// What was asked of the service, if it was: Try again sends it again.
+    pub request: Option<AddRequest>,
 }
 
 impl AddFailure {
     pub fn refused(request: &AddRequest, why: OpenRefusal) -> Self {
-        Self { what: what(request), why: display::open_refusal(why).into() }
+        Self { what: what(request), why: display::open_refusal(why).into(), request: None }
     }
 
     /// The link `text`, handed to the app from outside, refused for `why`.
     pub fn refused_link(text: &str, why: OpenRefusal) -> Self {
-        Self { what: text.trim().to_owned(), why: display::open_refusal(why).into() }
+        Self { what: text.trim().to_owned(), why: display::open_refusal(why).into(), request: None }
     }
 
     /// `text` isn't a link Add accepts.
     pub fn not_a_link(text: &str, problem: LinkProblem) -> Self {
-        Self { what: text.trim().to_owned(), why: display::link_problem(problem).into() }
+        Self { what: text.trim().to_owned(), why: display::link_problem(problem).into(), request: None }
     }
 }
 
@@ -255,18 +260,18 @@ impl Batch {
 
     /// What the service's answer to `requests` does to the batch.
     fn answer(self, requests: &[AddRequest]) -> OnAdded {
-        let labels: Vec<String> = requests.iter().map(what).collect();
-        Box::new(move |s, results, tx| self.answered(s, &labels, results, tx))
+        let requests = requests.to_vec();
+        Box::new(move |s, results, tx| self.answered(s, &requests, results, tx))
     }
 
     /// Each add that was added is told of in the status bar, the last one showing; those refused
     /// for want of a destination wait for the picker, as one. The field's own add, while the
     /// field still holds its link, empties the field once added; a failure, the field's too, goes
     /// to the batch's notice, the link staying in the field to try again.
-    fn answered(mut self, s: &mut Phantom, labels: &[String], results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
+    fn answered(mut self, s: &mut Phantom, asked: &[AddRequest], results: Vec<Result<Added, AddError>>, tx: &mut Tx) {
         let holds = self.field.as_deref().is_some_and(|link| s.magnet.text.trim() == link);
         let mut requests = Vec::new();
-        for (label, result) in labels.iter().zip(results) {
+        for (request, result) in asked.iter().zip(results) {
             match result {
                 Ok(added) => {
                     self.total += 1;
@@ -280,7 +285,11 @@ impl Batch {
                 Err(AddError::NoDestination(request)) => requests.push(request),
                 Err(AddError::Failed(e)) => {
                     self.total += 1;
-                    self.failed.push(AddFailure { what: label.clone(), why: display::add_failure(&e).into() });
+                    self.failed.push(AddFailure {
+                        what: what(request),
+                        why: display::add_failure(&e).into(),
+                        request: Some(request.clone()),
+                    });
                 }
             }
         }
@@ -913,7 +922,7 @@ fn command_then(
                 .iter()
                 .map(|(id, e)| {
                     let (what, why) = display::command_failure(&named(*id), e);
-                    AddFailure { what, why }
+                    AddFailure { what, why, request: None }
                 })
                 .collect();
             let total = total - (all_failed - failed.len());
@@ -928,7 +937,11 @@ fn command_then(
                 true => failed_ids.iter().flat_map(|id| entries(*id)).collect(),
                 false => Vec::new(),
             };
-            s.bar.tell(Notice { more: Some(list), of, ..Notice::error(title) });
+            let again = match action {
+                Action::Pause | Action::Resume | Action::Delete => vec![retry::command(failed_ids, action)],
+                _ => Vec::new(),
+            };
+            s.bar.tell(Notice { more: Some(list), of, ..Notice::error(title) }.with_actions(again));
         }),
     );
 }
@@ -960,7 +973,11 @@ fn ask_destination(s: &mut Phantom, tx: &mut Tx) {
             Err(why) => {
                 if let Some(why) = why {
                     batch.total += requests.len();
-                    batch.failed.extend(requests.iter().map(|r| AddFailure { what: what(r), why: display::sentence(&why).into() }));
+                    batch.failed.extend(requests.iter().map(|r| AddFailure {
+                        what: what(r),
+                        why: display::sentence(&why).into(),
+                        request: Some(r.clone()),
+                    }));
                 }
                 batch.finish(s);
             }
@@ -991,6 +1008,12 @@ fn downloads() -> Option<PathBuf> {
 /// What went is told in the status bar, its notice with an Undo of it.
 pub fn remove_selected(s: &mut Phantom, delete: bool) {
     let ids = selected_torrents(&s.table);
+    remove_ids(s, ids, delete);
+    s.table.clear_selection();
+}
+
+/// [`remove_selected`] for `ids`, the selection kept as it is.
+pub(crate) fn remove_ids(s: &mut Phantom, ids: Vec<TorrentId>, delete: bool) {
     let (command, action) = match delete {
         true => (TorrentCommand::Delete, proto::UndoAction::Delete),
         false => (TorrentCommand::Remove, proto::UndoAction::Remove),
@@ -1010,7 +1033,6 @@ pub fn remove_selected(s: &mut Phantom, delete: bool) {
             tell_happened(s, Happened { seq }, action, &names);
         }
     });
-    s.table.clear_selection();
 }
 
 /// Renames torrent `id` to `name` on disk (#331): one step on the undo stack. What it did is told

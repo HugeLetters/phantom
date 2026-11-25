@@ -3,6 +3,7 @@
 mod files;
 mod generated;
 mod moving;
+mod notice_actions;
 mod notices;
 mod palette;
 mod renaming;
@@ -1501,7 +1502,7 @@ fn a_refused_add_from_the_field_is_a_notice_and_the_link_stays() {
     assert!(rt.state.add_note.is_none() && rt.find("add-note-content").is_none(), "nothing by Add");
     assert_eq!(
         listed(&mut rt),
-        vec![["Couldn't add the torrent", "Big Buck Bunny", "No peers have this torrent"]],
+        vec![["Couldn't add the torrent", "Big Buck Bunny", "No peers have this torrent", "Try again"]],
         "an error notice, why in its list"
     );
     assert!(enabled(&rt, "add"), "which can be tried again");
@@ -1599,7 +1600,7 @@ fn a_failure_landing_with_another_answer_is_still_shown() {
     wait(&mut rt, 1.5);
     assert_eq!(
         listed(&mut rt),
-        vec![["Couldn't add the torrent", "Nobody", "No peers have this torrent"]],
+        vec![["Couldn't add the torrent", "Nobody", "No peers have this torrent", "Try again"]],
         "the link's name, not the link"
     );
 }

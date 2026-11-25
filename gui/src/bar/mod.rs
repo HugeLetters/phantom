@@ -100,7 +100,6 @@ impl Bar {
     }
 
     /// The notices, oldest first.
-    #[cfg(test)]
     pub fn entries(&self) -> &[Entry] {
         &self.state.entries
     }

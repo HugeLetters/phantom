@@ -1048,7 +1048,7 @@ fn a_failed_magnet_add_shows_its_name_or_the_link_shortened_in_the_middle() {
     let named = format!("magnet:?xt=urn:btih:{hash}&dn=Nobody");
     let bare =
         format!("magnet:?xt=urn:btih:{hash}&tr=udp%3A%2F%2Ftracker.example.org%3A6969%2Fannounce&tr=udp%3A%2F%2Fopen.example.net%3A1337");
-    let failed = |what: &str| AddFailure { what: what.to_owned(), why: "No peers have this torrent".into() };
+    let failed = |what: &str| AddFailure { what: what.to_owned(), why: "No peers have this torrent".into(), request: None };
     let mut rt = app(MemoryService::new());
     rt.set_viewport((640.0, 400.0), 2.0);
     rt.update(|s, _| {

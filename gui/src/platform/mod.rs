@@ -235,7 +235,8 @@ pub fn show_file(s: &mut Phantom, how: Show) {
         return;
     }
     let Some(path) = crate::model::file_target(&s.table, &s.torrents, &s.pane) else { return };
-    show(s, &path, how);
+    let of = s.pane.details.as_ref().map(|d| d.id);
+    show_of(s, &path, how, of);
 }
 
 /// Restarts the app, as the status bar's "Phantom was updated" offers: a relaunch is started that
@@ -324,20 +325,27 @@ impl Relauncher for Relaunched {
 /// Hands `path` to the system as `how` says; a failure is an error notice: Phantom's few words
 /// in the bar, the path and the system's reason in the list.
 pub fn show(s: &mut Phantom, path: &Path, how: Show) {
+    show_of(s, path, how, None);
+}
+
+/// [`show`] for a file of torrent `of`: a failure for want of the file offers to Check it.
+pub fn show_of(s: &mut Phantom, path: &Path, how: Show, of: Option<TorrentId>) {
     let Err(e) = s.finder.show(path, how) else { return };
-    cant_show(s, path, how, e);
+    cant_show(s, path, how, e, of);
 }
 
 /// Tells why `path` couldn't be shown: Phantom's few words in the bar, the path and the reason in
 /// the list.
-fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError) {
+fn cant_show(s: &mut Phantom, path: &Path, how: Show, e: ShowError, of: Option<TorrentId>) {
+    let missing = matches!(e, ShowError::NotOnDisk);
     let (short, reason, folder) = match e {
         // The file's folder, if that is there: Show folder.
         ShowError::NotOnDisk => (display::cant_show(how.action()), display::not_on_disk().to_owned(), path.parent()),
         ShowError::NoFinder(reason) => (display::cant_start_finder(), reason, None),
     };
     let notice = Notice::error(short).with_listing(display::show_failed_listing(path, &reason));
-    s.bar.tell(notice.with_actions(folder.map(crate::notice::NoticeAction::folder).into_iter().collect()));
+    let check = of.filter(|_| missing).map(crate::model::retry::check);
+    s.bar.tell(notice.with_actions(folder.map(crate::notice::NoticeAction::folder).into_iter().chain(check).collect()));
 }
 
 /// A command key's Open or Reveal for torrent `id` (⌘O, ⌘↓, ⇧⌘O): done only if its location is on
@@ -355,7 +363,7 @@ pub fn open_torrent(s: &mut Phantom, id: TorrentId) {
     if s.finder.exists(&path) {
         show_torrent(s, id, Show::Open);
     } else {
-        cant_show(s, &path, Show::Open, ShowError::NotOnDisk);
+        cant_show(s, &path, Show::Open, ShowError::NotOnDisk, Some(id));
     }
 }
 
@@ -369,7 +377,7 @@ fn located(s: &Phantom, id: TorrentId, how: Show) -> Option<PathBuf> {
 pub fn show_torrent(s: &mut Phantom, id: TorrentId, how: Show) {
     let Some(t) = s.torrents.iter().find(|t| t.id == id).filter(|t| t.actions.does(how.action())) else { return };
     let Some(path) = reveal_target(t).map(Path::to_owned) else { return };
-    show(s, &path, how);
+    show_of(s, &path, how, Some(id));
 }
 
 #[cfg(test)]

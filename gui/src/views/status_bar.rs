@@ -72,7 +72,7 @@ fn bar_undo(s: &Phantom, ui: &Ui) -> Option<El> {
     let run = undo.run.clone();
     let hint = undo.hint.as_ref().and_then(|hint| hint(s));
     let tip = hint.map(|hint| format!("{}  {hint}", undo.title));
-    let button = ui.button("bar-undo", &undo.title).small().on_press(move |s: &mut Phantom| run(s)).build();
+    let button = ui.button("bar-undo", &undo.title).small().on_press_tx(move |s: &mut Phantom, tx: &mut rune::Tx| run(s, tx)).build();
     Some(match tip {
         Some(tip) => button.help(tip),
         None => button,
@@ -86,16 +86,16 @@ fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &
     let line = ui
         .notice_button(newest, tone, bar_undo(s, ui), pill, client::display::notices_open_glyph())
         .on_press(crate::overlay::press_notices);
-    let (head, body, width) = match s.bar.shown() {
-        Some((entry, at, total)) => {
-            let n = &entry.notice;
-            let buttons: Vec<_> =
-                n.actions.iter().filter(|a| offered(s, a)).map(|a| (a.title.clone(), a.hint.as_ref().and_then(|hint| hint(s)))).collect();
-            let width = ui.notice_width(&n.short, n.more.as_ref(), &buttons);
-            let (head, body) = popover_of(s, ui, entry, at, total);
-            (head, body, width)
-        }
-        None => (None, el(), 0.0),
+    // As wide as the widest notice in the list needs, so it doesn't change from page to page.
+    let width = ui.popover_width(s.bar.entries().iter().map(|entry| {
+        let n = &entry.notice;
+        let buttons: Vec<_> =
+            n.actions.iter().filter(|a| offered(s, a)).map(|a| (a.title.clone(), a.hint.as_ref().and_then(|hint| hint(s)))).collect();
+        ui.notice_need(&n.short, n.more.as_ref(), &buttons)
+    }));
+    let (head, body) = match s.bar.shown() {
+        Some((entry, at, total)) => popover_of(s, ui, entry, at, total),
+        None => (None, el()),
     };
     let open = crate::overlay::up(s) == Some(crate::overlay::Overlay::Notices);
     ui.notice_panel(
@@ -166,7 +166,7 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
     let (mark, mark_tone) = mark_of(notice);
     let card = row().gap(8.0).items_start().w_full().child(ui.notice_mark(mark, mark_tone).mt(2.0)).child(text);
     let actions: Vec<NoticeAction> = notice.actions.iter().filter(|a| offered(s, a)).cloned().collect();
-    let (buttons, why_off) = buttons(s, ui, &actions);
+    let (buttons, why_off) = buttons(s, ui, &actions, id);
     let shown = col().key(format!("notice/{id}")).w_full().gap(10.0).child(card).children(buttons).children(why_off);
     let body = col().key("notice-shown").w_full().child(shown).child(dismiss().pin(None, Some(-2.0), Some(-2.0), None));
     (head, body)
@@ -177,7 +177,7 @@ const CROSS_ROOM: f32 = 24.0;
 
 /// A notice's buttons, right-aligned, small, the first the default, each with its shortcut inside
 /// it; and, once a disabled one is pressed, why it's off.
-fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction]) -> (Option<El>, Option<El>) {
+fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction], id: crate::bar::machine::NoticeId) -> (Option<El>, Option<El>) {
     if actions.is_empty() {
         return (None, None);
     }
@@ -186,7 +186,7 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction]) -> (Option<El>, Optio
         .iter()
         .enumerate()
         .map(|(i, action)| {
-            let (run, copy) = (action.run.clone(), action.copy.clone());
+            let (run, once, copy) = (action.run.clone(), action.once, action.copy.clone());
             let off = action.off.as_ref().and_then(|off| off(s));
             if off.is_some() && s.why_off_note == off {
                 why_shown = off.clone();
@@ -198,9 +198,12 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction]) -> (Option<El>, Optio
             let button = button
                 .disabled(off.is_some())
                 .on_press_tx(move |s: &mut Phantom, tx: &mut Tx| {
-                    run(s);
+                    run(s, tx);
                     if let Some(text) = &copy {
                         tx.copy(text.clone());
+                    }
+                    if once {
+                        s.bar.dismiss(id);
                     }
                 })
                 .on_press_disabled(move |s: &mut Phantom| s.why_off_note = note.clone())
