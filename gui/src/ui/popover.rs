@@ -21,9 +21,9 @@ impl Ui {
     pub fn help_look(&self) -> rune::HelpLook {
         let k = &self.k;
         rune::HelpLook::system(false)
-            .fill(k.c.surface_raised)
+            .fill(self.raised_fill())
             .ink(k.c.text_base)
-            .ring(1.0, super::opaque_over(k.c.border_weak, k.c.page))
+            .ring(1.0, self.raised_edge())
             .radius(k.radius.md)
             .padding(PAD_X, 6.0)
             .font(k.ty.text_small)

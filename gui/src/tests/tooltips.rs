@@ -1,6 +1,8 @@
 //! Every tooltip (#351) is one look, Phantom's, drawn by Rune: the card Settings and the main
 //! window show on hover, in Dark and Light, whole (wrapped, never cut).
 
+use crate::model::Phantom;
+use crate::service::MemoryService;
 use rune::Runtime;
 use rune::render::{Instance, KIND_RECT};
 
@@ -75,4 +77,45 @@ fn a_long_path_wraps_in_the_tooltip_whole() {
         }
         assert!(cards.iter().any(|(t, _, _)| t.contains(PATH)), "whole, not cut");
     }
+}
+
+/// WCAG's contrast ratio of two opaque colours, as Rune holds them (linear).
+fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let lum = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// In Dark a tooltip's edge stands out from its own fill and from the page behind it at least as
+/// much as the notices popover's edge does from the page it shares its fill with.
+#[test]
+fn in_dark_a_tooltips_edge_stands_out_as_much_as_the_notices_popovers() {
+    let service = MemoryService::new().with_torrents(vec![super::torrent(0, "A"), super::torrent(1, "B")]).trash_refusing("A");
+    let mut rt = app_in(service, true);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::remove_ids(s, vec![0], true));
+    wait(&mut rt, 1.0);
+    let id = rt.state.bar.entries().last().expect("a notice").id;
+    super::generated::show_notice(&mut rt, id);
+    settle_popover(&mut rt);
+    let panel = super::generated::rect_of(&rt, "notices-panel").expect("the panel");
+    let popover = rt
+        .instances
+        .iter()
+        .rev()
+        .find(|i| i.params[1] == KIND_RECT && (i.rect[0] - panel[0] * 2.0).abs() < 1.0 && (i.rect[1] - panel[1] * 2.0).abs() < 1.0)
+        .copied()
+        .expect("the panel's card");
+    // The panel is the page's own colour in Dark.
+    let page = popover.fill;
+    let wanted = contrast(popover.border, page);
+    assert!(wanted > 1.2, "the popover's edge shows: {wanted}");
+    let mut tip = app_in(tears(PATH), true);
+    let (_, _, card) = card_on(&mut tip, "add-file");
+    assert!(contrast(card.border, card.fill) >= wanted, "against its fill: {} < {wanted}", contrast(card.border, card.fill));
+    assert!(contrast(card.border, page) >= wanted, "against the page: {} < {wanted}", contrast(card.border, page));
+}
+
+fn settle_popover(rt: &mut Runtime<Phantom>) {
+    wait(rt, 0.6);
 }

@@ -194,7 +194,7 @@ impl Ui {
             .padding(RING_ROOM)
             .child(content);
         let fill = self.raised_fill();
-        let border = super::opaque_over(k.alpha(k.c.std_border, if k.dark { 0.6 } else { 0.4 }), k.c.page);
+        let border = self.raised_edge();
         // Takes the focus of a button that left with its notice: in the panel, so its keys still work,
         // and pressing nothing.
         let rest = el()
@@ -225,9 +225,16 @@ impl Ui {
         trigger
     }
 
+    /// The edge of a surface raised over the page that is to show: the notices popover's panel and
+    /// every tooltip. (A note's own is fainter: `k.c.border_weak`.)
+    pub(super) fn raised_edge(&self) -> rune::Color {
+        let k = &self.k;
+        super::opaque_over(k.alpha(k.c.std_border, if k.dark { 0.6 } else { 0.4 }), k.c.page)
+    }
+
     /// The fill of a surface raised over the page: the card's in Light; in Dark the window's own
     /// surface, set apart from the list by its border and shadow.
-    fn raised_fill(&self) -> rune::Color {
+    pub(super) fn raised_fill(&self) -> rune::Color {
         let k = &self.k;
         if k.dark { k.c.page } else { k.c.surface_raised }
     }
