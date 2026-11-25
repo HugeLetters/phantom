@@ -348,6 +348,12 @@ fn on_the_way(destination: &Path, path: &Path) -> Result<(), Blocked> {
     Ok(())
 }
 
+/// Whether an undo cut short by a crash put any of `items` back: gone from the Trash, at its path.
+pub fn any_back(items: &[Trashed]) -> bool {
+    let gone = |t: &Trashed| t.to.as_deref().is_none_or(|to| std::fs::symlink_metadata(to).is_err());
+    items.iter().any(|t| t.seen.is_some() && gone(t) && identity(&t.from) == t.seen)
+}
+
 /// Why [`put_back`] didn't.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PutBackError {

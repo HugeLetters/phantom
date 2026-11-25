@@ -210,6 +210,11 @@ impl Actor {
     /// out; one a crash cut short goes on as it was. Refused, it's over and its client hears why.
     pub(super) async fn start_undo(&mut self, seq: u64, of: u64, entry: Entry) {
         let id = entry.id;
+        // A partial Delete's is written ahead as it begins (`take_out_for_undo`): cut short before,
+        // it's begun now.
+        if matches!(entry.back, Back::InList { .. }) {
+            self.resumed.remove(&(seq, id));
+        }
         if self.resumed.contains(&(seq, id)) {
             return self.resume_undo(seq, of, entry).await;
         }
@@ -247,7 +252,6 @@ impl Actor {
     /// Undo step `seq` is over, carried out or not: its client hears how it went, and its lanes go on.
     pub(super) fn undo_ended(&mut self, seq: u64, id: TorrentId, answer: Result<Undoable, Failure>) {
         self.resumed.remove(&(seq, id));
-        self.guard.places().release(id);
         // Failed for no reason of Undo's: still refused, with the failure as its reason (#200).
         let over = match &answer {
             Ok(_) => Over::Finished(None),
@@ -257,6 +261,8 @@ impl Actor {
             }
         };
         let ended = self.end(seq, id, over);
+        // Once that's saved: a crash never resumes an undo into what came to its place since.
+        self.guard.places().release(id);
         self.answer_step(ended, super::steps::Outcome::Undone(answer));
     }
 
@@ -379,8 +385,8 @@ impl Actor {
         // Kept in the refusal: the step is dropped, and this is all that's left of a torrent off the
         // list to add again. Its info's own name, as the app's Copy magnet link has it, not one a
         // Rename gave it.
-        let magnet =
-            matches!(entry.back, Back::Gone { .. }).then(|| undo::magnet(&entry.info_hash, record.name.as_deref(), &record.trackers));
+        let off = matches!(entry.back, Back::Gone { .. }) && self.by_hash(&entry.info_hash).is_none();
+        let magnet = off.then(|| undo::magnet(&entry.info_hash, record.name.as_deref(), &record.trackers));
         Some(CantUndo::AnotherHasFiles { other: proto::Named { id: other, name }, path: absolute(clash), magnet })
     }
 
@@ -785,12 +791,29 @@ impl Actor {
             if !half_taken {
                 return self.undo_ended(seq, entry.id, Ok(entry.undoable(of)));
             }
+        }
+        // Cut short before its check, it may be refused still (#371): while nothing of it is back, as
+        // it would have been, with nothing put at the other's place meanwhile.
+        if !trash::any_back(&entry.put_back)
+            && let Some(why) = self.another_has(&entry)
+        {
+            return self.undo_ended(seq, entry.id, Err(refused(entry.undoable(of), why, Vec::new())));
+        }
+        if let Some(id) = self.by_hash(&entry.info_hash).map(|t| t.id) {
             if let Err(e) = self.take_off_list(id).await {
                 warn!(id, error = %e, "failed to take out a partly deleted torrent to finish its undo");
                 return self.undo_ended(seq, entry.id, Err(Failure::from(e)));
             }
         }
         self.put_back(seq, entry.id);
+    }
+
+    /// The top step's undo saved as running, none of it checked yet: where a test kills it.
+    #[cfg(test)]
+    pub(in super::super) fn save_undoing_unchecked(&mut self) {
+        self.steps.undo(tokio::sync::oneshot::channel().0);
+        while self.steps.next().is_some() {}
+        self.save_undo();
     }
 
     /// Keeps the stack, lets go of the stashes nothing names any more, and has the files in the

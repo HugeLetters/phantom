@@ -1482,6 +1482,14 @@ impl Actor {
         self.torrents.insert(id, torrent);
     }
 
+    /// An add of torrent `id` that isn't the one under way ends, as one taken off the list does.
+    #[cfg(test)]
+    pub(super) fn old_add_ends(&self, id: TorrentId) {
+        let (task, added) = (tokio::spawn(async {}).id(), Err(anyhow!("cut short")));
+        let inbox = self.inbox.upgrade().expect("it runs");
+        tokio::spawn(async move { inbox.send(Message::AddFinished { id, task, added }).await });
+    }
+
     /// Torrent `id`'s add task ended with `added`: [`add::decide`], from what the add was when it
     /// ended, says what it came to.
     async fn add_finished(&mut self, id: TorrentId, task: tokio::task::Id, added: Result<AddTorrentResponse>) {
@@ -1490,13 +1498,16 @@ impl Actor {
             Ok(AddTorrentResponse::ListOnly(_)) => Err(anyhow!("unexpected list-only response")),
             Err(e) => Err(e),
         };
-        self.guard.places().added(id);
         // Fetching while its torrent is in the list with this task's add under way; else it was
         // taken off, and perhaps brought back by an undo, whose add is another task's.
         let stage = match self.torrents.get(&id).is_some_and(|t| matches!(&t.lib, lib::Lib::Adding(own) if own.id() == task)) {
             true => add::State::Fetching,
             false => add::State::Removed,
         };
+        // Taken off, it said so then (`take_off_list`): what's said since is another task's.
+        if stage == add::State::Fetching {
+            self.guard.places().added(id);
+        }
         let ended = if added.is_ok() { add::Ended::Added } else { add::Ended::Failed };
         let Ok(stage) = add::decide(&stage, &add::Event::Observed(add::Observed::Ended(ended)));
         let handle = match (stage, added) {
@@ -1657,6 +1668,7 @@ impl Actor {
                 task.abort();
             }
             let _ = task.await;
+            self.guard.places().added(id);
         }
         let taken_out = match self.session.get(TorrentIdOrHash::Hash(hash)) {
             Some(t) => self.session.delete(TorrentIdOrHash::Id(t.id()), false).await,

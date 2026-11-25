@@ -409,3 +409,129 @@ async fn of_two_undos_into_one_place_the_second_is_refused() {
     assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [ids[1]]);
     engine.stop().await;
 }
+
+/// A crash between an undo's start being saved (with another torrent's, of one selection) and its
+/// check: the start after refuses it as the check would have. Nothing goes back into the other
+/// torrent's place, not even for a moment, though none of its files is there.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_undo_a_crash_cut_short_before_its_check_is_refused_with_nothing_put_back() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let a = add(&engine, &downloads, album(dir.path(), "A", 1).await, false).await.unwrap().id;
+    wait_for(&engine, a, Status::Seeding).await;
+    engine.command(a, TorrentCommand::Delete).await.unwrap();
+    // The other, listed with A's paths, and nothing of it on disk.
+    let b = add(&engine, &downloads, album(dir.path(), "A", 2).await, false).await.unwrap().id;
+    wait_for(&engine, b, Status::Seeding).await;
+    std::fs::remove_dir_all(downloads.join("A")).unwrap();
+    engine.inspect(|actor| actor.save_undoing_unchecked()).await;
+    engine.kill().await;
+
+    // Held as its first item is back, if any goes back.
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    super::super::trash::hold(&gate, true);
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    undos_over(&engine).await;
+    assert!(!downloads.join("A").exists(), "nothing of A's at the other's place");
+    assert_eq!(engine.listing().await.iter().map(|t| t.id).collect::<Vec<_>>(), [b]);
+    assert_eq!(top(&engine).await, None, "dropped");
+    assert_eq!(bytes_in(&dir.path().join("trash")).len(), 2, "both files in the Trash");
+    assert!(engine.inspect(move |actor| actor.guard.places().name(a)).await.is_none(), "its place is let go of");
+    engine.stop().await;
+}
+
+/// Two undos into one place, both cut short by a crash before their checks: one is carried out at the
+/// start after, and only the other is refused, its files still in the Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn of_two_undos_into_one_place_a_crash_cut_short_one_is_carried_out() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let downloads = dir.path().join("downloads");
+    let mut ids = Vec::new();
+    for k in [1, 2] {
+        let id = add(&engine, &downloads, album(dir.path(), "A", k).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        engine.command(id, TorrentCommand::Delete).await.unwrap();
+        ids.push(id);
+    }
+    for _ in 0..2 {
+        engine.inspect(|actor| actor.save_undoing_unchecked()).await;
+    }
+    engine.kill().await;
+
+    let engine = super::engine(dir.path()).await;
+    undos_over(&engine).await;
+    let listed: Vec<u64> = engine.listing().await.iter().map(|t| t.id).collect();
+    assert_eq!(listed, [ids[1]], "the one whose place was kept first");
+    wait_for(&engine, listed[0], Status::Seeding).await;
+    assert_eq!(bytes_in(&dir.path().join("trash")).len(), 2, "the other's files");
+    engine.stop().await;
+}
+
+/// Taken off the list while its add waits for an undo's place, a torrent says nothing of it any more,
+/// and the end of an add taken off never unsays the place of the one an undo brought back since.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_add_taken_off_the_list_says_its_place_no_more() {
+    let dir = temp();
+    let gate = super::super::trash::Gate::default();
+    let _opens = OpensTrash(gate.clone());
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
+    let (a, ours, undoing) = held_putting_back(dir.path(), &engine, &gate).await;
+    let place = dir.path().join("downloads/pack");
+    let b = add_now(&engine, torrent_file("a.bin"), &place).await;
+    says_its_place(&engine, b).await;
+    engine.command(b, TorrentCommand::Remove).await.unwrap();
+    assert!(!engine.inspect(move |actor| actor.guard.places().says(b)).await, "gone with it");
+    // Added once more: an end of the first one's add that was still on its way.
+    let b = add_now(&engine, torrent_file("a.bin"), &place).await;
+    says_its_place(&engine, b).await;
+    engine.inspect(move |actor| actor.old_add_ends(b)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(engine.inspect(move |actor| actor.guard.places().says(b)).await, "the add under way still says it");
+    engine.command(b, TorrentCommand::Remove).await.unwrap();
+
+    super::super::trash::hold(&gate, false);
+    undoing.await.unwrap().unwrap();
+    wait_for(&engine, a, Status::Seeding).await;
+    assert_eq!(bytes_in(&place), ours);
+    engine.stop().await;
+}
+
+/// A partial Delete's undo cut short by a crash as it's saved as running, before its torrent is taken
+/// out of the list, is begun at the start after: its torrent is back, whole.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_partial_deletes_undo_a_crash_cut_short_before_it_began_brings_it_back() {
+    let dir = temp();
+    let refusing: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), Default::default()).await;
+    let a = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, a, Status::Seeding).await;
+    let ours = pack_bytes(dir.path());
+    // Not only its own in the folder: its files go one by one, and one can't.
+    std::fs::write(dir.path().join("downloads/pack/mine.txt"), b"mine").unwrap();
+    *refusing.lock().unwrap() = vec![dir.path().join("downloads/pack/a.bin")];
+    let _ = engine.command(a, TorrentCommand::Delete).await;
+    assert_eq!(bytes_in(&dir.path().join("trash")).len(), 2, "partly deleted");
+    engine.inspect(|actor| actor.save_undoing_unchecked()).await;
+    engine.kill().await;
+
+    let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), Default::default()).await;
+    // Listed as back from the start: the undo itself is over.
+    undos_over(&engine).await;
+    wait_for(&engine, a, Status::Seeding).await;
+    std::fs::remove_file(dir.path().join("downloads/pack/mine.txt")).unwrap();
+    assert_eq!(pack_bytes(dir.path()), ours);
+    engine.stop().await;
+}
+
+/// Waits until no undo is under way, or long enough for one held to show.
+async fn undos_over(engine: &Engine) {
+    for _ in 0..500 {
+        if engine.inspect(|actor| super::super::undo::undoing(actor.steps.machine()).next().is_none()).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
