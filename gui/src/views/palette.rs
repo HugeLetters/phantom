@@ -38,7 +38,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         window.map(|(w, _)| w),
         row_key,
         palette::pick,
-        palette::close,
+        palette::dismiss,
         layer,
     );
 }
@@ -48,7 +48,7 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Up => palette::up(s, tx),
         Key::Down => palette::down(s, tx),
-        Key::Escape => palette::close(s),
+        Key::Escape => palette::dismiss(s, tx),
         _ => return false,
     }
     true

@@ -45,7 +45,7 @@ impl Ui {
             .min_w(0.0)
             .shrink()
             .child(text(line.into()).key("notice-text").font(k.ty.text_small).color(self.tone_color(tone)).truncate().min_w(0.0).shrink())
-            .children(undo)
+            .children(undo.map(|undo| row().child(undo).child(self.focus_goes_nowhere())))
             .children(pill.map(|(count, tone)| self.notice_pill(count, tone)))
             .child(text(open.to_owned()).key("notice-open").font(k.ty.text_small).color(k.c.text_muted));
         k.interactive(button)
