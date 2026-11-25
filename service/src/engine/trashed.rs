@@ -464,7 +464,8 @@ impl Trashed {
     }
 
     /// Closes the files `files` (by index) of torrent `info_hash` (those missing, or let go of) that
-    /// are gone for good (deleted by hand while librqbit has them open: no name left anywhere), so their space is freed at once; one moved elsewhere has its space still, and
+    /// are gone for good (deleted by hand while librqbit has them open: no name left anywhere), so
+    /// their space is freed at once; one moved elsewhere has its space still, and
     /// stays open, and one a Move to Trash took is [`Trashed::gone`]'s, written ahead. Looks at each
     /// (`fstat`), so never on the actor; waits for nothing, as [`Trashed::let_go`]: one librqbit is
     /// reading or opening now is left for the next look. Which of them it closed. One set Off is let

@@ -395,6 +395,20 @@ mod tests {
         assert_eq!(open(), 0, "closed by then");
     }
 
+    /// A handle from before an `init` drops while a look still keeps what it had open: it closes nothing
+    /// of the newer one.
+    #[test]
+    fn an_old_handle_that_drops_under_a_look_closes_nothing_of_a_newer_one() {
+        let (dir, slots) = (Dir::new(), Arc::new(Slots::default()));
+        let mut old = Some(dir.open(&slots));
+        let mut again = None;
+        slots.each(|_, _, _| {
+            again.get_or_insert_with(|| dir.open(&slots));
+            drop(old.take());
+        });
+        assert!(write(&again.unwrap(), 0, 1), "still open");
+    }
+
     #[test]
     fn a_handle_of_nothing_has_no_files() {
         let handle = Handle::default();
