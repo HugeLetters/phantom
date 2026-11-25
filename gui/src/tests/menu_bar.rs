@@ -14,7 +14,7 @@ const PANEL: Around = Around { front: Some(Which::Main), panel: true };
 fn own_line(own: &Own, indent: &str) -> String {
     let keys = match own.keys {
         Keys::None => String::new(),
-        Keys::Window(k) | Keys::Shown(k) => format!("  {}", k.hint()),
+        Keys::Matched(k) | Keys::Shown(k) => format!("  {}", k.hint()),
     };
     let tick = if own.checked { "✓ " } else { "" };
     format!("{indent}{tick}{}{keys}{}", own.title, if own.enabled { "" } else { "  (greyed)" })
@@ -239,6 +239,7 @@ fn a_fields_keys_never_reach_the_torrents() {
     press(&mut rt, KeyEvent { key: Key::Backspace, mods: Mods { cmd: true, ..Mods::default() } });
     space(&mut rt);
     press(&mut rt, cmd('c'));
+    assert!(rt.copy_request.take().is_none(), "no magnet link from an empty field");
     assert_eq!((rt.state.torrents.len(), status(&rt, 1)), (3, Status::Downloading));
     select(&mut rt, 1);
     press(&mut rt, plain(Key::Backspace));
@@ -289,6 +290,29 @@ fn a_pick_from_an_old_menu_does_nothing_once_the_selection_changed() {
     assert_eq!(rt.state.torrents.len(), 2, "the same selection: it acts");
     pick_old(&mut rt, remove);
     assert_eq!(rt.state.torrents.len(), 2);
+}
+
+/// Nor once its item is greyed: for the same torrent, but with a field focused, a file picker or
+/// Settings in front, or the palette open.
+#[test]
+fn a_pick_from_an_old_menu_does_nothing_once_its_item_is_greyed() {
+    let mut rt = three();
+    select(&mut rt, 1);
+    let delete = item(&rt.state, MAIN, "delete").pick;
+    for around in [PANEL, SETTINGS, NO_WINDOW] {
+        let delete = delete.clone();
+        rt.update(move |s, tx| run(s, &delete, around, tx));
+        settle(&mut rt);
+        assert_eq!(rt.state.torrents.len(), 3, "{around:?}");
+    }
+    focus_link(&mut rt);
+    pick_old(&mut rt, delete.clone());
+    assert_eq!(rt.state.torrents.len(), 3, "a field");
+    select(&mut rt, 1);
+    rt.update(|s, _| palette::open(s));
+    settle(&mut rt);
+    pick_old(&mut rt, delete);
+    assert_eq!(rt.state.torrents.len(), 3, "the palette");
 }
 
 /// ⌘C copies each selected torrent's link, a line each.

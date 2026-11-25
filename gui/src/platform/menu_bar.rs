@@ -46,18 +46,21 @@ pub fn sync(s: &Phantom, tx: &mut Tx) {
     if !live() {
         return;
     }
-    // Before the bar is borrowed: what's around asks it too.
+    // AppKit is called before the bar is borrowed: what it calls back may ask the bar.
     #[cfg(target_os = "macos")]
     let menus = menu_bar::build(s, around(s));
     #[cfg(target_os = "macos")]
-    BAR.with_borrow_mut(|bar| {
-        let Some(bar) = bar else { return };
+    {
         appkit::arrange("Torrent", menus.iter().filter(|m| m.name == "Torrent").flat_map(shown_keys).collect());
         for item in menus.iter().flat_map(|m| &m.items) {
             if let menu_bar::Item::Standard { action, title, enabled, shown, .. } = item {
                 appkit::standard(action, title, *enabled, *shown);
             }
         }
+    }
+    #[cfg(target_os = "macos")]
+    BAR.with_borrow_mut(|bar| {
+        let Some(bar) = bar else { return };
         let open = appkit::tracking();
         if open || std::mem::replace(&mut bar.was_open, open) {
             bar.was_open = open;
@@ -140,11 +143,14 @@ fn shown_keys(menu: &menu_bar::Menu) -> Vec<appkit::ShownKey> {
 fn native(own: &menu_bar::Own) -> rune::MenuItem<Phantom> {
     use menu_bar::Keys;
     let pick = own.pick.clone();
+    // Never `keys_first`: it hands the window whatever key picked the item, also the Return or Space
+    // that picks a highlighted one in an open menu, and the list would take that as its own Open or
+    // Pause in the item's place.
     let item = rune::MenuItem::with_action(&own.title, move |s: &mut Phantom, tx| menu_bar::run(s, &pick, around(s), tx));
     let item = item.id(&own.id).enabled(own.enabled).checked(own.checked);
     match own.keys {
         // A shown key is the item's only while its menu is open ([`shown_keys`]).
-        Keys::None | Keys::Shown(_) => item.keys_first(),
-        Keys::Window(keys) => item.key_equivalent(keys.accelerator().parse().expect("a shortcut")).keys_first(),
+        Keys::None | Keys::Shown(_) => item,
+        Keys::Matched(keys) => item.key_equivalent(keys.accelerator().parse().expect("a shortcut")),
     }
 }

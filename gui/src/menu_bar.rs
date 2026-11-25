@@ -5,9 +5,9 @@
 //!
 //! Unlike the row menu and the palette, what doesn't apply is greyed, and titles are in title case.
 //! What's behind an open dialog, menu or palette, or behind Settings or a file picker, is greyed.
-//! Keys run in the window (`shortcuts`), never twice: the Torrent menu's are only shown
-//! ([`Keys::Shown`]), so a field keeps its ⌫ and Space; the others go to the window first and the
-//! item runs only if nothing there took them.
+//! A key runs once: the Torrent menu's are only shown ([`Keys::Shown`]) and run in the window
+//! (`shortcuts`), so a field keeps its ⌫ and Space; the others are AppKit's to match
+//! ([`Keys::Matched`]), and the window never sees one it matched.
 
 use proto::TorrentId;
 use rune::Tx;
@@ -72,8 +72,8 @@ pub struct Own {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Keys {
     None,
-    /// Handed to the window in front first; the item runs if nothing there takes it.
-    Window(Chord),
+    /// Matched by AppKit before the window sees the press: the item runs, or, greyed, nothing does.
+    Matched(Chord),
     /// Shown beside the item while its menu is open; AppKit never matches it in a closed menu.
     Shown(Chord),
 }
@@ -104,7 +104,7 @@ pub fn build(s: &Phantom, around: Around) -> Vec<Menu> {
             name: "Phantom",
             items: vec![
                 Item::System { title: "About Phantom", keys: None },
-                own("settings", "Settings…", Keys::Window(letter(',')), true, Pick::Settings),
+                own("settings", "Settings…", Keys::Matched(letter(',')), true, Pick::Settings),
                 Item::Separator,
                 Item::System { title: "Hide Phantom", keys: Some(letter('h')) },
                 Item::Separator,
@@ -117,7 +117,7 @@ pub fn build(s: &Phantom, around: Around) -> Vec<Menu> {
                 // Also with Settings in front, or with no window: the main one comes back for it.
                 app(InApp::AddFile, !around.panel && (live || !main)),
                 Item::Separator,
-                own("close-window", "Close Window", Keys::Window(letter('w')), around.front.is_some() || around.panel, Pick::CloseWindow),
+                own("close-window", "Close Window", Keys::Matched(letter('w')), around.front.is_some() || around.panel, Pick::CloseWindow),
             ],
         },
         edit(s, field, live, settings),
@@ -270,7 +270,7 @@ fn own(id: &str, title: &str, keys: Keys, enabled: bool, pick: Pick) -> Item {
 
 fn app(command: InApp, enabled: bool) -> Item {
     let Spec { id, name, keys, .. } = command.spec();
-    own(id, &title_case(name), keys.first().map_or(Keys::None, |k| Keys::Window(*k)), enabled, Pick::App(command))
+    own(id, &title_case(name), keys.first().map_or(Keys::None, |k| Keys::Matched(*k)), enabled, Pick::App(command))
 }
 
 fn standard(action: &'static str, title: &str, keys: Chord, enabled: bool, shown: bool) -> Item {

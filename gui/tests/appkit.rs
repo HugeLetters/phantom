@@ -250,6 +250,26 @@ mod macos {
         }
         assert!(!root.performKeyEquivalent(&press), "closed again");
         assert_eq!(item.keyEquivalent().to_string(), "");
+
+        // Help's search looks through a menu that never opens: its keys go as Help closes.
+        crate::menu_bar::watch_tracking();
+        let post = |name: &str| {
+            let name = NSString::from_str(name);
+            // SAFETY: what AppKit posts as the menu bar is tracked.
+            unsafe { objc2_foundation::NSNotificationCenter::defaultCenter().postNotificationName_object(&name, Some(&root)) };
+        };
+        post("NSMenuDidBeginTrackingNotification");
+        assert!(crate::menu_bar::tracking());
+        // SAFETY: the menu's delegate, sent what AppKit sends it.
+        unsafe {
+            let delegate: Retained<AnyObject> = msg_send![&menu, delegate];
+            let _: () = msg_send![&delegate, menuNeedsUpdate: &*menu];
+        }
+        crate::menu_bar::arrange("Torrent", shown());
+        assert_eq!(item.keyEquivalent().to_string(), "\u{8}", "an open menu keeps its keys");
+        post("NSMenuDidEndTrackingNotification");
+        assert!(!crate::menu_bar::tracking());
+        assert_eq!(item.keyEquivalent().to_string(), "", "searched");
     }
 
     pub fn the_standard_items_are_worded_greyed_and_left_out() {
@@ -267,6 +287,7 @@ mod macos {
         let at = |menu: isize, i| root.itemAtIndex(menu).unwrap().submenu().unwrap().itemAtIndex(i).unwrap();
         assert_eq!((at(1, 0).title().to_string(), at(1, 0).isHidden()), ("Undo Remove of Album".into(), false));
         assert!(at(1, 1).isHidden(), "Redo is left out");
+        assert!(at(1, 1).allowsKeyEquivalentWhenHidden(), "its key isn't");
         assert!(at(2, 0).isHidden(), "File has Close Window");
         assert!(!crate::menu_bar::offered(Some(sel!(undo:))));
         assert!(crate::menu_bar::offered(Some(sel!(redo:))));

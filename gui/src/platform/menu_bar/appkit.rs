@@ -36,22 +36,25 @@ define_class!(
         #[unsafe(method(menuClosed:))]
         fn closed(&self, _: &NSNotification) {
             OPEN.set(OPEN.get().saturating_sub(1));
+            // A menu Help's search looked through was given its keys and never closed.
+            if !tracking() {
+                helped().iter().for_each(|menu| drop_keys(menu));
+            }
         }
 
         /// As a menu's delegate: it's about to open, with the keys its items show.
         #[unsafe(method(menuNeedsUpdate:))]
         fn needs_update(&self, menu: &NSMenu) {
-            SHOWN.with_borrow(|shown| {
-                for item in items(menu) {
-                    let title = item.title().to_string();
-                    let Some(key) = shown.iter().find(|k| k.title == title) else { continue };
-                    let mut mask = NSEventModifierFlags::empty();
-                    mask.set(NSEventModifierFlags::Command, key.cmd);
-                    mask.set(NSEventModifierFlags::Shift, key.shift);
-                    item.setKeyEquivalent(&NSString::from_str(&key.key.to_string()));
-                    item.setKeyEquivalentModifierMask(mask);
-                }
-            });
+            let shown = SHOWN.with_borrow(Clone::clone);
+            for item in items(menu) {
+                let title = item.title().to_string();
+                let Some(key) = shown.iter().find(|k| k.title == title) else { continue };
+                let mut mask = NSEventModifierFlags::empty();
+                mask.set(NSEventModifierFlags::Command, key.cmd);
+                mask.set(NSEventModifierFlags::Shift, key.shift);
+                item.setKeyEquivalent(&NSString::from_str(&key.key.to_string()));
+                item.setKeyEquivalentModifierMask(mask);
+            }
         }
 
         #[unsafe(method(menuDidClose:))]
@@ -82,6 +85,18 @@ fn drop_keys(menu: &NSMenu) {
     for item in items(menu).filter(|i| !i.keyEquivalent().is_empty()) {
         item.setKeyEquivalent(&NSString::from_str(""));
     }
+}
+
+/// The menu bar's menus whose delegate is the helper.
+fn helped() -> Vec<Retained<NSMenu>> {
+    let Some((_, _, root)) = bar() else { return Vec::new() };
+    let helper = helper();
+    let ours = |menu: &Retained<NSMenu>| {
+        // SAFETY: AppKit's own getter, on the main thread.
+        let delegate: Option<Retained<AnyObject>> = unsafe { msg_send![menu, delegate] };
+        delegate.is_some_and(|d| std::ptr::eq(Retained::as_ptr(&d), Retained::as_ptr(&helper).cast()))
+    };
+    items(&root).filter_map(|top| top.submenu()).filter(ours).collect()
 }
 
 unsafe extern "C" {
@@ -129,8 +144,8 @@ pub fn tracking() -> bool {
     OPEN.get() > 0
 }
 
-/// `menu` shows `keys` while it's open and has none else; the Help menu is there, for macOS's search; Window's Close leaves
-/// its place to File's Close Window.
+/// `menu` shows `keys` while it's open and has none else; the Help menu is there, for macOS's search;
+/// Window's Close leaves its place to File's Close Window.
 pub fn arrange(menu: &str, keys: Vec<ShownKey>) {
     SHOWN.set(keys);
     let Some((mtm, app, root)) = bar() else { return };
@@ -183,6 +198,9 @@ pub fn standard(action: &str, title: &str, enabled: bool, shown: bool) {
             }
             if item.isHidden() == shown {
                 item.setHidden(!shown);
+                // Its key still reaches what's in front, such as a file picker's field, before a
+                // frame shows the item again.
+                item.setAllowsKeyEquivalentWhenHidden(true);
             }
         }
     }
