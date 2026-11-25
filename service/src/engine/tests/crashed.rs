@@ -167,6 +167,8 @@ async fn interrupted(at: At, gone: &[&str], put: Put, when: When, off: bool, cra
         Put::Other => {
             // Long enough for a size check to see the files and a check to end.
             tokio::time::sleep(Duration::from_secs(3)).await;
+            // A check a loaded machine is late with is let end: it's what's left of it that's judged.
+            until(&engine, id, |s| *s != Status::Checking).await;
             assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "{case}");
             for name in gone {
                 assert_eq!(std::fs::read(file(dir, name)).unwrap(), other(), "{case}: {name} as it was put there");
@@ -191,11 +193,21 @@ const EVERY: [At; 10] = [
 const B: &[&str] = &["b.bin"];
 const TWO: &[&str] = &["a.bin", "b.bin"];
 
-/// Runs the cases side by side: each takes seconds, most of them waiting.
+/// How many cases run at once. All of them (30) started as many engines together, and on a loaded
+/// machine their checks took 6-18 s, past the 10 s waits and the 3 s a check had to end in. They
+/// get there, they were only slow.
+const WIDTH: usize = 6;
+
+/// Runs the cases side by side, `WIDTH` at a time: each takes seconds, most of them waiting.
 async fn each(cases: impl IntoIterator<Item = (At, &'static [&'static str], Put, When, bool, bool)>) {
     let mut running = tokio::task::JoinSet::new();
+    let width = Arc::new(tokio::sync::Semaphore::new(WIDTH));
     for (at, gone, put, when, off, crash) in cases {
-        running.spawn(interrupted(at, gone, put, when, off, crash));
+        let width = width.clone();
+        running.spawn(async move {
+            let _turn = width.acquire().await.unwrap();
+            interrupted(at, gone, put, when, off, crash).await
+        });
     }
     while let Some(done) = running.join_next().await {
         done.unwrap();
