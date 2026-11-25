@@ -249,6 +249,7 @@ async fn a_let_go_a_crash_cuts_short_is_finished_at_the_next_start() {
         let left = engine.inspect(move |a| a.torrents.get(&id).map(|t| t.record.letting_go.clone())).await;
         assert_eq!(left, Some(letgo::State::Holding), "{at:?}: finished as it starts");
         until_let_go(&engine, id, 0).await;
+        until_added_back(&engine, id).await;
         until(&engine, id, |s| *s == Status::Seeding).await;
         assert_eq!(saved_pieces(dir.path(), &hash), 4, "{at:?}: the other file's only");
         for _ in 0..100 {
@@ -308,6 +309,18 @@ async fn a_torrent_a_crash_took_out_isnt_lost_when_it_cant_be_added_back_at_the_
     let Some(letgo::State::Stashed { stash, .. }) = kept else { panic!("its record kept: {kept:?}") };
     assert!(stash.dir.is_dir(), "what was kept of it kept");
     engine.stop().await;
+}
+
+/// Waits up to 10 seconds for [`let_go`]: librqbit is done sampling the pieces it saved of torrent
+/// `id`. Its row is its record's until then.
+async fn until_added_back(engine: &Engine, id: u64) {
+    for _ in 0..1000 {
+        if let_go(engine, id).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("torrent {id} never added back");
 }
 
 /// Waits up to 10 seconds for torrent `id`'s record to have nothing left to let go of.
@@ -430,9 +443,10 @@ async fn what_is_kept_of_a_neighbour_in_the_trash_outlasts_letting_go_of_another
     let (first, middle) = (name(&engine, id, 0).await, name(&engine, id, 1).await);
     // The middle file without its part of piece 2 (from 32768, 12768 bytes into it), found so.
     engine.command(id, TorrentCommand::Pause).await.unwrap();
-    let mut bytes = std::fs::read(pack.join(&middle)).unwrap();
-    bytes[12768..].fill(0);
-    std::fs::write(pack.join(&middle), &bytes).unwrap();
+    // In place: cut short even for a moment, a size check could find it missing.
+    let file = std::fs::File::options().write(true).open(pack.join(&middle)).unwrap();
+    std::os::unix::fs::FileExt::write_all_at(&file, &[0; 20000 - 12768], 12768).unwrap();
+    drop(file);
     engine.command(id, TorrentCommand::Check).await.unwrap();
     until(&engine, id, |s| *s == Status::Paused).await;
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1] }).await.unwrap();
@@ -691,6 +705,7 @@ async fn a_delete_of_a_torrent_whose_add_back_failed_moves_its_files_and_is_undo
     reads.store(0, Ordering::SeqCst);
     engine.undo().await.unwrap();
     assert!(other.exists(), "back at its path");
+    until_added_back(&engine, id).await;
     until(&engine, id, |s| *s == Status::Seeding).await;
     assert_eq!(progress(&engine, id).await, [0, 65536]);
     let read = reads.load(Ordering::SeqCst);
@@ -711,6 +726,7 @@ async fn a_remove_of_a_torrent_whose_add_back_failed_is_undone_from_what_was_kep
     assert!(other.exists(), "its files stay");
     reads.store(0, Ordering::SeqCst);
     engine.undo().await.unwrap();
+    until_added_back(&engine, id).await;
     until(&engine, id, |s| *s == Status::Seeding).await;
     assert_eq!(progress(&engine, id).await, [0, 65536]);
     let read = reads.load(Ordering::SeqCst);
