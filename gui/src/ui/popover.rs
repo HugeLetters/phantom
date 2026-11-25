@@ -15,8 +15,8 @@ const MAX_WIDTH: f32 = 320.0;
 const PAD_X: f32 = 10.0;
 
 impl Ui {
-    /// How Rune draws every `.help` tooltip: the look of this file's notes (the raised surface, the
-    /// same edge, corners and type), so one window never shows two. Told to Rune once a view
+    /// How Rune draws every `.help` tooltip: the notices popover's fill and edge, and the corners and
+    /// type of this file's notes, whose own edge is fainter. Told to Rune once a view
     /// (`cx.help_look(ui.help_look())`); on macOS it replaces AppKit's own tooltip.
     pub fn help_look(&self) -> rune::HelpLook {
         let k = &self.k;
