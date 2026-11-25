@@ -2167,4 +2167,51 @@ fn what_leaves_with_the_focus_hands_it_to_no_neighbour() {
         assert!(rt.find("rename-field").is_none(), "{key:?} closes it");
         nowhere(&rt, "the rename field, done");
     }
+
+    // The palette, after a Tab in it: back where the focus was, or nowhere.
+    let leave: [(&str, fn(&mut Runtime<Phantom>)); 3] = [
+        ("Escape", |rt| rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() })),
+        ("Return", |rt| rt.key(KeyEvent { key: Key::Enter, mods: Mods::default() })),
+        ("a click outside", |rt| {
+            rt.pointer_down(4.0, 500.0);
+            rt.pointer_up(4.0, 500.0);
+        }),
+    ];
+    for (how, leave) in leave {
+        for list in [false, true] {
+            let mut rt = open();
+            rt.update(move |_, tx| if list { tx.focus("table", false) } else { tx.blur() });
+            settle(&mut rt);
+            let before = focused(&rt);
+            assert_eq!(before.is_empty(), !list);
+            rt.update(|s, _| {
+                crate::model::palette::open(s);
+                // What Return runs does nothing of its own to the focus.
+                s.palette.query.text = "Pause".into();
+            });
+            settle(&mut rt);
+            rt.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+            settle(&mut rt);
+            leave(&mut rt);
+            settle(&mut rt);
+            assert!(!rt.state.palette.is_open(), "{how} closes it");
+            assert_eq!(focused(&rt), before, "the palette, closed by {how}");
+        }
+    }
+
+    // The bar's Undo, with another notice left beside it.
+    let mut rt = open();
+    rt.update(|s, _| {
+        s.bar.tell(Notice::new("Earlier"));
+        let undo = NoticeAction::new("Undo", |s: &mut Phantom| {
+            let id = s.bar.entries().iter().find(|e| e.notice.undo().is_some()).unwrap().id;
+            s.bar.dismiss(id);
+        });
+        let undo = NoticeAction { undo: true, ..undo };
+        s.bar.tell(Notice::new("Removed").with_actions(vec![undo]));
+    });
+    settle(&mut rt);
+    tap(&mut rt, "bar-undo");
+    settle(&mut rt);
+    nowhere(&rt, "the bar's Undo");
 }
