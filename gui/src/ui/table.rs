@@ -141,6 +141,8 @@ impl Ui {
     pub fn column_cell(&self, column: &TableColumn, content: El, moved: Option<Anim>) -> El {
         let style = TableStyle::from_kit(&self.k);
         let cell = row().role("gridcell").h_full().px(style.cell_pad).center_y().clip_soft(0.0);
+        // The column slides, not what's in it: a progress bar grows at once, as at rest.
+        let content = if moved.is_some() { content.instant_changes() } else { content };
         let cell = justify(column.size_el(cell, None), column.alignment()).key(column.id().to_owned()).child(content);
         match moved {
             Some(anim) => cell.frame_motion(anim),
