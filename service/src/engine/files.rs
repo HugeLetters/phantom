@@ -162,6 +162,8 @@ pub struct Guard {
     /// The files in the Trash, which every storage of Phantom's own reads where they went and keeps
     /// librqbit off (`trashed.rs`).
     trashed: Trashed,
+    /// The places undos are putting files back to, which an add waits for.
+    places: super::places::Places,
     /// The one torrent's destination and layout, for its add.
     layout: Option<(AbsolutePath, Layout)>,
     /// How many storages it made that aren't Phantom's own (`Files`), for a test.
@@ -221,6 +223,7 @@ impl Guard {
             untouched: Arc::default(),
             init_in,
             trashed: Trashed::default(),
+            places: Default::default(),
             layout: None,
             #[cfg(test)]
             unguarded: Arc::default(),
@@ -291,6 +294,11 @@ impl Guard {
     /// Keeping what librqbit writes into a file in the Trash in `dir`.
     pub fn keeping_parts_in(self, dir: PathBuf) -> Self {
         Self { trashed: self.trashed.clone().keeping_parts_in(dir), ..self }
+    }
+
+    /// The places undos are putting files back to.
+    pub fn places(&self) -> &super::places::Places {
+        &self.places
     }
 
     /// The files in the Trash ([`Trashed`]).

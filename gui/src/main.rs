@@ -872,6 +872,27 @@ fn spec() -> AppSpec<Phantom> {
                     s.bar.tell(notice);
                 }
             }),
+            // An undo refused because another torrent has the files now (#371).
+            ("cant-undo-place", |s| {
+                s.service = Box::new(demo_service());
+                let undo = proto::Undoable {
+                    seq: 1,
+                    action: proto::UndoAction::Remove,
+                    torrents: vec![proto::Named { id: 9, name: "Big Buck Bunny (2008)".into() }],
+                };
+                let why = proto::CantUndo::AnotherHasFiles {
+                    other: proto::Named { id: 10, name: "Big Buck Bunny (2008) [1080p]".into() },
+                    path: proto::AbsolutePath::new(
+                        "/Users/me/Downloads/Big Buck Bunny (2008)/Big_Buck_Bunny_1080p_surround_FrostWire.com.avi",
+                    )
+                    .expect("absolute"),
+                    magnet: Some("magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big%20Buck%20Bunny".into()),
+                };
+                let refused = client::Failure::Refused(proto::Refusal::Undo { undo, why, stranded: Vec::new() });
+                for notice in model::undo_notices(&Err(refused), &s.undos) {
+                    s.bar.tell(notice);
+                }
+            }),
             // Adds take 1 s, a .torrent URL 3 s, as from a busy service; the magnet named Nobody fails.
             ("adds", |s| s.service = Box::new(slow_adds())),
             ("no-default", |s| s.service = Box::new(slow_adds().with_default_destination(None))),

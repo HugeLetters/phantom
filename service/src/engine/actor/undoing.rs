@@ -210,6 +210,11 @@ impl Actor {
     /// out; one a crash cut short goes on as it was. Refused, it's over and its client hears why.
     pub(super) async fn start_undo(&mut self, seq: u64, of: u64, entry: Entry) {
         let id = entry.id;
+        // A partial Delete's is written ahead as it begins (`take_out_for_undo`): cut short before,
+        // it's begun now.
+        if matches!(entry.back, Back::InList { .. }) {
+            self.resumed.remove(&(seq, id));
+        }
         if self.resumed.contains(&(seq, id)) {
             return self.resume_undo(seq, of, entry).await;
         }
@@ -222,6 +227,8 @@ impl Actor {
             }
             return self.start_rename(id, name, super::moving::StepOf::Undo { seq, of, entry }).await;
         }
+        // Kept for it from before it's checked till it's over, whatever comes meanwhile (#371).
+        self.reserve(&entry);
         let refused = match self.can_undo(&entry) {
             Err(why) => Some(refused(entry.undoable(of), why, Vec::new())),
             Ok(()) => self.take_out_for_undo(seq, &entry).await.err(),
@@ -254,6 +261,8 @@ impl Actor {
             }
         };
         let ended = self.end(seq, id, over);
+        // Once that's saved: a crash never resumes an undo into what came to its place since.
+        self.guard.places().release(id);
         self.answer_step(ended, super::steps::Outcome::Undone(answer));
     }
 
@@ -269,7 +278,12 @@ impl Actor {
         let in_list = self.by_hash(&entry.info_hash);
         let destination = match &entry.back {
             Back::Gone { .. } if in_list.is_some() => return Err(CantUndo::InList),
-            Back::Gone { saved, .. } => Some(saved.destination.clone()),
+            Back::Gone { saved, .. } => {
+                if let Some(why) = self.another_has(entry) {
+                    return Err(why);
+                }
+                Some(saved.destination.clone())
+            }
             // Its torrent is in the list, the same one (added again since is another), and one trashing
             // files would do something to now.
             Back::Files { previous, .. } => {
@@ -287,7 +301,13 @@ impl Actor {
             Back::InList { .. } => match self.torrents.get(&entry.id).map(|t| (&t.lifecycle.phase, &t.record)) {
                 None => return Err(CantUndo::NotInList),
                 Some((Phase::DeleteFailed { away: Some(reason), .. }, _)) => return Err(CantUndo::Destination { reason: reason.clone() }),
-                Some((Phase::DeleteFailed { away: None, .. }, record)) => Some(record.destination.clone()),
+                // Refused while it's still listed, as it is: never once it's taken out to be brought back.
+                Some((Phase::DeleteFailed { away: None, .. }, record)) => {
+                    if let Some(why) = self.another_has(entry) {
+                        return Err(why);
+                    }
+                    Some(record.destination.clone())
+                }
                 // Only a Delete tried again takes a partly deleted torrent elsewhere in the list.
                 Some((_, _)) => return Err(CantUndo::Deleting),
             },
@@ -308,6 +328,66 @@ impl Actor {
             return Err(CantUndo::NotInTrash { path: absolute(first.from.clone()) });
         }
         trash::can_put_back(&left, &destination, &self.new_copies(entry, &left)).map_err(blocked)
+    }
+
+    /// The record of the torrent `entry`, a Remove or a Delete, brings back: none of a magnet without
+    /// info, which has no files.
+    fn coming(&self, entry: &Entry) -> Option<Record> {
+        match &entry.back {
+            Back::Gone { saved, source: Source::Stash(stash) } => {
+                let info = Info::parse(&stash.torrent().ok()?).ok()?;
+                Some(Record::parse(&entry.info_hash, saved.clone(), Some(info)))
+            }
+            Back::InList { .. } => Some(self.torrents.get(&entry.id)?.record.clone()),
+            Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } | Back::Renamed { .. } => None,
+        }
+    }
+
+    /// What `entry`'s undo, if it can't finish, takes back of a folder it put back.
+    fn own(&self, entry: &Entry) -> trash::Own {
+        let files = match &entry.back {
+            Back::Gone { source: Source::Stash(stash), .. } | Back::InList { stash } => stash.files.clone(),
+            Back::Gone { source: Source::Magnet(_), .. } | Back::Files { .. } | Back::Renamed { .. } => Vec::new(),
+        };
+        let others = self.torrents.values().filter(|t| t.id != entry.id);
+        trash::Own { files, kept: others.map(|t| t.record.destination.to_path_buf()).collect() }
+    }
+
+    /// Keeps the place `entry` puts its torrent's files back to for its undo ([`super::super::places`]).
+    fn reserve(&self, entry: &Entry) {
+        if let Some(record) = self.coming(entry) {
+            let items = entry.put_back.iter().map(|t| t.from.clone()).collect();
+            self.guard.places().reserve(entry.id, entry.name.clone(), record.paths(), items);
+        }
+    }
+
+    /// The places of the undos a crash cut short, kept before any torrent is added.
+    pub(super) fn reserve_resumed(&self) {
+        let cut_short = self.steps.machine().steps.values().filter(|s| s.phase != StepPhase::Queued);
+        for step in cut_short {
+            if let What::Undo { parts, .. } = &step.what {
+                parts.values().filter_map(|p| p.doing()).for_each(|entry| self.reserve(entry));
+            }
+        }
+    }
+
+    /// Why `entry`, a Remove or a Delete, can't bring its torrent back for another in the list that
+    /// has its files now (#371): at its paths, however spelled or reached, where a Move of it under way
+    /// takes them, or where an undo that began before is bringing it back. Move's own rule for another
+    /// torrent's place (`moving::anothers`, `Actor::others_files`), so two listed torrents never get to
+    /// write the same files. Nothing is touched: the other torrent isn't checked, paused or
+    /// restarted, and nothing at its place is written.
+    fn another_has(&self, entry: &Entry) -> Option<CantUndo> {
+        let record = self.coming(entry)?;
+        let files = super::moving::inside(&record);
+        let (clash, other) = super::super::moving::anothers(&record.destination, &files, self.others_files(entry.id))?;
+        let name = self.torrents.get(&other).map(name_of).or_else(|| self.guard.places().name(other))?;
+        // Kept in the refusal: the step is dropped, and this is all that's left of a torrent off the
+        // list to add again. Its info's own name, as the app's Copy magnet link has it, not one a
+        // Rename gave it.
+        let off = matches!(entry.back, Back::Gone { .. }) && self.by_hash(&entry.info_hash).is_none();
+        let magnet = off.then(|| undo::magnet(&entry.info_hash, record.name.as_deref(), &record.trackers));
+        Some(CantUndo::AnotherHasFiles { other: proto::Named { id: other, name }, path: absolute(clash), magnet })
     }
 
     /// The torrent's own new copies of the files `entry`, a Move to Trash, took (#276): files it gets
@@ -345,15 +425,21 @@ impl Actor {
     /// other that left: with its record, now whole again.
     async fn take_out_for_undo(&mut self, seq: u64, entry: &Entry) -> Result<(), Failure> {
         let Back::InList { stash } = &entry.back else { return Ok(()) };
-        let saved = self.torrents.get(&entry.id).map(Torrent::kept).context("a torrent in the list has a record")?;
         let pieces = self.pieces(entry.id);
-        // Written ahead: what brings it back is kept before its record goes. A crash after this
-        // finds it still in the list, partly deleted, and takes it out then (`resume_undo`).
+        self.save_taking_out(seq, entry, stash)?;
+        self.take_off_list(entry.id).await?;
+        self.wait_for_stash(stash, pieces).await;
+        Ok(())
+    }
+
+    /// Written ahead: what brings a partial Delete's torrent back is kept before its record goes. A
+    /// crash after this finds it still in the list, partly deleted, and takes it out then
+    /// (`resume_undo`).
+    fn save_taking_out(&mut self, seq: u64, entry: &Entry, stash: &Stash) -> Result<(), Failure> {
+        let saved = self.torrents.get(&entry.id).map(Torrent::kept).context("a torrent in the list has a record")?;
         let back = Back::Gone { saved: whole(saved), source: Source::Stash(stash.clone()) };
         self.steps.rewrite(seq, entry.id, Entry { back, ..entry.clone() });
         self.save_undo();
-        self.take_off_list(entry.id).await?;
-        self.wait_for_stash(stash, pieces).await;
         Ok(())
     }
 
@@ -393,14 +479,16 @@ impl Actor {
             }
             _ => entry,
         };
+        let own = self.own(&entry);
         self.putting_back.spawn_blocking(move || {
             let first = entry.put_back.first().map_or_else(|| PathBuf::from("/"), |t| t.from.clone());
             // Checked before it started; one finished after a crash may have lost it since.
             let Some(destination) = destination else {
                 return (seq, id, Err((trash::PutBackError::Failed { path: first, detail: "no destination".into() }, Vec::new())));
             };
-            let put =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trash::put_back(&items, &destination, &trash, resumed, &copies)));
+            let put = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                trash::put_back(&items, &destination, &trash, resumed, &copies, &own)
+            }));
             let put = put
                 .unwrap_or_else(|_| Err((trash::PutBackError::Failed { path: first, detail: "putting back stopped".into() }, Vec::new())));
             (seq, id, put)
@@ -421,7 +509,11 @@ impl Actor {
                 Err(refused(entry.undoable(of), why, stranded))
             }
             Ok(back) => {
+                // Looked at again as the torrent is about to be added (#371): another torrent may have been
+                // added while the files went back. It waits for this undo, having touched nothing.
+                let late = self.another_has(&entry);
                 let added = match &entry.back {
+                    Back::Gone { .. } if late.is_some() => Err(anyhow!("another torrent has its files now").into()),
                     Back::Gone { saved, source } => self.add_back(entry.id, &entry.info_hash, saved.clone(), source.clone()).await,
                     Back::InList { .. } => Err(anyhow!("a partial Delete's torrent is taken out before its undo").into()),
                     Back::Renamed { .. } => Err(anyhow!("a Rename's undo puts nothing back from the Trash").into()),
@@ -442,14 +534,15 @@ impl Actor {
                         Failure::Error(proto::ServiceError::Internal { detail }) => detail.clone(),
                         Failure::Error(e) => format!("{e:?}"),
                     };
-                    let why = match entry.back {
-                        Back::Files { .. } => CantUndo::PriorityFailed { detail },
-                        Back::Gone { .. } | Back::InList { .. } => CantUndo::AddFailed { detail },
-                        Back::Renamed { .. } => CantUndo::Failed { detail },
+                    let why = match (late, &entry.back) {
+                        (Some(why), _) => why,
+                        (None, Back::Files { .. }) => CantUndo::PriorityFailed { detail },
+                        (None, Back::Gone { .. } | Back::InList { .. }) => CantUndo::AddFailed { detail },
+                        (None, Back::Renamed { .. }) => CantUndo::Failed { detail },
                     };
                     // Only what's back: an item emptied from the Trash while a crash cut the undo short
                     // isn't, and what's at its path now isn't the torrent's.
-                    let stranded = trash::take_back(&self.trash, back.iter());
+                    let stranded = trash::take_back(&self.trash, back.iter(), &self.own(&entry));
                     refused(entry.undoable(of), why, stranded)
                 })
             }
@@ -704,12 +797,40 @@ impl Actor {
             if !half_taken {
                 return self.undo_ended(seq, entry.id, Ok(entry.undoable(of)));
             }
+        }
+        // Cut short before its check, it may be refused still (#371): while nothing of it is back, as
+        // it would have been, with nothing put at the other's place meanwhile.
+        if !trash::any_back(&entry.put_back)
+            && let Some(why) = self.another_has(&entry)
+        {
+            return self.undo_ended(seq, entry.id, Err(refused(entry.undoable(of), why, Vec::new())));
+        }
+        if let Some(id) = self.by_hash(&entry.info_hash).map(|t| t.id) {
             if let Err(e) = self.take_off_list(id).await {
                 warn!(id, error = %e, "failed to take out a partly deleted torrent to finish its undo");
                 return self.undo_ended(seq, entry.id, Err(Failure::from(e)));
             }
         }
         self.put_back(seq, entry.id);
+    }
+
+    /// The top step's undo saved as running, none of it checked yet: where a test kills it.
+    #[cfg(test)]
+    pub(in super::super) fn save_undoing_unchecked(&mut self) {
+        self.steps.undo(tokio::sync::oneshot::channel().0);
+        while self.steps.next().is_some() {}
+        self.save_undo();
+    }
+
+    /// [`Actor::save_undoing_unchecked`], of a partial Delete of torrent `id`, then saved as taking it
+    /// out of the list, where it still is: where a test kills it.
+    #[cfg(test)]
+    pub(in super::super) fn save_undoing_taking_out(&mut self, id: TorrentId) {
+        self.save_undoing_unchecked();
+        let seqs: Vec<u64> = self.steps.machine().steps.keys().copied().collect();
+        let (seq, entry) = seqs.into_iter().find_map(|seq| Some((seq, self.undoing(seq, id)?.1))).expect("its undo runs");
+        let Back::InList { stash } = &entry.back else { panic!("a partial Delete's") };
+        self.save_taking_out(seq, &entry, stash).expect("it's in the list");
     }
 
     /// Keeps the stack, lets go of the stashes nothing names any more, and has the files in the

@@ -367,14 +367,23 @@ struct Note {
     failed: Vec<(String, client::display::Reason)>,
     /// A move's, not adds'.
     moved: bool,
+    /// An undo's that another torrent's files refused (#371): "Couldn't undo the Remove", the two
+    /// names (the fake's own, which the model leaves to it) and Copy magnet link.
+    undo: bool,
 }
 
 impl Note {
     fn title(&self) -> String {
-        match self.moved {
-            true => client::display::commands_failed(Do::Move, 1, 1),
-            false => client::display::adds_failed(self.failed.len(), self.total),
+        match (self.undo, self.moved) {
+            (true, _) => "Couldn't undo the Remove".into(),
+            (false, true) => client::display::commands_failed(Do::Move, 1, 1),
+            (false, false) => client::display::adds_failed(self.failed.len(), self.total),
         }
+    }
+
+    /// An undo of a Remove that another torrent's files refused.
+    fn undo_refused() -> Note {
+        Note { total: 1, failed: Vec::new(), moved: false, undo: true }
     }
 
     /// A move of torrent `id` that failed, for `why`.
@@ -388,7 +397,7 @@ impl Note {
         let name = if id == 0 { "a" } else { "Album" };
         let failure = client::Failure::Refused(proto::Refusal::Torrent { id, why });
         let (what, why) = client::display::command_failure(name, &failure);
-        Note { total: 1, failed: vec![(what, why)], moved: true }
+        Note { total: 1, failed: vec![(what, why)], moved: true, undo: false }
     }
 
     /// What its entry draws: the title, then each failure and its reason.
@@ -439,9 +448,10 @@ struct Rows {
     /// The rows removed or deleted, oldest first, by press, as Undo brings them back: one press,
     /// one entry.
     removed: Vec<Vec<(TorrentId, Option<Link>)>>,
-    /// What the last Undo did: the rows it brought back, and how many it couldn't; nothing, with
-    /// nothing to undo.
-    undid: Option<(Vec<TorrentId>, usize)>,
+    /// What the last Undo did: the rows it brought back, how many it couldn't, and how many of those
+    /// because another torrent has its files (#371), the rest because it was added again; nothing,
+    /// with nothing to undo.
+    undid: Option<(Vec<TorrentId>, usize, usize)>,
     /// The windows that show, and the one in front.
     shown: Showing,
     /// The move on its way, the clash dialog open (its torrent and folder), the folder each torrent
@@ -563,7 +573,7 @@ impl Rows {
         }
         // The field's add: its answer may touch the field, while it still holds the link.
         let holds = sent.field.is_some() && sent.links.iter().all(|l| self.field.trim() == l.text());
-        let mut note = Note { total: 0, failed: Vec::new(), moved: false };
+        let mut note = Note { total: 0, failed: Vec::new(), moved: false, undo: false };
         let button = sent.field == Some(Via::Button);
         for link in sent.links {
             // A failure, the field's too, goes to its batch's notice.
@@ -869,17 +879,25 @@ impl ReferenceStateMachine for Screen {
             }
             Action::Front(which) => rows.shown.front = Some(*which),
             Action::Reopen => (rows.shown.main, rows.shown.front) = (true, Some(Which::Main)),
-            // All of the entry, each row on its own: refused while a row of its magnet is listed.
+            // All of the entry, each row on its own: refused while a row of its magnet is listed, and
+            // while another row of the same file is: two torrents of one file have its place, whatever
+            // their hashes (#371), the one put back first has it.
             Action::Undo(which) => {
                 rows.shown.front = Some(*which);
                 rows.undid = rows.removed.pop().map(|entry| {
-                    let mut back = Vec::new();
-                    let mut refused = 0;
+                    let mut back: Vec<(TorrentId, Option<Link>)> = Vec::new();
+                    let (mut refused, mut places) = (0, 0);
                     for (id, link) in entry {
                         let listed = rows.rows.values().any(|l| l.is_some() && *l == link && !link.is_some_and(Link::is_file));
-                        match listed {
-                            true => refused += 1,
-                            false => back.push((id, link)),
+                        let place =
+                            link.is_some_and(Link::is_file) && rows.rows.values().chain(back.iter().map(|(_, l)| l)).any(|l| *l == link);
+                        match (listed, place) {
+                            (true, _) => refused += 1,
+                            (false, true) => {
+                                (refused, places) = (refused + 1, places + 1);
+                                rows.errors.push(Note::undo_refused());
+                            }
+                            (false, false) => back.push((id, link)),
                         }
                     }
                     for (id, link) in &back {
@@ -889,7 +907,7 @@ impl ReferenceStateMachine for Screen {
                     if let Some(&last) = back.iter().max() {
                         rows.selected = Some(last);
                     }
-                    (back, refused)
+                    (back, refused, places)
                 });
             }
             Action::Wait(secs) => rows.frame += (secs / FRAME) as u64,
@@ -993,11 +1011,19 @@ impl StateMachineTest for Screen {
                 let id = before[*n];
                 show_notice(rt, id);
                 // A batch is one notice, its list as the view: what failed, and why.
-                assert_eq!(
-                    texts_under(rt, &format!("notice/{id}")),
-                    rows.dismissed.as_ref().expect("dismissed").lines(),
-                    "the notice says what failed"
-                );
+                let note = rows.dismissed.as_ref().expect("dismissed");
+                let drawn = texts_under(rt, &format!("notice/{id}"));
+                match note.undo {
+                    true => {
+                        assert_eq!(drawn.first(), Some(&note.title()), "the notice says what failed");
+                        let apart = "Its files would clash with another torrent's:";
+                        assert!(
+                            drawn.iter().any(|l| l == apart) && drawn.last().map(String::as_str) == Some("Copy magnet link"),
+                            "{drawn:?}"
+                        );
+                    }
+                    false => assert_eq!(drawn, note.lines(), "the notice says what failed"),
+                }
                 let (x, y) = rt.find("notice-dismiss").expect("× on an error notice");
                 rt.pointer_down(x, y);
                 rt.pointer_up(x, y);
@@ -1217,23 +1243,32 @@ impl StateMachineTest for Screen {
                 step(rt);
                 let short = newest_told(&rt.state).map(|n| n.short.clone()).unwrap_or_default();
                 match &rows.undid {
-                    Some((back, refused)) if !back.is_empty() => {
+                    Some((back, refused, places)) if !back.is_empty() => {
                         assert!(short.to_lowercase().contains("back"), "the status bar says what came back: {short:?}");
                         // Told just before it, from the snapshot: each of a selection's that didn't, as it's
                         // listed again (#235).
                         let shorts: Vec<&str> = rt.state.bar.entries().iter().map(|e| e.notice.short.as_str()).collect();
                         let before = &shorts[shorts.len().saturating_sub(1 + refused)..shorts.len().saturating_sub(1)];
+                        let again = before.iter().filter(|s| **s == "Already in the list").count();
+                        let taken = before.iter().filter(|s| s.starts_with("Couldn't undo the ")).count();
                         assert!(
-                            before.len() == *refused && before.iter().all(|s| *s == "Already in the list"),
+                            before.len() == *refused && (again, taken) == (refused - places, *places),
                             "the status bar says which didn't come back: {shorts:?}"
                         );
                         let last = *back.iter().max().expect("some back");
                         assert_eq!(selected_torrents(&rt.state.table), [last], "the last row that came back is selected");
                     }
-                    // The fake refuses only a torrent added again, which the app tells as such.
-                    Some(_) => {
-                        assert_eq!(short, client::display::already_in_list(), "the status bar says it's in the list already: {short:?}")
-                    }
+                    // The fake refuses a torrent added again, which the app tells as such, and one whose
+                    // place another has, which it tells as an error (#371).
+                    Some((_, _, places)) => match places {
+                        0 => {
+                            assert_eq!(short, client::display::already_in_list(), "the status bar says it's in the list already: {short:?}")
+                        }
+                        _ => assert!(
+                            short == client::display::already_in_list() || short.starts_with("Couldn't undo the "),
+                            "the status bar says why: {short:?}"
+                        ),
+                    },
                     None => {}
                 }
             }

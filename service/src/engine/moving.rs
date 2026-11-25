@@ -345,10 +345,13 @@ pub fn plan(
     })
 }
 
+/// Where a folder is ([`folder_place`]).
+pub type Place = (Option<Ino>, String);
+
 /// Where the folder `path` is: its inode if it's on disk, else its nearest ancestor on disk's and the
 /// rest folded as `name_free` folds a name (Unicode composed, lower case), so the same place in
 /// another spelling is the same.
-fn folder_place(path: &Path) -> (Option<Ino>, String) {
+pub fn folder_place(path: &Path) -> Place {
     let folded = |p: &Path| normalized(&p.to_string_lossy().to_lowercase());
     match path.ancestors().find_map(|a| folder(a).map(|i| (a, i))) {
         Some((near, ino)) => (Some(ino), folded(path.strip_prefix(near).unwrap_or(path))),
@@ -371,7 +374,7 @@ pub fn anothers<T: std::marker::Copy>(
 ) -> Option<(PathBuf, T)> {
     let tagged: Vec<(T, PathBuf)> = others.into_iter().collect();
     let others: Vec<PathBuf> = tagged.iter().map(|(_, p)| p.clone()).collect();
-    let mut parents: BTreeMap<PathBuf, (Option<Ino>, String)> = BTreeMap::new();
+    let mut parents: BTreeMap<PathBuf, Place> = BTreeMap::new();
     let mut spelled = |path: &Path| {
         let parent = path.parent().unwrap_or(path).to_owned();
         let folder = parents.entry(parent.clone()).or_insert_with(|| folder_place(&parent)).clone();

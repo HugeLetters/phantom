@@ -506,6 +506,8 @@ impl Actor {
             move_hold: Default::default(),
         };
         let mut actor = actor;
+        // Before anything is added: an undo a crash cut short may have some of its files back.
+        actor.reserve_resumed();
         actor.save();
         actor.save_undo();
         // librqbit restores nothing: each torrent that belongs there is added now, once its files
@@ -1480,6 +1482,14 @@ impl Actor {
         self.torrents.insert(id, torrent);
     }
 
+    /// An add of torrent `id` that isn't the one under way ends, as one taken off the list does.
+    #[cfg(test)]
+    pub(super) fn old_add_ends(&self, id: TorrentId) {
+        let (task, added) = (tokio::spawn(async {}).id(), Err(anyhow!("cut short")));
+        let inbox = self.inbox.upgrade().expect("it runs");
+        tokio::spawn(async move { inbox.send(Message::AddFinished { id, task, added }).await });
+    }
+
     /// Torrent `id`'s add task ended with `added`: [`add::decide`], from what the add was when it
     /// ended, says what it came to.
     async fn add_finished(&mut self, id: TorrentId, task: tokio::task::Id, added: Result<AddTorrentResponse>) {
@@ -1494,6 +1504,10 @@ impl Actor {
             true => add::State::Fetching,
             false => add::State::Removed,
         };
+        // Taken off, it said so then (`take_off_list`): what's said since is another task's.
+        if stage == add::State::Fetching {
+            self.guard.places().added(id);
+        }
         let ended = if added.is_ok() { add::Ended::Added } else { add::Ended::Failed };
         let Ok(stage) = add::decide(&stage, &add::Event::Observed(add::Observed::Ended(ended)));
         let handle = match (stage, added) {
@@ -1654,6 +1668,7 @@ impl Actor {
                 task.abort();
             }
             let _ = task.await;
+            self.guard.places().added(id);
         }
         let taken_out = match self.session.get(TorrentIdOrHash::Hash(hash)) {
             Some(t) => self.session.delete(TorrentIdOrHash::Id(t.id()), false).await,
@@ -1955,6 +1970,9 @@ pub(super) async fn add_from(
         }
     }
     let output_folder = destination.join(own_folder);
+    // Never into a place an undo is putting files back to (#371): it waits till that's over.
+    let paths = listed.info.iter_file_details().map(|f| output_folder.join(f.filename.to_pathbuf())).collect();
+    guard.places().claim(id, paths).await;
     let all: Vec<usize> = (0..listed.info.iter_file_lengths().count()).collect();
     // Phantom's own storage, which knows its folder, as every add's: it never writes to a file moved
     // from its path.

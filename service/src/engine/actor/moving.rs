@@ -337,12 +337,20 @@ impl Actor {
     }
 
     /// Where every torrent in the list but `id` has its files: at their paths, and for one moving,
-    /// in its old destination, its staging folder and its new one too.
-    fn others_files(&self, id: TorrentId) -> impl Iterator<Item = (TorrentId, PathBuf)> + '_ {
-        self.torrents.iter().filter(move |(other, _)| **other != id).flat_map(|(other, t)| {
-            let moving = t.record.moving.iter().flat_map(|m| m.plan.paths());
-            t.record.paths().into_iter().chain(moving.collect::<Vec<_>>()).map(|p| (*other, p))
-        })
+    /// in its old destination, its staging folder and its new one too; and those being added, or
+    /// brought back by an undo ([`super::super::places`]).
+    pub(super) fn others_files(&self, id: TorrentId) -> impl Iterator<Item = (TorrentId, PathBuf)> + '_ {
+        self.torrents
+            .iter()
+            .filter(move |(other, _)| **other != id)
+            .flat_map(|(other, t)| {
+                let moving = t.record.moving.iter().flat_map(|m| m.plan.paths());
+                t.record.paths().into_iter().chain(moving.collect::<Vec<_>>()).map(|p| (*other, p))
+            })
+            .chain(self.guard.places().others(id).into_iter().filter(|(other, _)| {
+                // Not an add taken off the list meanwhile.
+                self.torrents.contains_key(other) || self.guard.places().name(*other).is_some()
+            }))
     }
 
     /// Which of `ids` a move into `to` would find files at (`Request::Clashes`): in the order of
@@ -904,7 +912,7 @@ fn undo_refused(id: TorrentId, why: TorrentRefusal) -> CantUndo {
 
 /// Each of its files (not BEP 47's padding, never written) by index, with its path inside its
 /// destination: its own folder's, under the name it has on disk, then the file's in it.
-fn inside(record: &super::Record) -> Vec<(usize, PathBuf)> {
+pub(super) fn inside(record: &super::Record) -> Vec<(usize, PathBuf)> {
     let Some(info) = &record.info else { return Vec::new() };
     let paths = record.paths();
     let at = |i: usize| paths.get(i).and_then(|p| p.strip_prefix(&record.destination).ok()).map(PathBuf::from);
