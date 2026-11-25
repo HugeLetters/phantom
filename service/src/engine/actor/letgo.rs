@@ -209,6 +209,7 @@ impl Actor {
     /// since may have dropped them all, and one out of librqbit offers none (it's checked in full
     /// when it comes back). One set Normal again counts with none had too: what librqbit has open of
     /// it, or reads in the Trash, isn't the file at its path, and only an add again opens that (#402).
+    /// So does one set Off since with a file at its path: set Normal yet again, it's downloaded there.
     fn offered(&self, id: TorrentId, state: &letgo::State) -> bool {
         let files = match state {
             letgo::State::Holding => return false,
@@ -217,7 +218,7 @@ impl Actor {
         let Some(torrent) = self.torrents.get(&id) else { return false };
         let Some(handle) = torrent.lib.torrent() else { return false };
         let progress = handle.stats().file_progress;
-        files.into_iter().any(|i| torrent.record.gets(*i) || progress.get(*i).is_none_or(|had| *had > 0))
+        files.into_iter().any(|i| torrent.record.gets(*i) || torrent.there.contains(i) || progress.get(*i).is_none_or(|had| *had > 0))
     }
 
     /// Whether torrent `id` can be taken out of librqbit now: librqbit has it, not checking it, it's
