@@ -1646,7 +1646,9 @@ pub fn open_picker(s: &mut SettingsWindow, side: Side, key: &'static str) {
     let Some(editor) = sheet.editor_mut() else { return };
     editor.menu = None;
     editor.picker = Some(Picker { side, key, at: Okhsl::of(rgb.color()), drag: None });
+    // The field shows what's stored now, so closing without a change sets nothing by hand.
     if let Some(field) = editor.color_mut(side, key) {
+        field.text = TextEdit::new(rgb.hex());
         field.text.focused = true;
     }
 }
@@ -1838,18 +1840,20 @@ impl Editor {
         self.colors.iter_mut().find(|f| f.side == side && f.key == key)
     }
 
-    /// A field for each color the sheet shows of `preset`, by its side: one still shown keeps
-    /// what's typed in it and its refusal, a new one shows the color it holds.
+    /// A field for each color the sheet shows of `preset`, by its side: one still shown and being
+    /// typed in keeps its text, any other shows the color it holds now; each still shown keeps its
+    /// refusal.
     pub fn show_colors(&mut self, preset: &LookPreset) {
         let mut fields = Vec::new();
         for (side, setting, value) in theme_rows(preset, self).controls() {
             let Value::Color(_) = value else { continue };
+            let hex = || shown_color(preset, side, setting.key).map(Rgb::hex).unwrap_or_default();
+            // One being typed in keeps its text; any other shows what's stored now, which a color
+            // that follows changes with its Tone or its base.
             let field = match self.colors.iter().position(|f| f.side == side && f.key == setting.key) {
-                Some(i) => self.colors.swap_remove(i),
-                None => {
-                    let hex = shown_color(preset, side, setting.key).map(Rgb::hex).unwrap_or_default();
-                    ColorField { side, key: setting.key, text: TextEdit::new(hex) }
-                }
+                Some(i) if self.colors[i].text.focused => self.colors.swap_remove(i),
+                Some(i) => ColorField { text: TextEdit::new(hex()), ..self.colors.swap_remove(i) },
+                None => ColorField { side, key: setting.key, text: TextEdit::new(hex()) },
             };
             fields.push(field);
         }

@@ -148,6 +148,13 @@ fn ringed(button: El, k: &Kit) -> El {
     button.focus_ring(2.0, 2.5, k.c.border_focus)
 }
 
+/// A control Tab reaches with Full Keyboard Access off, as macOS has it by default, which takes
+/// Tab to text fields, lists and controls that own their keys only: it owns its keys, but takes
+/// none, so Space still presses it and Return the default button.
+fn tab_stop(control: El) -> El {
+    control.on_key_any(|_, _| false)
+}
+
 /// Gives a kit component a key, for tests, scripts and anchoring menus.
 fn keyed(key: impl Into<String>, e: El) -> El {
     el().key(key).child(e)

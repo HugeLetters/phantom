@@ -592,6 +592,7 @@ fn theme_control(
                 let button = ui
                     .button(format!("{control_key}-follow"), &follow_label(setting, of))
                     .disabled(set.is_none())
+                    .tab_stop()
                     .on_press(move |s: &mut SettingsWindow| follow_color(s, side, key))
                     .build();
                 let lines = half
