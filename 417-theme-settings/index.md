@@ -1,4 +1,26 @@
-# #417 prototype: Phantom theme settings (stills)
+# #417 prototype: Phantom theme settings, v2 (stills)
+
+Headless renders of a throwaway build (branch `417-theme-settings`). v2 stills are prefixed `v2-`; the v1 stills and their notes stay below, unchanged.
+
+## v2: Settings sheet
+- [v2-sheet-look-colours.png](v2-sheet-look-colours.png): the sheet closed to Look (Corners, Density, Motion as three radios) and Colours (eight swatches, "The rest follow these."), "Every colour" closed. The Accent swatch is pressed: its editor shows the hex field and "Phantom's colour"; the Light Accent warning is one line.
+- [v2-sheet-every-colour.png](v2-sheet-every-colour.png): "Every colour" open, five groups with the same header style. Faint text is set by hand in Light: a dot on its swatch, two warnings of one line each, and its editor open (hex, "Set by hand", Follow). Pointer resting on Window in Dark shows its tooltip ("#121314 · follows Background").
+- [v2-sheet-swatch-tooltip.png](v2-sheet-swatch-tooltip.png): the sheet closed again, tooltip on the Dark Accent swatch (hex and what it follows).
+
+## v2: Motion
+- [v2-motion-settings-choices.gif](v2-motion-settings-choices.gif): Settings, then Appearance, then Edit… opens the sheet, four panels, each labelled: Off (lands at once), On (fades), Follow Reduced Motion with the system's Reduce Motion off (acts as On), Follow Reduced Motion with it on (acts as Off).
+
+## v2: Colour sets (main window, notices popover, clash dialog with tooltip)
+Three panes each, left to right: list with files, popover open, dialog with its tooltip.
+- [v2-colours-today-light.png](v2-colours-today-light.png), [v2-colours-today-dark.png](v2-colours-today-dark.png): today's bases.
+- [v2-colours-warm-light.png](v2-colours-warm-light.png), [v2-colours-warm-dark.png](v2-colours-warm-dark.png): warm set.
+- [v2-colours-bold-light.png](v2-colours-bold-light.png), [v2-colours-bold-dark.png](v2-colours-bold-dark.png): bold set (violet).
+
+Corners and Density are unchanged from v1 (below).
+
+---
+
+# v1
 
 Headless renders of a throwaway build (branch `417-theme-settings`). Each colour and corner still has three panes, left to right: the list (pointer over archlinux, Big Buck Bunny selected, its files), the notices popover, and the clash dialog with a tooltip.
 
