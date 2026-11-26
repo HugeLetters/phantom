@@ -358,12 +358,14 @@ impl Ui {
     /// A sheet over the window (a Look Preset's editor, the App icon's tiles): `title` over
     /// `body`, and Done right under it, `on_cancel`'s Cancel (`<key>-cancel`) left of it if there's
     /// one; as tall as they are, up to the window less 20 pt above and below, past which the body
-    /// scrolls. Modal, keyed `<key>-sheet`, over a scrim. Escape calls `on_escape`, Done
-    /// `on_done`. The overlays to draw it with ([`Ui::root`]).
+    /// scrolls; up to `max_w` wide. Modal, keyed `<key>-sheet`, over a scrim. Escape calls
+    /// `on_escape`, Done `on_done`. The overlays to draw it with ([`Ui::root`]).
+    #[allow(clippy::too_many_arguments)]
     pub fn over_sheet<S: 'static>(
         &self,
         key: &str,
         title: &str,
+        max_w: f32,
         body: El,
         on_escape: impl Fn(&mut S) + 'static,
         on_cancel: Option<Box<dyn Fn(&mut S)>>,
@@ -392,7 +394,7 @@ impl Ui {
             .w_full()
             .shrink()
             .min_h(0.0)
-            .max_w(600.0)
+            .max_w(max_w)
             .radius(k.radius.md)
             .fill(k.c.layer_01)
             .box_shadow(rune::Shadow { spread: 0.5, color: k.c.border_base, ..Default::default() })
@@ -421,11 +423,6 @@ impl Ui {
             .items_center()
             .child(panel);
         vec![scrim, layer]
-    }
-
-    /// A small square of `color`, beside the field that sets it.
-    pub fn swatch(&self, color: rune::Color) -> El {
-        el().size(20.0, 20.0).radius(self.k.radius.sm).fill(color).border(1.0, self.k.c.border_weak).a11y_hidden()
     }
 
     /// A raised card of rows, with a hairline between each.
@@ -494,15 +491,17 @@ impl Ui {
     /// The editor's rows in one card, split down the middle ([`Ui::halves_row`]): between each, one
     /// hairline across both halves (keyed `halves-rule-<n>`, its line `…-line`), the two looks'
     /// strong borders mixed half and half: a neutral mid tone, it reads on a light page and a dark
-    /// one. The two halves' pages run under it, so the seam is unbroken.
-    pub fn halves_card(&self, lines: Vec<El>, looks: [&Ui; 2]) -> El {
+    /// one. The two halves' pages run under it, so the seam is unbroken. A line that's a section's
+    /// header or a group's (`(line, true)`) has no hairline above or below it.
+    pub fn halves_card(&self, lines: Vec<(El, bool)>, looks: [&Ui; 2]) -> El {
         let k = &self.k;
         let mut card = col().key("halves-card").w_full().radius(k.radius.md).clip_rounded(k.radius.md).border(1.0, k.c.border_weak);
         let [light, dark] = looks.map(|l| l.tokens().c.clone());
         let ink = light.border_base.mix(dark.border_base, 0.5);
         let page = |c: rune::Color, cell: usize| el().grow(1.0).h(1.0).fill(c).grid_cell(cell).a11y_hidden();
-        for (i, line) in lines.into_iter().enumerate() {
-            if i > 0 {
+        let mut after_header = true;
+        for (i, (line, header)) in lines.into_iter().enumerate() {
+            if i > 0 && !header && !after_header {
                 let line_over = el().key(format!("halves-rule-{i}-line")).w_full().h(1.0).fill(ink).a11y_hidden();
                 card = card.child(
                     row()
@@ -515,9 +514,61 @@ impl Ui {
                         .child(row().absolute(0.0, 0.0).w_full().h(1.0).px(self.spacing.s4).child(line_over)),
                 );
             }
+            after_header = header;
             card = card.child(line);
         }
         card
+    }
+
+    /// A section's header across both halves of the editor, each on its half's window color:
+    /// `title`, with `hint` under it, keyed `<key>-title`; one that folds (`open` is `Some`) has a
+    /// chevron and is pressed to open or close, keyed `<key>-section`.
+    pub fn section_header<S: 'static>(
+        &self,
+        key: &str,
+        title: &str,
+        hint: Option<&str>,
+        open: Option<bool>,
+        looks: [&Ui; 2],
+        on_press: impl Fn(&mut S) + 'static,
+    ) -> El {
+        let [light, dark] = looks;
+        let k = &light.k;
+        let mut head = row().gap(self.spacing.s3).center_y();
+        if let Some(open) = open {
+            let glyph = if open { k.glyph.chevron_down } else { k.glyph.caret_right };
+            head = head.child(icon(glyph, 12.0).color(k.c.text_muted).a11y_hidden());
+        }
+        head = head.child(text(title.to_owned()).font(k.ty.ui_medium).color(k.c.text_base).wrap());
+        let mut left = col()
+            .key(format!("{key}-{}", if open.is_some() { "section" } else { "title" }))
+            .w_full()
+            .pt(self.spacing.s6)
+            .pb(self.spacing.s4)
+            .gap(self.spacing.s1)
+            .child(head);
+        if let Some(hint) = hint {
+            left = left.child(text(hint.to_owned()).font(k.ty.text_small).color(k.c.text_muted).wrap());
+        }
+        if let Some(open) = open {
+            left = left
+                .role("button")
+                .label(title.to_owned())
+                .expanded(open)
+                .focusable(true)
+                .focus_ring(2.0, 1.0, k.c.border_focus)
+                .on_press(on_press);
+        }
+        self.halves_line(&format!("{key}-header"), left, col().w_full(), [light.k.c.page, dark.k.c.page])
+    }
+
+    /// A group's name inside a section ("Text", "Surfaces"), across both halves on their window
+    /// colors, keyed `<key>`.
+    pub fn group_header(&self, key: &str, name: &str, looks: [&Ui; 2]) -> El {
+        let [light, dark] = looks;
+        let k = &light.k;
+        let left = text(name.to_owned()).font(k.ty.text_small_medium).color(k.c.text_muted).wrap().pt(self.spacing.s4).pb(self.spacing.s2);
+        self.halves_line(key, left, col().w_full(), [light.k.c.page, dark.k.c.page])
     }
 
     /// The heading of a Look Preset's editor's half, drawn in that half's look (`self`): ☀ Light
@@ -812,7 +863,7 @@ pub enum Halves {
 const PREVIEW: f32 = 24.0;
 
 /// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
-const HALF_LABEL: f32 = 64.0;
+const HALF_LABEL: f32 = 96.0;
 const HALF_TOGGLE: f32 = 46.0;
 
 /// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's

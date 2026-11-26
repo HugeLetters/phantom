@@ -543,10 +543,7 @@ impl Model {
             Fld::Port => self.port_text(),
             Fld::Limit(d) => self.limit_text(d),
             Fld::Seeding(at) => self.seeding_text(at),
-            Fld::Color(side, key) => match self.value(side, key) {
-                Value::Color(rgb) => rgb.hex(),
-                Value::Toggle(_) | Value::Choice(_) => unreachable!(),
-            },
+            Fld::Color(side, key) => self.color_hex(side, key),
         }
     }
 
@@ -601,7 +598,7 @@ impl Model {
             }
             Fld::Color(side, key) => {
                 let rgb = Rgb::parse(&text).unwrap();
-                self.set(side, key, Value::Color(rgb));
+                self.set(side, key, Value::Color(Some(rgb)));
             }
             // A new port that fails stores nothing: it's refused under its row and listed. The port
             // it has: nothing to send.
@@ -710,10 +707,12 @@ impl Model {
         if self.theme_joined() { vec![Side::Both] } else { Appearance::BOTH.map(Side::Only).to_vec() }
     }
 
-    /// Whether `key`'s row is joined: one theme, one value in both halves, not split by hand.
+    /// Whether `key`'s row is joined: one theme, one value in both halves as they show (a color
+    /// as it comes to), not split by hand.
     fn joined(&self, key: &str) -> bool {
-        let preset = self.preset_edited();
-        self.same_theme() && preset.light.settings.get(key) == preset.dark.settings.get(key) && !self.ed().split.contains(key)
+        self.same_theme()
+            && self.shown_value(Side::Only(Appearance::Light), key) == self.shown_value(Side::Only(Appearance::Dark), key)
+            && !self.ed().split.contains(key)
     }
 
     /// Every control the sheet shows of a theme setting, in order: with one theme, a row's one for
@@ -802,6 +801,20 @@ impl Model {
         }
     }
 
+    /// The value `key` shows on `side`: a color as its theme works it out, else what it holds.
+    fn shown_value(&self, side: Side, key: &str) -> Value {
+        let appearance = side.appearances()[0];
+        self.value(side, key).shown(key, &self.preset_edited().get(appearance).resolved())
+    }
+
+    /// The hex a color's field shows for what's stored.
+    fn color_hex(&self, side: Side, key: &str) -> String {
+        match self.shown_value(side, key) {
+            Value::Color(Some(rgb)) => rgb.hex(),
+            _ => unreachable!("a color shows one"),
+        }
+    }
+
     /// The value `key` holds on `side` (Light's, for both) of what the sheet edits.
     fn value(&self, side: Side, key: &str) -> Value {
         let appearance = match side {
@@ -873,8 +886,8 @@ impl Model {
         let mut fields = BTreeMap::new();
         for shown in self.shown().into_iter().filter(|s| matches!(s.kind, Kind::Color { .. })) {
             let side = shown.side;
-            let Value::Color(rgb) = self.value(side, shown.key) else { unreachable!() };
-            let field = self.ed_mut().colors.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
+            let hex = self.color_hex(side, shown.key);
+            let field = self.ed_mut().colors.remove(&(side, shown.key)).unwrap_or((hex, None));
             fields.insert((side, shown.key), field);
         }
         self.ed_mut().colors = fields;
@@ -1794,8 +1807,8 @@ fn act(mut m: Model, step: &Step) -> Model {
         }
         // The Dark half takes the Light one's value where they differ.
         Step::Join(key) => {
-            let value = m.value(Side::Only(Appearance::Light), key);
-            if m.value(Side::Only(Appearance::Dark), key) != value {
+            let value = m.shown_value(Side::Only(Appearance::Light), key);
+            if m.shown_value(Side::Only(Appearance::Dark), key) != value {
                 m.set(Side::Only(Appearance::Dark), key, value);
             }
             m.ed_mut().split.remove(key);
@@ -1917,6 +1930,7 @@ impl StateMachineTest for Sheet {
 
     fn apply(mut sut: Sut, _: &Model, step: Step) -> Sut {
         let d = &mut sut.d;
+        close_other_picker(d, &step);
         let cmd = |c| KeyEvent { key: Key::Command(c), mods: Mods { cmd: true, ..Default::default() } };
         match &step {
             Step::Open => {
@@ -2051,6 +2065,7 @@ impl StateMachineTest for Sheet {
             Step::Flip(side, key) => press(d, &format!("edit-{key}-{}", side.key())),
             Step::TypeColor(side, key, text) => {
                 let field = format!("edit-{key}-{}", side.key());
+                open_picker_of(d, &field);
                 press(d, &field);
                 let r = &mut d.settings;
                 r.key(KeyEvent { key: Key::Command('a'), mods: Mods { cmd: true, ..Default::default() } });
@@ -2061,6 +2076,7 @@ impl StateMachineTest for Sheet {
                 }
             }
             Step::SendColor(side, key) => {
+                open_picker_of(d, &format!("edit-{key}-{}", side.key()));
                 press(d, &format!("edit-{key}-{}", side.key()));
                 d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
@@ -2204,8 +2220,7 @@ impl StateMachineTest for Sheet {
             fields.push((seeding_field(at).to_owned(), m.seeding_fields[at as usize].clone(), m.seeding_text(at)));
         }
         for ((side, key), (text, _)) in m.ed_opt().map(|ed| ed.colors.clone()).unwrap_or_default() {
-            let Value::Color(rgb) = m.value(side, key) else { unreachable!() };
-            fields.push((format!("edit-{key}-{}", side.key()), text.clone(), rgb.hex()));
+            fields.push((format!("edit-{key}-{}", side.key()), text.clone(), m.color_hex(side, key)));
         }
         // Save as…'s field: being edited with any name typed.
         if let Some((text, _)) = &m.save_as {
@@ -2347,19 +2362,28 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
         "and joins it while it's split, one theme in both"
     );
     let keys: BTreeSet<&str> = m.shown().iter().map(|s| s.key).collect();
+    let preset = m.preset_edited();
+    let opened = rt.state.sheet.as_ref().and_then(|s| s.editor()).map(|e| e.open.clone()).unwrap_or_default();
     for key in keys {
         let sides: Vec<Side> = m.shown().iter().filter(|s| s.key == key).map(|s| s.side).collect();
+        let setting = Appearance::BOTH.iter().find_map(|a| preset.get(*a).theme.settings().iter().find(|s| s.key == key)).unwrap();
+        // A setting in a section that folds shows once it's opened; a color's control is its swatch.
+        let shows = !setting.section.is_some_and(|s| s.folds && !opened.contains(s.key));
+        let swatch = if matches!(setting.kind, Kind::Color { .. }) { "-swatch" } else { "" };
         for side in [Side::Both, Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] {
-            let control = format!("{prefix}-{key}-{}", side.key());
-            assert_eq!(rt.find(&control).is_some(), sides.contains(&side), "{control} drawn");
+            let control = format!("{prefix}-{key}-{}{swatch}", side.key());
+            assert_eq!(rt.find(&control).is_some(), shows && sides.contains(&side), "{control} drawn");
         }
         let joined = m.joined(key);
-        assert_eq!(rt.find(&format!("{prefix}-{key}-split")).is_some(), m.same_theme() && joined, "{key}'s Split splits it");
+        assert_eq!(rt.find(&format!("{prefix}-{key}-split")).is_some(), shows && m.same_theme() && joined, "{key}'s Split splits it");
         assert_eq!(
             rt.find(&format!("{prefix}-{key}-join")).is_some(),
-            m.same_theme() && !joined,
+            shows && m.same_theme() && !joined,
             "{key}'s Join joins it, with one theme only"
         );
+        if !shows {
+            continue;
+        }
         for side in &sides {
             let shown = m.shown().into_iter().find(|s| s.key == key && s.side == *side).unwrap();
             let control = format!("{prefix}-{key}-{}", side.key());
@@ -2383,9 +2407,11 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
                             .into_iter()
                             .find(|e| e.path.ends_with(&format!("{control}/#0/segment{j}")) && !e.exiting)
                             .expect("a radio");
+                        // Under a color's open picker, which is modal, nothing else takes the focus.
+                        let picking = rt.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.picker.is_some());
                         assert_eq!(
                             (radio.role, radio.label.as_deref(), radio.focusable),
-                            ("radio", Some(choice.label), true),
+                            ("radio", Some(choice.label), !picking),
                             "{control}'s {j}th choice"
                         );
                     }
@@ -2422,7 +2448,7 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
         let drawn = rt
             .elements()
             .into_iter()
-            .any(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with(&format!("{prefix}-{key}")) && k.ends_with("-refused")));
+            .any(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with(&format!("{prefix}-{key}-")) && k.ends_with("-refused")));
         assert_eq!(drawn, refused, "{key}'s refusal shows until its text changes");
     }
 }
@@ -2509,11 +2535,89 @@ fn limit_field(direction: Direction) -> &'static str {
 /// Presses the element at `key` in Settings, scrolling to it first: Settings is in front.
 fn press(d: &mut Desk, key: &str) {
     d.front(Which::Settings);
+    // A color's picker covers the window: a press outside it closes it first.
+    let open = d.settings.state.sheet.as_ref().and_then(|s| s.editor()).and_then(|e| e.picker.as_ref()).map(|p| (p.side, p.key));
+    if let Some((side, k)) = open
+        && !key.starts_with(&format!("edit-{k}-{}", side.key()))
+    {
+        press_outside_picker(d);
+    }
+    // A setting's control in a section that folds shows once it's opened.
+    if d.settings.find(key).is_none() {
+        open_folded(d);
+    }
     let rt = &mut d.settings;
     scroll_to(rt, key);
     let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
+    d.settle();
+}
+
+/// The picker a color's field `field` (`edit-<key>-<side>`) is in, opened by its swatch, the
+/// section it's in opened first if it folds.
+fn open_picker_of(d: &mut Desk, field: &str) {
+    if d.settings.find(field).is_some() {
+        return;
+    }
+    press(d, &format!("{field}-swatch"));
+}
+
+/// The first section that folds, opened, if one is closed.
+fn open_folded(d: &mut Desk) {
+    let open = d.settings.state.sheet.as_ref().and_then(|s| s.editor()).map(|e| e.open.clone()).unwrap_or_default();
+    let header = d
+        .settings
+        .elements()
+        .into_iter()
+        .filter(|e| !e.exiting)
+        .filter_map(|e| e.key)
+        .find(|k| (k.ends_with("-section") || k.ends_with("-fold")) && !open.iter().any(|o| k.contains(o)));
+    if let Some(header) = header {
+        press(d, &header);
+    }
+}
+
+/// A picker open on a color other than the step's closes before it, as a press outside it closes
+/// it (what's typed in its field applied, as the field losing the focus applies it); one whose
+/// field Escape is for stays.
+fn close_other_picker(d: &mut Desk, step: &Step) {
+    let open = d.settings.state.sheet.as_ref().and_then(|s| s.editor()).and_then(|e| e.picker.as_ref()).map(|p| (p.side, p.key));
+    let Some((side, key)) = open else { return };
+    let keeps = match step {
+        Step::TypeColor(s, k, _) | Step::SendColor(s, k) => *s == side && *k == key,
+        // Escape in a field being edited is the field's: what's typed goes, the picker stays.
+        Step::Close { escape: true } => {
+            let w = &d.settings.state;
+            let preset = w.sheet.as_ref().and_then(|s| s.target()).and_then(|t| Presets::of(&w.looks.borrow(), &w.saved).get(t).cloned());
+            let text = w.sheet.as_ref().and_then(|s| s.editor()).and_then(|e| e.color(side, key)).map(|f| f.text.text.clone());
+            let stored = preset.and_then(|p| crate::model::settings::shown_color(&p, side, key)).map(|rgb| rgb.hex());
+            text != stored
+        }
+        Step::Front(_)
+        | Step::Reopen
+        | Step::Remove(_)
+        | Step::Undo(Which::Main)
+        | Step::Other(_)
+        | Step::OtherUndo
+        | Step::OtherRemove(_)
+        | Step::OtherUndoAction
+        | Step::FolderGone(_)
+        | Step::FolderBack
+        | Step::Restarts { .. }
+        | Step::Appearance(_) => true,
+        _ => false,
+    };
+    if !keeps {
+        d.front(Which::Settings);
+        press_outside_picker(d);
+    }
+}
+
+/// A press in a corner of Settings, which a color's picker never covers: it closes.
+fn press_outside_picker(d: &mut Desk) {
+    d.settings.pointer_down(2.0, 2.0);
+    d.settings.pointer_up(2.0, 2.0);
     d.settle();
 }
 
@@ -3149,7 +3253,7 @@ fn shown_label(m: &Model, key: &str) -> &'static str {
 /// so its field is one for both.
 fn accent_sheet() -> Desk {
     let mut look = crate::theme::ThemeLook::defaults(crate::theme::find("sample").unwrap());
-    let _ = look.settings.set("accent", Value::Color(Rgb([0, 0, 0])));
+    let _ = look.settings.set("accent", Value::Color(Some(Rgb([0, 0, 0]))));
     let mut d = desk(MemoryService::new());
     *d.main.state.looks.borrow_mut() = Looks::new(LookPreset { light: look.clone(), dark: look }, |_: &LookPreset| {});
     d.main.set_viewport((960.0, 900.0), 2.0);
@@ -3163,6 +3267,9 @@ fn accent_sheet() -> Desk {
 
 /// Types `text` into the field keyed `field`, leaving it focused.
 fn type_into(d: &mut Desk, field: &str, text: &str) {
+    if field.starts_with("edit-") {
+        open_picker_of(d, field);
+    }
     press(d, field);
     d.settings.key(select_all());
     d.settings.paste(text);
@@ -3182,7 +3289,7 @@ fn split_applies_the_color_being_typed_first() {
     let mut d = accent_sheet();
     type_into(&mut d, "edit-accent-both", "#3366ff");
     press(&mut d, "edit-accent-split");
-    let blue = Some(Value::Color(Rgb([0x33, 0x66, 0xff])));
+    let blue = Some(Value::Color(Some(Rgb([0x33, 0x66, 0xff]))));
     assert_eq!(accents(&d), [blue, blue], "both halves");
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Accent Change");
 }
@@ -3194,12 +3301,12 @@ fn join_applies_the_color_being_typed_first() {
     press(&mut d, "edit-accent-split");
     type_into(&mut d, "edit-accent-light", "#3366ff");
     press(&mut d, "edit-accent-join");
-    let blue = Some(Value::Color(Rgb([0x33, 0x66, 0xff])));
+    let blue = Some(Value::Color(Some(Rgb([0x33, 0x66, 0xff]))));
     assert_eq!(accents(&d), [blue, blue], "the Light half's, in both");
     d.settings.update(|_, tx| tx.blur());
     d.key(cmd('z'));
     d.settle();
-    assert_eq!(accents(&d), [blue, Some(Value::Color(Rgb([0, 0, 0])))], "⌘Z: the join's copy undone, the color typed kept");
+    assert_eq!(accents(&d), [blue, Some(Value::Color(Some(Rgb([0, 0, 0]))))], "⌘Z: the join's copy undone, the color typed kept");
 }
 
 /// A refusal goes with its field: Split, pressed while text that's no color is typed into the field
@@ -3220,7 +3327,7 @@ fn a_refusal_goes_with_the_field_a_split_takes_away() {
     assert!(!refused(&d), "the two new fields were refused nothing");
     press(&mut d, "edit-accent-join");
     assert!(!refused(&d), "nor was the new field for both");
-    let black = Some(Value::Color(Rgb([0, 0, 0])));
+    let black = Some(Value::Color(Some(Rgb([0, 0, 0]))));
     assert_eq!(accents(&d), [black, black], "nothing changed");
 }
 
@@ -3499,9 +3606,12 @@ fn a_theme_in_each_half_has_its_own_column() {
     let preset = d.main.state.looks.borrow().preset().clone();
     assert_eq!(preset.dark.theme.id(), "sample");
     assert!(d.settings.find("edit-tone-light").is_some() && d.settings.find("edit-tone-dark").is_none(), "Tone under ☀ only");
-    for key in ["pulse", "shape", "accent"] {
-        assert!(d.settings.find(&format!("edit-{key}-dark")).is_some(), "{key} under ☾");
-        assert!(d.settings.find(&format!("edit-{key}-light")).is_none(), "and not under ☀");
+    for (key, control) in [("pulse", ""), ("shape", ""), ("accent", "-swatch")] {
+        assert!(d.settings.find(&format!("edit-{key}-dark{control}")).is_some(), "{key} under ☾");
+    }
+    // Phantom has an Accent of its own (a color), but neither Pulse nor Shape.
+    for key in ["pulse", "shape"] {
+        assert!(d.settings.find(&format!("edit-{key}-light")).is_none(), "{key} not under ☀");
     }
     for key in ["theme", "tone", "pulse", "shape", "accent"] {
         assert!(d.settings.find(&format!("edit-{key}-join")).is_none(), "no Join or Split on {key}'s row");
@@ -4438,4 +4548,149 @@ fn a_choices_dropdown_works_from_the_keyboard() {
     key(&mut d, Key::Escape);
     assert!(!open(&d, control), "Escape closes it after moving");
     assert_eq!(shown(&d, control).as_deref(), Some("Square"), "and picks nothing");
+}
+
+/// The Active look's sheet with "Every color" open, Settings `width` wide.
+fn colors_sheet(width: f32) -> Desk {
+    let mut d = appearance_tab();
+    d.settings.set_viewport((width, 900.0), 2.0);
+    d.settle();
+    press(&mut d, "active-edit");
+    press(&mut d, "edit-every-color-section");
+    d
+}
+
+/// The color the setting `key` holds in the Active look's `half`.
+fn color_of(d: &Desk, half: Appearance, key: &str) -> Option<Value> {
+    d.main.state.looks.borrow().preset().get(half).settings.get(key)
+}
+
+/// Every name in the Colors sections shows whole, wrapped if need be, never cut, at the sheet's
+/// widest and at the 640 pt minimum; and each header and group is there.
+#[test]
+fn the_colors_names_are_never_cut() {
+    for width in [960.0, 640.0] {
+        let mut d = colors_sheet(width);
+        for key in ["edit-look-title", "edit-colors-title", "edit-every-color-section", "edit-group-text", "edit-group-status"] {
+            assert!(d.settings.find(key).is_some(), "at {width} pt {key} is drawn");
+        }
+        let names: BTreeSet<&str> =
+            crate::theme::phantom::palette::DERIVED.iter().map(|c| c.label).chain(["Background", "Warning"]).collect();
+        // The sheet scrolls: each name is checked once it's in view.
+        for name in names {
+            let key = d
+                .settings
+                .elements()
+                .into_iter()
+                .find(|e| !e.exiting && e.text.as_deref() == Some(name) && e.path.contains("halves-card"))
+                .map(|e| e.path)
+                .unwrap_or_else(|| panic!("at {width} pt {name:?} is drawn"));
+            let row = key.split('/').find(|p| p.starts_with("edit-") && !p.ends_with("-left")).unwrap().to_owned();
+            scroll_to(&mut d.settings, &row);
+            let text = d.settings.elements().into_iter().find(|e| !e.exiting && e.text.as_deref() == Some(name)).unwrap();
+            assert!(!text.text_cut, "at {width} pt {name:?} is cut: {:?}", text.rect);
+        }
+    }
+}
+
+/// A swatch's picker opens beside it, inside the window, at both widths, wherever its swatch is:
+/// the square, the bar, the hex field and the button, each named for screen readers.
+#[test]
+fn the_picker_opens_inside_the_window() {
+    for width in [960.0, 640.0] {
+        // Light and Dark's colors differ: each row is split, a swatch in each half.
+        for (swatch, field) in
+            [("edit-accent-dark-swatch", "edit-accent-dark"), ("edit-success_edge-dark-swatch", "edit-success_edge-dark")]
+        {
+            let mut d = colors_sheet(width);
+            press(&mut d, swatch);
+            let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key} at {width}"));
+            let popup = rect(&d, &format!("{field}-popup"));
+            assert!(popup[0] >= 0.0 && popup[1] >= 0.0, "at {width} pt {popup:?} inside");
+            assert!(popup[0] + popup[2] <= width + 0.5 && popup[1] + popup[3] <= 900.5, "at {width} pt {popup:?} inside");
+            let label = |key: &str| d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.label);
+            assert_eq!(label(&format!("{field}-square")).as_deref(), Some("Hue and lightness"));
+            assert_eq!(label(&format!("{field}-bar")).as_deref(), Some("Saturation"));
+            assert!(d.settings.find(&format!("{field}-follow")).is_some(), "its Follow or Reset");
+            assert!(super::focus_path(&d.settings).is_some_and(|p| p.contains(&format!("/{field}/"))), "its hex field has the focus");
+        }
+    }
+}
+
+/// A swatch says what it shows: its hex and what it follows, or that it's the theme's own; set by
+/// hand, it's ringed in the accent and says so.
+#[test]
+fn a_swatch_says_what_it_follows() {
+    let mut d = colors_sheet(960.0);
+    let description =
+        |d: &Desk, key: &str| d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.description);
+    assert_eq!(description(&d, "edit-muted_text-light-swatch").as_deref(), Some("#606369 · follows Text"));
+    assert_eq!(description(&d, "edit-accent-light-swatch").as_deref(), Some("#2f7fe3 · theme default"));
+    type_into(&mut d, "edit-faint_text-light", "#b0b0b0");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    assert_eq!(description(&d, "edit-faint_text-light-swatch").as_deref(), Some("#b0b0b0 · set by hand"));
+}
+
+/// Dragging in the square picks as it goes, set by hand, and is one step of Undo; a faint text
+/// that's hard to read warns under the picker; Follow Text puts it back to the rule.
+#[test]
+fn a_drag_picks_and_follow_puts_it_back() {
+    let mut d = colors_sheet(960.0);
+    let light = Appearance::Light;
+    let before = color_of(&d, light, "faint_text");
+    assert_eq!(before, Some(Value::Color(None)));
+    press(&mut d, "edit-faint_text-light-swatch");
+    let square = super::generated::rect_of(&d.settings, "edit-faint_text-light-square").expect("the square");
+    let (x, y) = (square[0] + square[2] * 0.6, square[1] + square[3] * 0.3);
+    d.settings.pointer_down(x, y);
+    d.settings.pointer_move(x + 10.0, y + 5.0);
+    d.settle();
+    let Some(Value::Color(Some(moving))) = color_of(&d, light, "faint_text") else { panic!("set by hand as it moves") };
+    d.settings.pointer_move(x + 20.0, y + 10.0);
+    d.settings.pointer_up(x + 20.0, y + 10.0);
+    d.settle();
+    let Some(Value::Color(Some(picked))) = color_of(&d, light, "faint_text") else { panic!("set by hand") };
+    assert_ne!(moving, picked, "it followed the pointer");
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Faint Text Change");
+    let warned = d
+        .settings
+        .elements()
+        .into_iter()
+        .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("edit-faint_text-light-warning-")))
+        .count();
+    let resolved = d.main.state.looks.borrow().preset().get(light).resolved();
+    assert_eq!(warned, resolved.warnings("faint_text").len(), "one line per warning");
+    // Light at 30% from the top: hard to read on white.
+    assert!(warned > 0);
+    press(&mut d, "edit-faint_text-light-follow");
+    assert_eq!(color_of(&d, light, "faint_text"), Some(Value::Color(None)), "Follow Text");
+    d.settings.update(|_, tx| tx.blur());
+    d.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
+    d.settle();
+    assert_eq!(color_of(&d, light, "faint_text"), Some(Value::Color(Some(picked))), "⌘Z: back to the pick");
+    // The undo reopened the picker on its field, whose ⌘Z is its own.
+    d.settings.update(|_, tx| tx.blur());
+    d.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
+    d.settle();
+    assert_eq!(color_of(&d, light, "faint_text"), before, "⌘Z again: the drag was one step");
+}
+
+/// Reset on a changed base: the theme's own again, and Escape closes the picker, the sheet staying.
+#[test]
+fn reset_and_escape() {
+    let mut d = colors_sheet(960.0);
+    type_into(&mut d, "edit-accent-dark", "#ff8000");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    let orange = Some(Value::Color(Some(Rgb([0xff, 0x80, 0x00]))));
+    assert_eq!(color_of(&d, Appearance::Dark, "accent"), orange);
+    let says = d.settings.elements().into_iter().filter(|e| e.path.contains("edit-accent-dark-follow")).find_map(|e| e.text);
+    assert_eq!(says.as_deref(), Some("Reset"));
+    press(&mut d, "edit-accent-dark-follow");
+    assert_eq!(color_of(&d, Appearance::Dark, "accent"), Some(Value::Color(None)));
+    d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    let sheet = d.settings.state.sheet.as_ref().unwrap();
+    assert!(sheet.editor().is_some_and(|e| e.picker.is_none()), "the picker closed, the sheet stays");
 }

@@ -20,9 +20,10 @@ use crate::model::settings::{
     toggle, toggle_menu,
 };
 use crate::model::settings::{Held, THEME, ThemeRow, ThemeRows, focused_side, join_row, split_row, theme_rows};
+use crate::model::settings::{close_picker, escape_picker, follow_color, follow_label, open_picker, pick, toggle_section};
 use crate::theme::preset::{Appearance, LookPreset};
-use crate::theme::setting::{Kind, Show, Value};
-use crate::ui::{Halves, Icon, LookChip, Tone, Ui};
+use crate::theme::setting::{Kind, Resolved, Section, Setting, Show, Value};
+use crate::ui::{Halves, Icon, LookChip, PopupParts, Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
 pub const SETTINGS: [&str; 11] = [
@@ -246,16 +247,13 @@ fn editor(
     editor: &Editor,
     sheet: &SettingsSheet,
     ui: &Ui,
-    looks: [&Ui; 2],
+    halves: [Half; 2],
     first: bool,
     focus: Option<(&str, Side)>,
     layer: &mut Vec<El>,
 ) -> El {
+    let looks = halves.map(|h| h.ui);
     let rows = theme_rows(preset, editor);
-    let look = |side: Side| match side {
-        Side::Only(Appearance::Dark) => looks[1],
-        Side::Both | Side::Only(Appearance::Light) => looks[0],
-    };
     // Whether the control of `key` on `side`, of those on `sides`, takes the focus an undo gives.
     let wants = |key: &str, side: Side, sides: &[Side]| focus.is_some_and(|(k, s)| k == key && focused_side(sides, s) == Some(side));
     let theme_sides: &[Side] = match rows {
@@ -295,31 +293,125 @@ fn editor(
             let toggle = join_control(looks[1], THEME, "Theme", theme_joined);
             let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new());
             let header = ui.halves_header(looks[0].half_heading(false), looks[1].half_heading(true), looks);
-            let mut lines = vec![header, theme];
-            lines.extend(rows.iter().map(|row| {
+            let mut lines = vec![(header, false), (theme, false)];
+            let of = preset.light.theme.settings();
+            let mut at = At::default();
+            for row in &rows {
+                let (heads, shown) = headings(
+                    row.setting,
+                    &mut at,
+                    editor,
+                    |section, open| {
+                        let key = section.key;
+                        ui.section_header(
+                            &format!("{EDIT}-{key}"),
+                            section.title,
+                            section.hint,
+                            open,
+                            looks,
+                            move |s: &mut SettingsWindow| toggle_section(s, key),
+                        )
+                    },
+                    |group| ui.group_header(&format!("{EDIT}-group-{}", group.to_lowercase()), group, looks),
+                );
+                lines.extend(heads.into_iter().map(|h| (h, true)));
+                if !shown {
+                    continue;
+                }
                 let sides: &[Side] =
                     if row.joined { &[Side::Both] } else { &[Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] };
-                same_row(row, editor, sheet, ui, looks, layer, |side| wants(row.setting.key, side, sides))
-            }));
+                lines.push((same_row(row, editor, sheet, ui, halves, of, layer, |side| wants(row.setting.key, side, sides)), false));
+            }
             page.child(ui.halves_card(lines, looks))
         }
         ThemeRows::Apart { light, dark } => {
             let mut column = |side: Side, held: &[Held]| {
-                let ui = look(side);
+                let half = halves[usize::from(side == Side::Only(Appearance::Dark))];
+                let ui = half.ui;
+                let of = preset.get(side.appearances()[0]).theme.settings();
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
                 let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
-                let lines = held.iter().map(|(setting, value)| {
-                    let control = theme_control(setting, side, *value, editor, ui, wants(setting.key, side, &[side]), layer);
-                    let notes = sheet.refused(Row::Color(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
-                    ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes)
-                });
-                ui.card([heading, theme].into_iter().chain(lines).collect::<Vec<_>>()).grow(1.0).min_w(0.0)
+                let mut lines = vec![heading, theme];
+                let mut at = At::default();
+                for (setting, value) in held {
+                    let (heads, shown) = headings(
+                        setting,
+                        &mut at,
+                        editor,
+                        |section, open| {
+                            let key = section.key;
+                            let title = ui.heading(section.title).key(format!("{EDIT}-{key}-{}-title", side.key()));
+                            match open {
+                                Some(open) => {
+                                    let fold = ui
+                                        .button(format!("{EDIT}-{key}-{}-fold", side.key()), if open { "Hide" } else { "Show" })
+                                        .small()
+                                        .on_press(move |s: &mut SettingsWindow| toggle_section(s, key))
+                                        .build();
+                                    row().w_full().gap(ui.spacing().s4).center_y().child(title).child(fold)
+                                }
+                                None => title,
+                            }
+                        },
+                        |group| ui.caption(group),
+                    );
+                    lines.extend(heads);
+                    if shown {
+                        let control = theme_control(setting, side, *value, editor, half, of, wants(setting.key, side, &[side]), layer);
+                        let notes =
+                            sheet.refused(Row::Color(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
+                        lines.push(ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes));
+                    }
+                }
+                ui.card(lines).grow(1.0).min_w(0.0)
             };
             let light = column(Side::Only(Appearance::Light), &light);
             let dark = column(Side::Only(Appearance::Dark), &dark);
             page.child(row().key("halves-columns").w_full().gap(ui.spacing().s4).items_start().child(light).child(dark))
         }
     }
+}
+
+/// One half of the editor: its look, and what its theme works its settings out to be.
+#[derive(Clone, Copy)]
+struct Half<'a> {
+    ui: &'a Ui,
+    resolved: &'a Resolved,
+}
+
+/// Where the editor's rows are: the section of the last row drawn, and its group.
+#[derive(Default)]
+struct At {
+    section: Option<&'static str>,
+    group: Option<&'static str>,
+}
+
+/// The headers to draw before `setting`'s row, `at` where the last one left off: its section's,
+/// when it starts one (`section`, told whether it's open when it folds), and its group's
+/// (`group`); and whether its row shows, which it doesn't in a section that's folded.
+fn headings(
+    setting: &'static Setting,
+    at: &mut At,
+    editor: &Editor,
+    section: impl Fn(&'static Section, Option<bool>) -> El,
+    group: impl Fn(&'static str) -> El,
+) -> (Vec<El>, bool) {
+    let mut heads = Vec::new();
+    if setting.section.map(|s| s.key) != at.section {
+        at.section = setting.section.map(|s| s.key);
+        at.group = None;
+        if let Some(s) = setting.section {
+            heads.push(section(s, s.folds.then(|| editor.open.contains(s.key))));
+        }
+    }
+    if setting.section.is_some_and(|s| s.folds && !editor.open.contains(s.key)) {
+        return (heads, false);
+    }
+    if setting.group != at.group {
+        at.group = setting.group;
+        heads.extend(setting.group.map(group));
+    }
+    (heads, true)
 }
 
 /// A row's Join or Split, keyed `edit-<key>-split` while it's joined and `edit-<key>-join` while
@@ -337,28 +429,30 @@ fn join_control(ui: &Ui, key: &'static str, label: &str, joined: bool) -> El {
 
 /// A setting's row, one theme in both halves: one control across both columns, drawn in both
 /// looks, or one in each, in its half's; its Split or Join; and why a color typed there was
-/// refused.
+/// refused. `of` is the theme's settings.
 #[allow(clippy::too_many_arguments)]
 fn same_row(
     row: &ThemeRow,
     editor: &Editor,
     sheet: &SettingsSheet,
     ui: &Ui,
-    looks: [&Ui; 2],
+    halves: [Half; 2],
+    of: &'static [Setting],
     layer: &mut Vec<El>,
     focus: impl Fn(Side) -> bool,
 ) -> El {
+    let looks = halves.map(|h| h.ui);
     let (setting, key) = (row.setting, row.setting.key);
     let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
     let (cells, sides) = match row.joined {
         true => {
-            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, looks[0], focus(Side::Both), layer));
+            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, halves[0], of, focus(Side::Both), layer));
             (cells, vec![Side::Both])
         }
         false => {
             let cells = Halves::Split(
-                Some(theme_control(setting, light, row.light, editor, looks[0], focus(light), layer)),
-                Some(theme_control(setting, dark, row.dark, editor, looks[1], focus(dark), layer)),
+                Some(theme_control(setting, light, row.light, editor, halves[0], of, focus(light), layer)),
+                Some(theme_control(setting, dark, row.dark, editor, halves[1], of, focus(dark), layer)),
             );
             (cells, vec![light, dark])
         }
@@ -427,18 +521,22 @@ fn save_as(sheet: &SettingsSheet, ui: &Ui) -> Option<El> {
     Some(open)
 }
 
-/// The control that sets `setting` to a value of its kind on `side`, showing `value`, keyed
-/// `edit-<key>-<side>`. `focus` makes a toggle or a choice first in the Tab order; a color's
-/// field takes focus through its text.
+/// The control that sets `setting` (of the theme's settings `of`) to a value of its kind on
+/// `side`, showing `value`, in `half`'s look, keyed `edit-<key>-<side>`. `focus` makes a toggle or
+/// a choice first in the Tab order. A color's is its swatch (`…-swatch`), which opens its picker,
+/// whose hex field is the control.
+#[allow(clippy::too_many_arguments)]
 fn theme_control(
-    setting: &'static crate::theme::setting::Setting,
+    setting: &'static Setting,
     side: Side,
     value: Value,
     editor: &Editor,
-    ui: &Ui,
+    half: Half,
+    of: &'static [Setting],
     focus: bool,
     layer: &mut Vec<El>,
 ) -> El {
+    let ui = half.ui;
     let key = setting.key;
     let control_key = format!("{EDIT}-{key}-{}", side.key());
     match (&setting.kind, value) {
@@ -469,16 +567,53 @@ fn theme_control(
         (Kind::Toggle { .. }, Value::Toggle(on)) => {
             ui.switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Toggle(!on)))
         }
-        (Kind::Color { .. }, Value::Color(rgb)) => {
-            let Some(field) = editor.color(side, key) else { return el() };
-            let text = ui
-                .text_field(control_key, &field.text, setting.label)
-                .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").color_edit(side, key))
-                .on_submit(move |s: &mut SettingsWindow, _| submit_color(s, side, key))
-                .on_key(escape_key)
-                .width(COLOR_WIDTH)
-                .build();
-            row().gap(ui.spacing().s3).center_y().child(ui.swatch(rgb.color())).child(text)
+        (Kind::Color { follows }, Value::Color(set)) => {
+            let Some(rgb) = set.or_else(|| half.resolved.color(key)) else { return el() };
+            let help = match (set, follows) {
+                (Some(_), _) => format!("{} · set by hand", rgb.hex()),
+                (None, Some(base)) => format!("{} · follows {}", rgb.hex(), of.iter().find(|s| s.key == *base).map_or(*base, |s| s.label)),
+                (None, None) => format!("{} · theme default", rgb.hex()),
+            };
+            let swatch_key = format!("{control_key}-swatch");
+            let swatch =
+                ui.color_swatch(swatch_key.clone(), rgb.color(), set.is_some(), setting.label, help, move |s: &mut SettingsWindow| {
+                    open_picker(s, side, key)
+                });
+            let swatch = if focus { swatch.tab_index(1) } else { swatch };
+            if let (Some(picker), Some(field)) =
+                (editor.picker.as_ref().filter(|p| p.side == side && p.key == key), editor.color(side, key))
+            {
+                let field = ui
+                    .text_field(control_key.clone(), &field.text, &format!("{} hex", setting.label))
+                    .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").color_edit(side, key))
+                    .on_submit(move |s: &mut SettingsWindow, _| submit_color(s, side, key))
+                    .build()
+                    .grow(1.0);
+                let button = ui
+                    .button(format!("{control_key}-follow"), &follow_label(setting, of))
+                    .disabled(set.is_none())
+                    .on_press(move |s: &mut SettingsWindow| follow_color(s, side, key))
+                    .build();
+                let lines = half
+                    .resolved
+                    .warnings(key)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, w)| (w.to_owned(), Tone::Warning, format!("{control_key}-warning-{i}")))
+                    .collect();
+                let parts = PopupParts { field, button, lines };
+                ui.color_popup(
+                    &control_key,
+                    &swatch_key,
+                    picker.at,
+                    parts,
+                    |s: &mut SettingsWindow, p| pick(s, p),
+                    close_picker,
+                    escape_picker,
+                    layer,
+                );
+            }
+            swatch
         }
         // A value is always of its setting's kind (`Values`).
         (Kind::Choice { .. } | Kind::Toggle { .. } | Kind::Color { .. }, _) => el(),
@@ -594,10 +729,12 @@ fn edit_sheet(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
     // Both windows show the preset being edited, so each half's look is the one it shows.
     let looks = s.looks();
     let [light, dark] = Appearance::BOTH.map(|a| looks.shown(a).clone());
-    let body = self::editor(&preset, &open.editor, sheet, ui, [&light.ui, &dark.ui], open.focus.is_none(), open.focus, &mut menu);
+    let halves = [Half { ui: &light.ui, resolved: &light.resolved }, Half { ui: &dark.ui, resolved: &dark.resolved }];
+    let body = self::editor(&preset, &open.editor, sheet, ui, halves, open.focus.is_none(), open.focus, &mut menu);
     let mut layers = ui.over_sheet(
         EDIT,
         &title,
+        EDITOR_WIDTH,
         body,
         |s: &mut SettingsWindow| {
             escape(s);
@@ -615,8 +752,9 @@ const SAVE_AS_WIDTH: f32 = 160.0;
 /// How tall Save as…'s line is, its field or its question: a field and the line's padding under it.
 const SAVE_AS_HEIGHT: f32 = 32.0;
 
-/// How wide a color's field is: `#rrggbb`.
-const COLOR_WIDTH: f32 = 84.0;
+/// How wide the editor's sheet gets, and the App icon's.
+const EDITOR_WIDTH: f32 = 760.0;
+const ICONS_WIDTH: f32 = 600.0;
 
 /// The App icon's row, one line: what it is, the icon each Appearance shows now, small (both,
 /// each with a ☀ or ☾ at its corner, while they differ; one while they're the same), and Edit…,
@@ -739,6 +877,7 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appear
     ui.over_sheet(
         "icons",
         display::setting_label("app_icon"),
+        ICONS_WIDTH,
         body,
         |s: &mut SettingsWindow| {
             escape(s);
