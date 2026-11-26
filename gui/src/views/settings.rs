@@ -563,7 +563,9 @@ fn theme_control(
             )
         }
         (Kind::Toggle { .. }, Value::Toggle(on)) => {
-            ui.switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Toggle(!on)))
+            ui.sheet_switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| {
+                set_theme(s, side, key, Value::Toggle(!on))
+            })
         }
         (Kind::Color { follows }, Value::Color(set)) => {
             let Some(rgb) = set.or_else(|| half.resolved.color(key)) else { return el() };

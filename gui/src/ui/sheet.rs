@@ -102,7 +102,8 @@ impl Ui {
     /// left and right arrows pick the previous and the next (wrapping), taking effect as a click
     /// does, and it shows the look's focus ring. `first_focus`: the selected segment is first in
     /// the Tab order, so the page focuses it as it opens. It's a radio group named `label`, its
-    /// segments radios. The kit's `SegmentedControl` is drawn the same, but takes no Tab order.
+    /// segments radios. Tab reaches it with Full Keyboard Access off too. The kit's
+    /// `SegmentedControl` is drawn the same, but takes no Tab order.
     pub fn choice<S: 'static>(
         &self,
         key: String,
@@ -144,7 +145,7 @@ impl Ui {
                 label = label.group_color(c.text_base);
             }
             let on_pick = on_pick.clone();
-            let mut segment = row()
+            let segment = row()
                 .key(format!("segment{i}"))
                 .role("radio")
                 .focusable(true)
@@ -161,6 +162,7 @@ impl Ui {
                 .grid_cell(i)
                 .child(label)
                 .on_press(move |s: &mut S| on_pick(s, i));
+            let mut segment = super::tab_stop(segment);
             if !on {
                 segment = segment.hover(c.hover).press(self.colors.pressed_over_hover);
             }
@@ -174,7 +176,8 @@ impl Ui {
     /// list under it, drawn into `layer` (the overlays over everything else), whose option a press
     /// chooses (`on_choose` with its index). A press on the button calls `on_toggle`, a press
     /// outside or Escape `on_close`. Keyed `key`: its button `<key>-trigger`, its options
-    /// `<key>-content/…/option<index>`. `first_focus`: first in the Tab order.
+    /// `<key>-content/…/option<index>`. `first_focus`: first in the Tab order. Tab reaches it with
+    /// Full Keyboard Access off.
     #[allow(clippy::too_many_arguments)]
     pub fn popup_button<S: 'static>(
         &self,
@@ -202,6 +205,7 @@ impl Ui {
                 }
             })
             .build(&self.k, layer);
+        let select = super::tab_stop(select);
         let select = if first_focus { select.tab_index(1) } else { select };
         el().key(key).child(select)
     }
@@ -360,7 +364,9 @@ impl Ui {
     /// one; as tall as they are, up to the window less the title band above and 20 pt below, past
     /// which the body
     /// scrolls; up to `max_w` wide. Modal, keyed `<key>-sheet`, over a scrim. Escape calls
-    /// `on_escape`, Done `on_done`. The overlays to draw it with ([`Ui::root`]).
+    /// `on_escape`, Done `on_done`, as does Return wherever the focus is (Done is the default
+    /// button), unless the focused control takes Return itself. Tab reaches Cancel and Done with
+    /// Full Keyboard Access off. The overlays to draw it with ([`Ui::root`]).
     #[allow(clippy::too_many_arguments)]
     pub fn over_sheet<S: 'static>(
         &self,
@@ -380,14 +386,15 @@ impl Ui {
             .child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
         let body =
             col().key("body").w_full().shrink().min_h(0.0).px(self.spacing.s7).scroll(ScrollSpec { stick_bottom: false }).child(body);
-        let cancel = on_cancel.map(|cancel| self.button(format!("{key}-cancel"), "Cancel").on_press(move |s: &mut S| cancel(s)).build());
+        let cancel =
+            on_cancel.map(|cancel| self.button(format!("{key}-cancel"), "Cancel").tab_stop().on_press(move |s: &mut S| cancel(s)).build());
         let done = row()
             .w_full()
             .padding(self.spacing.s7)
             .gap(self.spacing.s4)
             .justify_end()
             .children(cancel)
-            .child(self.button(format!("{key}-done"), "Done").primary().on_press(on_done).build());
+            .child(self.button(format!("{key}-done"), "Done").primary().default_button().tab_stop().on_press(on_done).build());
         let panel = col()
             .key(format!("{key}-sheet"))
             .role("dialog")
@@ -611,9 +618,10 @@ impl Ui {
         self.halves_line("halves-header", left, right, looks.map(|l| l.tokens().c.bg_base))
     }
 
-    /// A row's Join or Split: a small button that joins or splits it.
+    /// A row's Join or Split: a small button that joins or splits it. Tab reaches it with Full
+    /// Keyboard Access off.
     pub fn join_toggle<S: 'static>(&self, key: String, label: &str, accessible: &str, on_press: impl Fn(&mut S) + 'static) -> El {
-        self.button(key, label).small().accessible(accessible).on_press(on_press).build()
+        self.button(key, label).small().accessible(accessible).tab_stop().on_press(on_press).build()
     }
 
     /// One setting: `label` on the left, `control` on the right, and under them `notes`, each in
@@ -652,10 +660,28 @@ impl Ui {
         first_focus: bool,
         on_toggle: impl Fn(&mut S) + 'static,
     ) -> El {
+        keyed(key, self.switch_el(label, on, first_focus, on_toggle))
+    }
+
+    /// [`Ui::switch`] that Tab reaches with Full Keyboard Access off, for a sheet's controls, which
+    /// all are Tab stops.
+    pub fn sheet_switch<S: 'static>(
+        &self,
+        key: impl Into<String>,
+        label: &str,
+        on: bool,
+        first_focus: bool,
+        on_toggle: impl Fn(&mut S) + 'static,
+    ) -> El {
+        keyed(key, super::tab_stop(self.switch_el(label, on, first_focus, on_toggle)))
+    }
+
+    /// The switch itself, unkeyed.
+    fn switch_el<S: 'static>(&self, label: &str, on: bool, first_focus: bool, on_toggle: impl Fn(&mut S) + 'static) -> El {
         let mut k = self.k.clone();
         k.c.layer_04 = k.c.border_strong;
         let switch = Switch::new(on).label(label).hide_label().control_size(ControlSize::Small).on_toggle(on_toggle).build(&k);
-        keyed(key, if first_focus { switch.tab_index(1) } else { switch })
+        if first_focus { switch.tab_index(1) } else { switch }
     }
 
     /// An App icon in the App icon's sheet: its drawing, `label` under it, its hover `help`, and
