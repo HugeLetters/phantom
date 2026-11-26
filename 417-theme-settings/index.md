@@ -1,3 +1,20 @@
+# #417 prototype: Phantom theme settings, v4 (stills)
+
+Headless renders (`--at 0.5`, 2x; the every-color pair 1x) of a throwaway build (branch `417-theme-settings`). Each still is Light and Dark (the sheet shows both halves either way).
+
+## v4: Picker popup
+- [v4-popup-faint-light.png](v4-popup-faint-light.png), [-dark](v4-popup-faint-dark.png): the popup on hand-set Faint text, with both warnings on one line each. Hex field and "Follow Text" are the same height; the saturation bar sits inside the popup with the square's margin.
+- [v4-popup-accent-light.png](v4-popup-accent-light.png), [-dark](v4-popup-accent-dark.png): the popup on a changed Accent ("Reset"), OKLCH picker: hue across, lightness down, chroma bar.
+- [v4-popup-hsl-light.png](v4-popup-hsl-light.png), [-dark](v4-popup-hsl-dark.png): the same Accent with plain HSL, for comparison (hue across, HSL lightness down, HSL saturation bar).
+
+## v4: Sheet
+- [v4-sheet-look-colors-light.png](v4-sheet-look-colors-light.png), [-dark](v4-sheet-look-colors-dark.png): Look has no Density row; Tone, Corners and Motion are dropdowns.
+- [v4-sheet-every-color-light.png](v4-sheet-every-color-light.png), [-dark](v4-sheet-every-color-dark.png): "Every color" has no hint line; Muted and Faint text are set by hand and carry an accent ring; the others follow, with no ring.
+
+Faked: the square and bar are real gradient fills with markers at the color's real position (OKLCH, out-of-gamut drawn as the nearest displayable), but they don't drag; the hex field is static.
+
+---
+
 # #417 prototype: Phantom theme settings, v3 (stills)
 
 Headless renders (`--at 0.5`, 2x unless noted) of a throwaway build (branch `417-theme-settings`). v3 stills are prefixed `v3-`; v2 and v1 lines stay below. Each still is in Light and Dark (the system's Appearance; the sheet shows both halves either way).
