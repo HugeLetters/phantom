@@ -117,7 +117,7 @@ fn return_does(ev: &KeyEvent, act: impl FnOnce()) -> bool {
     false
 }
 
-/// Up to `most` of the clashing paths, one a line, cut in the middle; "and N more" for the rest;
+/// Up to `most` of the clashing paths, one a line, wrapped when long; "and N more" for the rest;
 /// Reveal in Finder, small, at the end of the first. Another torrent's place with no file there yet
 /// is where this one would go.
 fn paths(clash: &Clash, ui: &Ui, show: &str, most: usize) -> El {

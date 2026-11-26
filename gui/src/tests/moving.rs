@@ -983,3 +983,27 @@ fn move_to_lists_at_most_five_recent_folders_and_other_asks() {
     super::pick_choice(&mut rt, "row-menu", "Other…");
     assert!(rt.file_dialog().is_some(), "Other… asks where");
 }
+
+/// A clashing file's path is never cut (#420): too long for a line, it wraps whole onto more
+/// lines, and the dialog stays within the window.
+#[test]
+fn a_clashing_path_too_long_for_a_line_wraps_whole() {
+    let folder = "/Volumes/Archive/Films and series/Documentaries about the history of the long and winding road/Season 01";
+    let service = three().holding_all(folder);
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    tap(&mut rt, "rows/0");
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to(folder)));
+    settle(&mut rt);
+
+    let elements = rt.elements();
+    let path =
+        elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.starts_with("/Volumes"))).find(|e| !e.exiting).expect("the path");
+    let shown = path.text.as_deref().unwrap();
+    assert!(shown.starts_with(folder) && !shown.contains('…'), "the whole path, no ellipsis: {shown}");
+    assert!(path.help.is_none(), "no tooltip repeating it: {:?}", path.help);
+    assert!(path.rect[3] > 30.0, "wrapped onto more lines: {:?}", path.rect);
+    let dialog = elements.iter().find(|e| e.key.as_deref() == Some("clash-dialog")).expect("the dialog");
+    assert!(dialog.rect[0] >= 0.0 && dialog.rect[0] + dialog.rect[2] <= 960.0, "within the window: {:?}", dialog.rect);
+    assert!(dialog.rect[1] >= 0.0 && dialog.rect[1] + dialog.rect[3] <= 540.0, "within the window: {:?}", dialog.rect);
+}

@@ -781,6 +781,13 @@ fn spec() -> AppSpec<Phantom> {
                 s.table.select("4");
                 model::moving::start(s, vec![4], archive("/Films"));
             }),
+            // A clashing file whose path is longer than a line of the dialog (#420): it wraps, whole.
+            ("clash-long-path", |s| {
+                let folder = format!("{ARCHIVE}/Films and series/Documentaries about the history of the long and winding road/Season 01");
+                s.service = Box::new(moves().holding_all(folder.clone()));
+                s.table.select("4");
+                model::moving::start(s, vec![4], archive(&folder[ARCHIVE.len()..]));
+            }),
             ("add-note", |s| {
                 s.service = Box::new(demo_service());
                 s.magnet = rune::TextEdit::new("hello");
