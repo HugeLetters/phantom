@@ -57,7 +57,7 @@ pub struct PopupParts {
 impl Ui {
     /// A color setting's swatch, keyed `key`: `color`, pressed to open its picker. One set by hand
     /// carries a ring in the accent color, a small even gap off it. Screen readers hear `label`;
-    /// the pointer resting on it shows `help`.
+    /// the pointer resting on it shows `help`. Tab reaches it with Full Keyboard Access off.
     pub fn color_swatch<S: 'static>(
         &self,
         key: String,
@@ -68,7 +68,7 @@ impl Ui {
         on_press: impl Fn(&mut S) + 'static,
     ) -> El {
         let k = &self.k;
-        let mut swatch = el()
+        let swatch = el()
             .key(key)
             .role("button")
             .label(label.to_owned())
@@ -81,6 +81,7 @@ impl Ui {
             .focusable(true)
             .focus_ring(2.0, 1.0, k.c.border_focus)
             .on_press(on_press);
+        let mut swatch = super::tab_stop(swatch);
         if hand_set {
             swatch = swatch.outline(RING, RING_GAP, k.c.bg_accent);
         }

@@ -16,6 +16,8 @@ pub struct Button<'a> {
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
     first_focus: bool,
+    /// Tab reaches it with Full Keyboard Access off ([`super::tab_stop`]).
+    tab_stop: bool,
     /// What VoiceOver reads, when the label it shows doesn't say it (a glyph).
     accessible: Option<String>,
     fill: bool,
@@ -35,6 +37,7 @@ impl Ui {
             muted: false,
             when_disabled: None,
             first_focus: false,
+            tab_stop: false,
             accessible: None,
             fill: false,
             hint: None,
@@ -89,6 +92,13 @@ impl Button<'_> {
     /// First in the Tab order, so a page of settings that opens focuses it.
     pub fn first_focus(mut self, first: bool) -> Self {
         self.first_focus = first;
+        self
+    }
+
+    /// Tab reaches it with Full Keyboard Access off, as it does a text field: for a button among
+    /// controls that are all Tab stops (a color's picker).
+    pub fn tab_stop(mut self) -> Self {
+        self.tab_stop = true;
         self
     }
 
@@ -151,6 +161,9 @@ impl Button<'_> {
         }
         if let Some(label) = self.accessible {
             built = built.label(label);
+        }
+        if self.tab_stop {
+            built = super::tab_stop(built);
         }
         let button = keyed(self.key, if self.first_focus { built.tab_index(1) } else { built });
         match self.when_disabled {

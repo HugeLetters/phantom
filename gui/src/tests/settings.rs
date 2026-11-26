@@ -877,8 +877,8 @@ impl Model {
         self.show_colors();
     }
 
-    /// In the sheet, a field for each color shown: one still shown keeps its text, a new one shows
-    /// the color.
+    /// In the sheet, a field for each color shown: one still shown and focused keeps its text, any
+    /// other shows the color it holds now; each still shown keeps its refusal.
     fn show_colors(&mut self) {
         if self.sheet.is_none() {
             return;
@@ -887,7 +887,12 @@ impl Model {
         for shown in self.shown().into_iter().filter(|s| matches!(s.kind, Kind::Color { .. })) {
             let side = shown.side;
             let hex = self.color_hex(side, shown.key);
-            let field = self.ed_mut().colors.remove(&(side, shown.key)).unwrap_or((hex, None));
+            let focused = self.focused == Some(Fld::Color(side, shown.key));
+            let field = match self.ed_mut().colors.remove(&(side, shown.key)) {
+                Some(field) if focused => field,
+                Some((_, why)) => (hex, why),
+                None => (hex, None),
+            };
             fields.insert((side, shown.key), field);
         }
         self.ed_mut().colors = fields;
@@ -2614,8 +2619,9 @@ fn close_other_picker(d: &mut Desk, step: &Step) {
     };
     // A press in Settings, while it's in front: one behind would come to the front first. Escape
     // and ⌘Z in Settings bring it to the front themselves; the model's Escape is the sheet's, and
-    // its ⌘Z comes after a press on the sheet's background.
-    if !keeps && matches!(step, Step::Close { escape: true } | Step::Undo(Which::Settings)) {
+    // its ⌘Z comes after a press on the sheet's background. Arrow keys Settings itself: Tab in an
+    // open picker would stay in it.
+    if !keeps && matches!(step, Step::Close { escape: true } | Step::Undo(Which::Settings) | Step::Arrow(..)) {
         d.front(Which::Settings);
     }
     if !keeps && d.shown().front == Some(Which::Settings) {
@@ -4852,4 +4858,114 @@ fn an_undo_that_closes_the_picker_focuses_what_it_shows() {
     assert!(sheet.editor().is_some_and(|e| e.picker.is_none()), "the picker closed");
     let focused = super::focus_path(&d.settings);
     assert!(focused.as_deref().is_some_and(|p| p.contains("edit-corners-both")), "Corners is focused, not {focused:?}");
+}
+
+/// Reset on a base, then its half's Tone switched: its picker opens on the color it follows now,
+/// in that Tone, its field showing it, and closing it leaves it following, nothing set by hand.
+#[test]
+fn after_reset_and_a_tone_switch_the_picker_shows_the_color_and_sets_nothing() {
+    let mut d = colors_sheet(960.0);
+    let light = Appearance::Light;
+    type_into(&mut d, "edit-accent-light", "#6526d4");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    assert_eq!(color_of(&d, light, "accent"), Some(Value::Color(Some(Rgb::parse("#6526d4").unwrap()))));
+    press(&mut d, "edit-accent-light-follow");
+    assert_eq!(color_of(&d, light, "accent"), Some(Value::Color(None)), "Reset: the theme's own again");
+    d.settings.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    press(&mut d, "edit-tone-light/#0/segment1");
+    let shown = |d: &Desk| {
+        let looks = d.main.state.looks.borrow();
+        crate::model::settings::shown_color(looks.preset(), Side::Only(light), "accent").expect("a color")
+    };
+    let dark_accent = shown(&d);
+    press(&mut d, "edit-accent-light-swatch");
+    let editor = d.settings.state.sheet.as_ref().and_then(|s| s.editor()).expect("the sheet");
+    let picker = editor.picker.as_ref().expect("the picker");
+    assert_eq!(Rgb::of(picker.at.color()), dark_accent, "the square shows the Dark Tone's accent");
+    assert_eq!(editor.color(Side::Only(light), "accent").map(|f| f.text.text.clone()), Some(dark_accent.hex()), "and its field");
+    d.settings.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    assert!(d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.picker.is_none()), "closed");
+    assert_eq!(color_of(&d, light, "accent"), Some(Value::Color(None)), "closing set nothing by hand");
+}
+
+/// With Full Keyboard Access off, as macOS has it by default, Tab still reaches every color: each
+/// base's swatches, the "Every color" header, then each of its swatches; in an open picker, the
+/// square, the bar, the hex field and its button, in turn; Escape closes it.
+#[test]
+fn tab_reaches_each_swatch_and_the_pickers_parts() {
+    let mut d = colors_sheet(960.0);
+    d.settings.set_full_keyboard_access(false);
+    let tab = |d: &mut Desk| {
+        d.settings.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+        d.settle();
+    };
+    // The key of the focused element, or of the nearest keyed element it's in.
+    let focused = |d: &Desk| {
+        let elements = d.settings.elements();
+        let at = elements.iter().find(|e| e.focused && !e.exiting)?.path.clone();
+        let keyed = at.split('/').rev().find(|p| p.starts_with("edit-"))?;
+        Some(keyed.to_owned())
+    };
+    let mut reached = Vec::new();
+    for _ in 0..120 {
+        tab(&mut d);
+        reached.extend(focused(&d));
+    }
+    let bases = crate::theme::phantom::palette::Base::ALL.map(|b| b.key());
+    let derived = crate::theme::phantom::palette::DERIVED.iter().map(|c| c.key);
+    let mut want: Vec<String> = bases.iter().flat_map(|k| [format!("edit-{k}-light-swatch"), format!("edit-{k}-dark-swatch")]).collect();
+    want.push("edit-every-color-section".into());
+    want.extend(derived.flat_map(|k| [format!("edit-{k}-light-swatch"), format!("edit-{k}-dark-swatch")]));
+    let order: Vec<&String> = reached.iter().filter(|k| want.contains(k)).collect();
+    let start = order.iter().position(|k| **k == want[0]).unwrap_or_else(|| panic!("Tab reaches {}: {reached:?}", want[0]));
+    let round: Vec<&String> = order[start..].iter().take(want.len()).copied().collect();
+    assert_eq!(round, want.iter().collect::<Vec<_>>(), "Tab's order: {reached:?}");
+    // In the picker of a color set by hand: its field, button, square and bar, and round again.
+    type_into(&mut d, "edit-faint_text-light", "#b0b0b0");
+    d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+    d.settle();
+    let mut reached = Vec::new();
+    for _ in 0..4 {
+        tab(&mut d);
+        reached.extend(focused(&d));
+    }
+    let field = "edit-faint_text-light";
+    let square = reached.iter().position(|k| *k == format!("{field}-square")).unwrap_or_else(|| panic!("the square: {reached:?}"));
+    reached.rotate_left(square);
+    assert_eq!(reached, [format!("{field}-square"), format!("{field}-bar"), field.to_owned(), format!("{field}-follow")], "in the picker");
+    d.settings.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    assert!(d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.picker.is_none()), "Escape closes it");
+    let label = |key: &str| d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.label);
+    assert_eq!(label("edit-faint_text-light-swatch").as_deref(), Some("Faint text"), "VoiceOver names the swatch");
+}
+
+/// A sheet over Settings never runs under the traffic lights, at the widest and the narrowest:
+/// it starts under the title band they sit in, its title and first row clear of them.
+#[test]
+fn the_sheet_is_clear_of_the_traffic_lights() {
+    use crate::ui::TRAFFIC_LIGHTS;
+    let lights =
+        [TRAFFIC_LIGHTS.0, TRAFFIC_LIGHTS.1, 2.0 * rune::Chrome::TRAFFIC_PITCH + rune::Chrome::TRAFFIC_LIGHT, rune::Chrome::TRAFFIC_LIGHT];
+    for width in [960.0, 640.0] {
+        for tall in [600.0, 320.0] {
+            let mut d = appearance_tab();
+            d.settings.set_viewport((width, tall), 2.0);
+            d.settle();
+            press(&mut d, "active-edit");
+            for part in ["edit-sheet", "edit-sheet/header", "edit-theme"] {
+                let r = d
+                    .settings
+                    .elements()
+                    .into_iter()
+                    .find(|e| !e.exiting && (e.path.ends_with(&format!("/{part}")) || e.path == part))
+                    .map(|e| e.rect)
+                    .unwrap_or_else(|| panic!("{part} at {width}x{tall}"));
+                assert!(!super::generated::overlaps(r, lights), "at {width}x{tall} {part} {r:?} is under the lights {lights:?}");
+            }
+        }
+    }
 }

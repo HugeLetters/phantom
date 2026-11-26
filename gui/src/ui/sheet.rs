@@ -20,8 +20,8 @@ pub const HEADER: f32 = TABS + 2.0 * TABS_PAD;
 /// half a light.
 pub const TRAFFIC_LIGHTS: (f32, f32) = (7.0, (HEADER - rune::Chrome::TRAFFIC_LIGHT) / 2.0);
 
-/// How much of the window a sheet over it leaves free, above and below: it fits its content up
-/// to the window less this, then scrolls.
+/// How much of the window a sheet over it leaves free below; above, it leaves the title band
+/// ([`HEADER`]) free: it fits its content up to the window less these, then scrolls.
 const SHEET_MARGIN: f32 = 20.0;
 
 use super::{Icon, Tone, Ui, keyed};
@@ -357,7 +357,8 @@ impl Ui {
 
     /// A sheet over the window (a Look Preset's editor, the App icon's tiles): `title` over
     /// `body`, and Done right under it, `on_cancel`'s Cancel (`<key>-cancel`) left of it if there's
-    /// one; as tall as they are, up to the window less 20 pt above and below, past which the body
+    /// one; as tall as they are, up to the window less the title band above and 20 pt below, past
+    /// which the body
     /// scrolls; up to `max_w` wide. Modal, keyed `<key>-sheet`, over a scrim. Escape calls
     /// `on_escape`, Done `on_done`. The overlays to draw it with ([`Ui::root`]).
     #[allow(clippy::too_many_arguments)]
@@ -418,7 +419,9 @@ impl Ui {
             .w_full()
             .h_full()
             .px(self.spacing.s7)
-            .py(SHEET_MARGIN)
+            // Under the title band, so the traffic lights in it never sit on the sheet.
+            .pt(HEADER)
+            .pb(SHEET_MARGIN)
             .justify_center()
             .items_center()
             .child(panel);
@@ -544,7 +547,8 @@ impl Ui {
     }
 
     /// A section's title, keyed `<key>-title`; one that folds (`open` is `Some`) has a chevron and
-    /// is pressed to open or close, keyed `<key>-section`.
+    /// is pressed to open or close, keyed `<key>-section`, and Tab reaches it with Full Keyboard
+    /// Access off.
     pub fn section_title<S: 'static>(&self, key: &str, title: &str, open: Option<bool>, on_press: impl Fn(&mut S) + 'static) -> El {
         let k = &self.k;
         let mut head = row().gap(self.spacing.s3).center_y();
@@ -560,13 +564,14 @@ impl Ui {
             .pb(self.spacing.s4)
             .child(head);
         match open {
-            Some(open) => left
-                .role("button")
-                .label(title.to_owned())
-                .expanded(open)
-                .focusable(true)
-                .focus_ring(2.0, 1.0, k.c.border_focus)
-                .on_press(on_press),
+            Some(open) => super::tab_stop(
+                left.role("button")
+                    .label(title.to_owned())
+                    .expanded(open)
+                    .focusable(true)
+                    .focus_ring(2.0, 1.0, k.c.border_focus)
+                    .on_press(on_press),
+            ),
             None => left,
         }
     }
