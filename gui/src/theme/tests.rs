@@ -45,6 +45,12 @@ impl Theme for Sample {
     fn build(&self, settings: &Values) -> Built {
         let motion = settings.get("pulse") == Some(Value::Toggle(true));
         let tokens = Kit::neutral(false);
+        let mut resolved = super::setting::Resolved::default();
+        let accent = match settings.get("accent") {
+            Some(Value::Color(Some(rgb))) => rgb,
+            _ => SAMPLE_ACCENT,
+        };
+        resolved.set_color("accent", accent);
         Built {
             colors: crate::theme::Colors::of(&tokens),
             spacing: crate::theme::Spacing::phantom(),
@@ -58,9 +64,13 @@ impl Theme for Sample {
             screens: Default::default(),
             app_icon: if settings.get("shape") == Some(Value::Choice("round")) { "full-moon" } else { "dark-hour" },
             motion: Default::default(),
+            resolved,
         }
     }
 }
+
+/// Sample's Accent until one is picked.
+pub const SAMPLE_ACCENT: super::setting::Rgb = super::setting::Rgb([0x33, 0x66, 0xff]);
 
 /// A theme in a generated chain: what it draws itself, and its parent.
 struct Link {
@@ -95,6 +105,7 @@ impl Theme for Link {
             screens: self.screens.clone(),
             app_icon: "phantom",
             motion: Default::default(),
+            resolved: Default::default(),
         }
     }
 }

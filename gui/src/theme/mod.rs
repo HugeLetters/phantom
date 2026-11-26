@@ -14,6 +14,7 @@
 //! [ADR 0011]: ../../../docs/adr/0011-look-presets.md
 
 mod colors;
+pub(crate) mod oklab;
 pub mod phantom;
 pub mod preset;
 pub mod saved;
@@ -32,7 +33,7 @@ use rune_kit::Kit;
 use crate::model::Phantom;
 use crate::ui::{BlockOverrides, Blocks, Ui};
 pub use colors::Colors;
-use setting::{Setting, Values};
+use setting::{Resolved, Setting, Values};
 pub use spacing::Spacing;
 
 /// A theme: built into the app, with its assets in its own folder.
@@ -67,6 +68,8 @@ pub struct Built {
     pub app_icon: &'static str,
     /// Whether the theme moves, or follows the Mac's Reduce Motion.
     pub motion: Motion,
+    /// What its color settings come to, and its warnings about its settings, for Settings.
+    pub resolved: Resolved,
 }
 
 /// Whether a theme's motion plays: always, never, or as the Mac's Reduce Motion says.
@@ -148,6 +151,11 @@ impl fmt::Debug for ThemeLook {
 }
 
 impl ThemeLook {
+    /// What its theme works its settings out to be, for Settings: each color, and the warnings.
+    pub fn resolved(&self) -> Resolved {
+        self.theme.build(&self.settings).resolved
+    }
+
     /// `theme` at its defaults.
     #[cfg(test)]
     pub fn defaults(theme: &'static dyn Theme) -> ThemeLook {
@@ -161,6 +169,8 @@ pub struct Look {
     pub screens: Screens,
     /// As [`Built::app_icon`].
     pub app_icon: &'static str,
+    /// As [`Built::resolved`].
+    pub resolved: Resolved,
 }
 
 impl Look {
@@ -177,7 +187,8 @@ impl Look {
         }
         let base = (Blocks::phantom(phantom::icon), Screens::phantom());
         let (blocks, screens) = chain.iter().rev().fold(base, |(blocks, screens), (b, s)| (blocks.over(b), screens.over(s)));
-        Look { ui: Ui::new(built.tokens, built.colors, built.spacing, blocks, built.motion), screens, app_icon: built.app_icon }
+        let ui = Ui::new(built.tokens, built.colors, built.spacing, blocks, built.motion);
+        Look { ui, screens, app_icon: built.app_icon, resolved: built.resolved }
     }
 }
 
