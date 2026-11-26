@@ -36,6 +36,22 @@ impl Ui {
         trigger
     }
 
+    /// PROTOTYPE (#417): `body` in a raised popup under the element keyed `anchor`, like a native
+    /// colour picker's; pressing outside calls `on_close`.
+    pub fn popup_under<S: 'static>(
+        &self,
+        key: &str,
+        anchor: &str,
+        body: El,
+        on_close: impl Fn(&mut S) + Clone + 'static,
+        layer: &mut Vec<El>,
+    ) {
+        layer.push(scrim(format!("{key}-scrim"), on_close));
+        let surface = popover::raised(&self.k, body.key(format!("{key}-content")), self.k.radius.md)
+            .border(1.0, super::opaque_over(self.k.c.border_weak, self.k.c.page));
+        layer.push(popover::anchored(&self.k, surface, anchor, Placement::Bottom, 6.0));
+    }
+
     /// A [`note`](Self::note)'s tooltip under the element keyed `anchor`, drawn earlier in
     /// `layer`, that takes no presses: it goes when its owner stops drawing it (a field's on the
     /// next keystroke).

@@ -1198,6 +1198,7 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
             // PROTOTYPE (#417): Phantom's colours, every colour shown, Faint text set by hand in Light.
             ("proto-sheet", |s| proto_sheet(s, true)),
             ("proto-sheet-bases", |s| proto_sheet(s, false)),
+            ("proto-sheet-accent", |s| proto_sheet(s, None)),
             ("settings-sheet-split", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 model::settings::presets::edit_active(s);
@@ -1254,16 +1255,23 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
     }
 }
 
-fn proto_sheet(s: &mut SettingsWindow, every: bool) {
+/// `every` of `Some`: Faint text set by hand; `None`: the Accent set by hand instead, "Every color" closed.
+fn proto_sheet<E: Into<Option<bool>>>(s: &mut SettingsWindow, every: E) {
+    let every: Option<bool> = every.into();
+    let accent = every.is_none();
+    let every = every.unwrap_or(false);
     use theme::phantom::proto;
     use theme::setting::{Rgb, Value};
     settings_scene(s, Tab::Appearance, demo_settings(false));
     for (appearance, dark) in [(preset::Appearance::Light, false), (preset::Appearance::Dark, true)] {
         let mut look = theme::phantom::theme_look(dark);
         look.settings.set(theme::phantom::EVERY, Value::Toggle(every));
-        if !dark {
-            // Faint text set by hand in Light, as today's look has it: reads 3.8:1.
-            look.settings.set("d_text_faint", Value::Colour(Rgb([0x80, 0x82, 0x87])));
+        if accent {
+            let hand = if dark { Rgb([0xa9, 0x8b, 0xff]) } else { Rgb([0x65, 0x26, 0xd4]) };
+            look.settings.set("c_accent", Value::Colour(hand));
+        } else {
+            // Faint text set by hand, failing: Light reads 3.8:1 on Surface, Dark 2.5:1.
+            look.settings.set("d_text_faint", Value::Colour(if dark { Rgb([0x5a, 0x5c, 0x60]) } else { Rgb([0x80, 0x82, 0x87]) }));
         }
         s.looks.borrow_mut().set(appearance, look);
     }

@@ -32,16 +32,16 @@ macro_rules! derived {
     ($($key:literal $label:literal),*) => { [$(Setting { key: $key, label: $label, kind: Kind::Colour { default: proto::FOLLOW } }),*] };
 }
 
-static SETTINGS: [Setting; 35] = {
+static SETTINGS: [Setting; 34] = {
     let d = derived!(
-        "d_text_muted" "Muted text", "d_text_faint" "Faint text", "d_text_accent" "Accent text", "d_on_accent" "Text on Accent",
+        "d_text_muted" "Muted text", "d_text_faint" "Faint text", "d_on_accent" "Text on Accent",
         "d_page" "Window", "d_sheet" "Sheet and dialog", "d_panel" "Panel", "d_raised" "Notice", "d_tooltip" "Tooltip",
         "d_hover" "Hover", "d_pressed" "Pressed", "d_track" "Track", "d_off" "Off",
         "d_border_weak" "Hairline", "d_border_strong" "Strong", "d_focus" "Focus ring",
         "d_danger_bg" "Danger fill", "d_danger_border" "Danger edge", "d_warning_bg" "Warning fill",
         "d_warning_border" "Warning edge", "d_success_bg" "Success fill", "d_success_border" "Success edge"
     );
-    let [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16, d17, d18, d19, d20, d21] = d;
+    let [d0, d1, d2, d3, d4, d5, d6, d7, d8, d9, d10, d11, d12, d13, d14, d15, d16, d17, d18, d19, d20] = d;
     [
         Setting {
             key: TONE,
@@ -78,7 +78,7 @@ static SETTINGS: [Setting; 35] = {
                 choices: &[
                     Choice { id: "off", label: "Off" },
                     Choice { id: "on", label: "On" },
-                    Choice { id: "follow", label: "Follow Reduced Motion" },
+                    Choice { id: "follow", label: "Follow Reduce Motion" },
                 ],
                 default: "follow",
             },
@@ -91,7 +91,7 @@ static SETTINGS: [Setting; 35] = {
         colour!("c_danger", "Danger", 0),
         colour!("c_warning", "Warning", 0),
         colour!("c_success", "Success", 0),
-        Setting { key: EVERY, label: "Show every colour", kind: Kind::Toggle { default: false } },
+        Setting { key: EVERY, label: "Show every color", kind: Kind::Toggle { default: false } },
         d0,
         d1,
         d2,
@@ -113,7 +113,6 @@ static SETTINGS: [Setting; 35] = {
         d18,
         d19,
         d20,
-        d21,
     ]
 };
 

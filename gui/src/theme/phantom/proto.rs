@@ -194,10 +194,9 @@ macro_rules! d {
     };
 }
 
-pub static DERIVED: [Derived; 22] = [
+pub static DERIVED: [Derived; 21] = [
     d!("d_text_muted", "Muted text", "Text", "Text", text_muted),
     d!("d_text_faint", "Faint text", "Text", "Text", text_faint),
-    d!("d_text_accent", "Accent text", "Text", "Accent", text_accent),
     d!("d_on_accent", "Text on Accent", "Text", "Accent", submit_fg),
     d!("d_page", "Window", "Surfaces", "Background", page),
     d!("d_sheet", "Sheet and dialog", "Surfaces", "Background", layer_01),
@@ -250,35 +249,103 @@ pub fn hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b))
 }
 
-/// What the sheet says under the row of `key` when its pair reads under 4.5:1 (3:1 for edges):
-/// "Accent text is hard to read on Surface: 4.0:1 (needs 4.5:1)."
+/// Pairs Phantom draws, checked: text (text, muted, faint) at 4.5:1 on the backgrounds it sits
+/// on; Accent, a shape (the focus ring, selection, switches, bars), at 3:1 on Surface and
+/// Background. Phantom draws no text in Accent. The line doesn't repeat the row's name.
 pub fn warnings(key: &str, k: &Kit) -> Vec<String> {
     let p = &k.c;
-    let page = p.page;
+    let (page, surface) = (p.page, p.bg_base);
+    let text = |c: Color| vec![("read", "Surface", c, surface, 4.5), ("read", "Background", c, page, 4.5)];
     let pairs: Vec<(&str, &str, Color, Color, f32)> = match key {
-        "c_text" => vec![("Text", "Surface", p.text_base, p.bg_base, 4.5)],
-        "c_background" => vec![("Muted text", "Background", p.text_muted, page, 4.5)],
-        "c_surface" => vec![("Muted text", "Surface", p.text_muted, p.bg_base, 4.5)],
-        "c_accent" => {
-            vec![("Text on Accent", "Accent", p.submit_fg, p.bg_accent, 4.5), ("Accent text", "Surface", p.text_accent, p.bg_base, 4.5)]
-        }
-        "c_danger" => vec![("Danger", "its fill", p.danger.fg, p.danger.bg, 4.5)],
-        "c_warning" => vec![("Warning", "its fill", p.warning.fg, p.warning.bg, 4.5)],
-        "c_success" => vec![("Success", "its fill", p.success.fg, p.success.bg, 4.5)],
-        "d_text_faint" => {
-            vec![("Faint text", "Surface", p.text_faint, p.bg_base, 4.5), ("Faint text", "Background", p.text_faint, page, 4.5)]
-        }
-        "d_text_muted" => vec![("Muted text", "Surface", p.text_muted, p.bg_base, 4.5)],
-        "d_text_accent" => vec![("Accent text", "Surface", p.text_accent, p.bg_base, 4.5)],
-        "d_focus" => vec![("Focus ring", "Surface", p.border_focus, p.bg_base, 3.0)],
+        "c_text" => text(p.text_base),
+        "d_text_muted" => text(p.text_muted),
+        "d_text_faint" => text(p.text_faint),
+        "c_accent" => vec![("see", "Surface", p.bg_accent, surface, 3.0), ("see", "Background", p.bg_accent, page, 3.0)],
+        "c_danger" => vec![("read", "its fill", p.danger.fg, p.danger.bg, 4.5)],
+        "c_warning" => vec![("read", "its fill", p.warning.fg, p.warning.bg, 4.5)],
+        "c_success" => vec![("read", "its fill", p.success.fg, p.success.bg, 4.5)],
         _ => vec![],
     };
     pairs
         .into_iter()
-        .map(|(what, on, a, b, need)| (what, on, contrast(a, b), need))
+        .map(|(verb, on, a, b, need)| (verb, on, contrast(a, b), need))
         .filter(|(_, _, r, need)| r < need)
-        .map(|(what, on, r, need)| format!("{what} is hard to read on {on}: {r:.1}:1 (needs {need}:1)."))
+        .map(|(verb, on, r, need)| format!("Hard to {verb} on {on}: {r:.1}:1 (needs {need}:1)."))
         .collect()
+}
+
+/// A colour from sRGB components in 0..=1.
+pub fn srgb(r: f32, g: f32, b: f32) -> Color {
+    Color { r: dec(r), g: dec(g), b: dec(b), a: 1.0 }
+}
+
+/// Hue (0..1), saturation and brightness (0..1) of `c`, in sRGB.
+pub fn hsv(c: Color) -> (f32, f32, f32) {
+    let (r, g, b) = (enc(c.r), enc(c.g), enc(c.b));
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let d = max - min;
+    let h = if d == 0.0 {
+        0.0
+    } else if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h / 6.0, if max == 0.0 { 0.0 } else { d / max }, max)
+}
+
+/// The fully saturated colour of hue `h` (0..1).
+pub fn hue(h: f32) -> Color {
+    let x = h.rem_euclid(1.0) * 6.0;
+    let k = |n: f32| 1.0 - ((n + x) % 6.0).min(4.0 - (n + x) % 6.0).clamp(0.0, 1.0);
+    srgb(k(5.0), k(3.0), k(1.0))
+}
+
+/// The editor card's width as last laid out; 0 before the first layout. Under [`NARROW`] the
+/// label column and its gap are tighter, and a segmented control that can't show all its
+/// labels in the room left becomes a dropdown.
+static CARD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const NARROW: f32 = 700.0;
+
+pub fn set_card(width: f32) {
+    CARD.store(width.to_bits(), Ordering::Relaxed);
+}
+
+fn card() -> f32 {
+    f32::from_bits(CARD.load(Ordering::Relaxed))
+}
+
+pub fn narrow() -> bool {
+    (1.0..NARROW).contains(&card())
+}
+
+pub fn label_width() -> f32 {
+    if narrow() { 108.0 } else { 112.0 }
+}
+
+pub fn label_gap() -> f32 {
+    if narrow() { 4.0 } else { 12.0 }
+}
+
+/// Whether segments labelled `labels` fit in the control's cell (an estimate of 7 pt a letter
+/// and 20 pt of padding a segment).
+pub fn segments_fit(labels: &[&str]) -> bool {
+    let cell = card() / 2.0 - 16.0 - label_width() - label_gap();
+    card() == 0.0 || labels.iter().map(|l| l.chars().count() as f32 * 7.0 + 20.0).sum::<f32>() <= cell
+}
+
+/// The dropdown open, by its key.
+static MENU: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn menu() -> Option<String> {
+    MENU.lock().unwrap().clone().or_else(|| env("menu"))
+}
+
+pub fn toggle_menu(id: &str) {
+    let mut g = MENU.lock().unwrap();
+    *g = if g.as_deref() == Some(id) { Some(String::new()) } else { Some(id.to_owned()) };
 }
 
 /// The swatch whose editor is open (`key|side`) and the one whose tooltip shows, both set by a

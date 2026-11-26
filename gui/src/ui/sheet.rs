@@ -409,9 +409,15 @@ impl Ui {
         };
         let line = row()
             .w_full()
-            .gap(12.0)
+            .gap(crate::theme::phantom::proto::label_gap())
             .center_y()
-            .child(text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base).w(HALF_LABEL).wrap())
+            .child(
+                text(label.to_owned())
+                    .font(light.tokens().ty.ui)
+                    .color(light.tokens().c.text_base)
+                    .w(crate::theme::phantom::proto::label_width())
+                    .wrap(),
+            )
             .child(left_cell);
         let mut left = col().w_full().gap(2.0).child(line);
         for (note, tone) in notes {
@@ -438,14 +444,16 @@ impl Ui {
     /// hairline across both halves (keyed `halves-rule-<n>`, its line `…-line`), the two looks'
     /// strong borders mixed half and half: a neutral mid tone, it reads on a light page and a dark
     /// one. The two halves' pages run under it, so the seam is unbroken.
-    pub fn halves_card(&self, lines: Vec<El>, looks: [&Ui; 2]) -> El {
+    pub fn halves_card(&self, lines: Vec<(El, bool)>, looks: [&Ui; 2]) -> El {
         let k = &self.k;
         let mut card = col().key("halves-card").w_full().radius(k.radius.md).clip_rounded(k.radius.md).border(1.0, k.c.border_weak);
         let [light, dark] = looks.map(|l| l.tokens().c.clone());
         let ink = light.border_base.mix(dark.border_base, 0.5);
         let page = |c: rune::Color, cell: usize| el().grow(1.0).h(1.0).fill(c).grid_cell(cell).a11y_hidden();
-        for (i, line) in lines.into_iter().enumerate() {
-            if i > 0 {
+        // PROTOTYPE (#417): `lines` are `(line, is a section header)`: no rule where a header meets a row.
+        let mut before_header = true;
+        for (i, (line, header)) in lines.into_iter().enumerate() {
+            if i > 0 && !header && !before_header {
                 let line_over = el().key(format!("halves-rule-{i}-line")).w_full().h(1.0).fill(ink).a11y_hidden();
                 card = card.child(
                     row()
@@ -458,6 +466,7 @@ impl Ui {
                         .child(row().absolute(0.0, 0.0).w_full().h(1.0).px(8.0).child(line_over)),
                 );
             }
+            before_header = header;
             card = card.child(line);
         }
         card
@@ -484,7 +493,11 @@ impl Ui {
     /// ([`Ui::half_heading`]) over their columns, the Light's in the left half, past the labels,
     /// the Dark's in the right.
     pub fn halves_header(&self, light: El, dark: El, looks: [&Ui; 2]) -> El {
-        let left = row().w_full().gap(12.0).child(el().w(HALF_LABEL)).child(light.grow(1.0).min_w(0.0));
+        let left = row()
+            .w_full()
+            .gap(crate::theme::phantom::proto::label_gap())
+            .child(el().w(crate::theme::phantom::proto::label_width()))
+            .child(light.grow(1.0).min_w(0.0));
         let right = row().w_full().gap(12.0).child(dark.grow(1.0).min_w(0.0)).child(el().w(HALF_TOGGLE));
         self.halves_line("halves-header", left, right, looks.map(|l| l.tokens().c.bg_base))
     }
@@ -518,10 +531,65 @@ impl Ui {
         self.halves_line(key, left, col().w_full().min_h(36.0), [light.k.c.page, dark.k.c.page])
     }
 
+    /// PROTOTYPE (#417): the picker of a colour popup: a saturation/brightness square with a hue
+    /// strip beside it, drawn with gradient fills (a still, not yet draggable), the marker of
+    /// `now` on each, then `below` (the hex field, a button, warnings).
+    pub fn picker_body(&self, key: &str, now: rune::Color, below: Vec<El>) -> El {
+        use crate::theme::phantom::proto;
+        let k = &self.k;
+        let (h, sat, val) = proto::hsv(now);
+        let (w, ht, strip) = (232.0_f32, 120.0_f32, 16.0_f32);
+        let ramp = |a: rune::Color, b: rune::Color| -> Vec<(f32, rune::Color)> {
+            (0..=8).map(|i| (i as f32 / 8.0, proto::mix(a, b, i as f32 / 8.0))).collect()
+        };
+        let shade: Vec<(f32, rune::Color)> = (0..=8).map(|i| (i as f32 / 8.0, rune::Color::BLACK.alpha(i as f32 / 8.0))).collect();
+        let marker = |x: f32, y: f32| {
+            el().absolute(x - 6.0, y - 6.0)
+                .size(12.0, 12.0)
+                .radius(6.0)
+                .border(2.0, rune::Color::WHITE)
+                .box_shadow(rune::Shadow { spread: 1.0, color: rune::Color::BLACK.alpha(0.5), ..Default::default() })
+                .a11y_hidden()
+        };
+        let square = el()
+            .key(format!("{key}-square"))
+            .size(w, ht)
+            .radius(k.radius.sm)
+            .clip_rounded(k.radius.sm)
+            .fill(proto::hue(h))
+            .linear_gradient(std::f32::consts::FRAC_PI_2, ramp(rune::Color::WHITE, proto::hue(h)))
+            .role("slider")
+            .label("Saturation and brightness".to_owned())
+            .child(el().absolute(0.0, 0.0).size(w, ht).linear_gradient(std::f32::consts::PI, shade).a11y_hidden())
+            .child(marker(sat * w, (1.0 - val) * ht));
+        let hues: Vec<(f32, rune::Color)> = (0..=12).map(|i| (i as f32 / 12.0, proto::hue(i as f32 / 12.0))).collect();
+        let bar = el()
+            .key(format!("{key}-hue"))
+            .size(strip, ht)
+            .radius(k.radius.sm)
+            .clip_rounded(k.radius.sm)
+            .linear_gradient(std::f32::consts::PI, hues)
+            .role("slider")
+            .label("Hue".to_owned())
+            .child(
+                el().absolute(-2.0, h * ht - 3.0)
+                    .size(strip + 4.0, 6.0)
+                    .radius(3.0)
+                    .border(2.0, rune::Color::WHITE)
+                    .box_shadow(rune::Shadow { spread: 1.0, color: rune::Color::BLACK.alpha(0.5), ..Default::default() })
+                    .a11y_hidden(),
+            );
+        let mut body = col().w(w + strip + 8.0).gap(10.0).px(12.0).py(12.0).child(row().gap(8.0).child(square).child(bar));
+        for b in below {
+            body = body.child(b);
+        }
+        body
+    }
+
     /// PROTOTYPE (#417): a warning under a row, in its half's look: at most two lines.
     pub fn warning_line(&self, key: &str, message: String) -> El {
         let ink = self.tone_color(Tone::Warning);
-        text(message).key(key.to_owned()).font(self.k.ty.text_small).color(ink).wrap().max_lines(2).pb(6.0)
+        text(message).key(key.to_owned()).font(self.k.ty.text_small).color(ink).wrap().max_lines(3).pb(2.0)
     }
 
     /// PROTOTYPE (#417): a swatch you press to edit; a hand-set one carries a small dot.
@@ -807,7 +875,6 @@ pub enum Halves {
 const PREVIEW: f32 = 24.0;
 
 /// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
-const HALF_LABEL: f32 = 112.0;
 const HALF_TOGGLE: f32 = 56.0;
 
 /// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's

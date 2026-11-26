@@ -81,6 +81,10 @@ fn view_inner(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     if crate::theme::phantom::proto::motion_off() {
         cx.reduced_motion(true);
     }
+    // PROTOTYPE (#417): the card's width, which decides how tight the label column is and what becomes a dropdown.
+    if let Some(at) = cx.layout("halves-card") {
+        crate::theme::phantom::proto::set_card(at[2]);
+    }
     let appearance = Appearance::of(cx.system_dark());
     let look = s.looks().shown(appearance).clone();
     let ui = &look.ui;
@@ -302,8 +306,8 @@ fn editor(
             let toggle = join_control(looks[1], THEME, "Theme", theme_joined);
             let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new());
             let header = ui.halves_header(looks[0].half_heading(false), looks[1].half_heading(true), looks);
-            let mut lines = vec![header, theme];
-            // PROTOTYPE (#417): sections: Look, Colours, and Every colour, which opens.
+            let mut lines = vec![(header, true), (theme, false)];
+            // PROTOTYPE (#417): sections: Look, Colors, and Every color, which opens.
             use crate::theme::phantom::proto;
             let every = rows.iter().any(|r| {
                 r.setting.key == crate::theme::phantom::EVERY && (r.light == Value::Toggle(true) || r.dark == Value::Toggle(true))
@@ -317,15 +321,18 @@ fn editor(
                 let derived = proto::derived(key);
                 if key == crate::theme::phantom::EVERY {
                     let hint = every.then_some("Each follows one of the eight, until set by hand");
-                    lines.push(ui.section_header(
-                        "edit-section-every",
-                        "Every colour",
-                        hint,
-                        Some(every),
-                        looks,
-                        Some(Box::new(move |s: &mut SettingsWindow| {
-                            set_theme(s, Side::Both, crate::theme::phantom::EVERY, Value::Toggle(!every))
-                        })),
+                    lines.push((
+                        ui.section_header(
+                            "edit-section-every",
+                            "Every color",
+                            hint,
+                            Some(every),
+                            looks,
+                            Some(Box::new(move |s: &mut SettingsWindow| {
+                                set_theme(s, Side::Both, crate::theme::phantom::EVERY, Value::Toggle(!every))
+                            })),
+                        ),
+                        true,
                     ));
                     continue;
                 }
@@ -333,24 +340,37 @@ fn editor(
                     continue;
                 }
                 if key == crate::theme::phantom::CORNERS {
-                    lines.push(section("look", "Look", None));
+                    lines.push((section("look", "Look", None), true));
                 }
                 if key == "c_background" {
-                    lines.push(section("colours", "Colours", Some("The rest follow these.")));
+                    lines.push((section("colours", "Colors", Some("The rest follow these.")), true));
                 }
                 if let Some(d) = derived
                     && d.group != group
                 {
                     group = d.group;
-                    lines.push(section(group, group, None));
+                    lines.push((section(group, group, None), true));
                 }
-                lines.push(same_row(row, editor, sheet, ui, looks, |side| {
-                    wants(
-                        key,
-                        side,
-                        if row.joined { &[Side::Both] } else { &[Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] },
-                    )
-                }));
+                lines.push((
+                    same_row(row, editor, sheet, ui, looks, layer, |side| {
+                        wants(
+                            key,
+                            side,
+                            if row.joined { &[Side::Both] } else { &[Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] },
+                        )
+                    }),
+                    false,
+                ));
+                // The popup of the swatch pressed open.
+                if let Some(open) = proto::open()
+                    && let Some((k, side)) = open.split_once('|')
+                    && k == key
+                    && matches!(row.setting.kind, Kind::Colour { .. })
+                {
+                    let i = usize::from(side == "dark");
+                    let value = if i == 0 { row.light } else { row.dark };
+                    colour_popup(row.setting, side, value, looks[i], layer);
+                }
                 // The tooltip of the swatch the pointer rests on.
                 if let Some(tip) = proto::tip()
                     && let Some((k, side)) = tip.split_once('|')
@@ -370,7 +390,7 @@ fn editor(
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
                 let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
                 let lines = held.iter().map(|(setting, value)| {
-                    let control = theme_control(setting, side, *value, editor, ui, wants(setting.key, side, &[side]));
+                    let control = theme_control(setting, side, *value, editor, ui, wants(setting.key, side, &[side]), layer);
                     let notes =
                         sheet.refused(Row::Colour(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
                     ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes)
@@ -400,26 +420,35 @@ fn join_control(ui: &Ui, key: &'static str, label: &str, joined: bool) -> El {
 /// A setting's row, one theme in both halves: one control across both columns, drawn in both
 /// looks, or one in each, in its half's; its Split or Join; and why a colour typed there was
 /// refused.
-fn same_row(row: &ThemeRow, editor: &Editor, sheet: &SettingsSheet, ui: &Ui, looks: [&Ui; 2], focus: impl Fn(Side) -> bool) -> El {
+#[allow(clippy::too_many_arguments)]
+fn same_row(
+    row: &ThemeRow,
+    editor: &Editor,
+    sheet: &SettingsSheet,
+    ui: &Ui,
+    looks: [&Ui; 2],
+    layer: &mut Vec<El>,
+    focus: impl Fn(Side) -> bool,
+) -> El {
     let (setting, key) = (row.setting, row.setting.key);
     let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
     // PROTOTYPE (#417): a derived colour shows each half's own, even while joined.
     let (cells, sides) = match row.joined {
         true if crate::theme::phantom::proto::derived(key).is_some() => (
             Halves::Split(
-                Some(theme_control(setting, light, row.light, editor, looks[0], false)),
-                Some(theme_control(setting, dark, row.dark, editor, looks[1], false)),
+                Some(theme_control(setting, light, row.light, editor, looks[0], false, layer)),
+                Some(theme_control(setting, dark, row.dark, editor, looks[1], false, layer)),
             ),
             vec![Side::Both],
         ),
         true => {
-            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, looks[0], focus(Side::Both)));
+            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, looks[0], focus(Side::Both), layer));
             (cells, vec![Side::Both])
         }
         false => {
             let cells = Halves::Split(
-                Some(theme_control(setting, light, row.light, editor, looks[0], focus(light))),
-                Some(theme_control(setting, dark, row.dark, editor, looks[1], focus(dark))),
+                Some(theme_control(setting, light, row.light, editor, looks[0], focus(light), layer)),
+                Some(theme_control(setting, dark, row.dark, editor, looks[1], focus(dark), layer)),
             );
             (cells, vec![light, dark])
         }
@@ -431,27 +460,6 @@ fn same_row(row: &ThemeRow, editor: &Editor, sheet: &SettingsSheet, ui: &Ui, loo
             Some((if row.joined { why.to_owned() } else { format!("{}: {why}", side_label(side)) }, Tone::Error))
         })
         .collect();
-    // PROTOTYPE (#417): pairs under 4.5:1 that this colour takes part in, under its half's row; and
-    // the editor of the swatch pressed open.
-    let mut below: [Vec<El>; 2] = [Vec::new(), Vec::new()];
-    for (i, ui_half) in looks.iter().enumerate() {
-        for (n, w) in crate::theme::phantom::proto::warnings(key, ui_half.tokens()).into_iter().enumerate() {
-            below[i].push(ui_half.warning_line(&format!("{EDIT}-{key}-warning-{i}-{n}"), w));
-        }
-    }
-    if matches!(setting.kind, Kind::Colour { .. }) {
-        let shown: Vec<(Side, Value, usize)> = if row.joined && crate::theme::phantom::proto::derived(key).is_none() {
-            vec![(Side::Both, row.light, 0)]
-        } else {
-            vec![(light, row.light, 0), (dark, row.dark, 1)]
-        };
-        let open = crate::theme::phantom::proto::open();
-        for (side, value, i) in shown {
-            if open.as_deref() == Some(&format!("{key}|{}", side.key())) {
-                below[i].push(colour_editor(setting, side, value, editor, looks[i.min(1)]));
-            }
-        }
-    }
     ui.halves_row_ext(
         &format!("{EDIT}-{key}"),
         setting.label,
@@ -459,7 +467,7 @@ fn same_row(row: &ThemeRow, editor: &Editor, sheet: &SettingsSheet, ui: &Ui, loo
         looks,
         Some(join_control(looks[1], key, setting.label, row.joined)),
         notes,
-        below,
+        [Vec::new(), Vec::new()],
     )
 }
 
@@ -505,42 +513,51 @@ fn save_as(sheet: &SettingsSheet, ui: &Ui) -> Option<El> {
 /// The control that sets `setting` to a value of its kind on `side`, showing `value`, keyed
 /// `edit-<key>-<side>`. `focus` makes a toggle or a choice first in the Tab order; a colour's
 /// field takes focus through its text.
-fn theme_control(setting: &'static crate::theme::setting::Setting, side: Side, value: Value, _editor: &Editor, ui: &Ui, focus: bool) -> El {
+fn theme_control(
+    setting: &'static crate::theme::setting::Setting,
+    side: Side,
+    value: Value,
+    _editor: &Editor,
+    ui: &Ui,
+    focus: bool,
+    layer: &mut Vec<El>,
+) -> El {
     let key = setting.key;
     let control_key = format!("{EDIT}-{key}-{}", side.key());
     match (&setting.kind, value) {
-        (Kind::Choice { choices, .. }, Value::Choice(id)) if key == crate::theme::phantom::MOTION => {
-            // PROTOTYPE (#417): three choices, one under another: the last is long.
-            let c = ui.tokens().c.clone();
-            let mut list = col().w_full().gap(4.0).py(8.0).role("radiogroup").label(setting.label.to_owned());
-            for ch in choices.iter() {
-                let shown = crate::theme::phantom::proto::env("motion").unwrap_or_else(|| id.to_owned());
-                let on = ch.id == shown;
-                let dot = el()
-                    .size(16.0, 16.0)
-                    .radius(8.0)
-                    .border(1.0, if on { c.bg_accent } else { c.border_strong })
-                    .center()
-                    .children(on.then(|| el().size(8.0, 8.0).radius(4.0).fill(c.bg_accent).a11y_hidden()));
-                let ch_id = ch.id;
-                list = list.child(
-                    row()
-                        .key(format!("{control_key}-{ch_id}"))
-                        .role("radio")
-                        .label(ch.label.to_owned())
-                        .gap(8.0)
-                        .center_y()
-                        .min_h(24.0)
-                        .on_press(move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Choice(ch_id)))
-                        .child(dot)
-                        .child(rune::text(ch.label.to_owned()).font(ui.tokens().ty.ui).color(c.text_base).wrap().min_w(0.0)),
-                );
-            }
-            list
-        }
         (Kind::Choice { choices, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
+            // PROTOTYPE (#417): Motion is always a dropdown, its labels long; any other choice
+            // whose segments don't fit its cell becomes one too.
+            if key == crate::theme::phantom::MOTION || !crate::theme::phantom::proto::segments_fit(&labels) {
+                use crate::theme::phantom::proto;
+                let shown = proto::env("motion").filter(|_| key == crate::theme::phantom::MOTION);
+                let selected = shown.and_then(|m| choices.iter().position(|c| c.id == m)).unwrap_or(selected);
+                let (toggle, close) = (control_key.clone(), control_key.clone());
+                let open = proto::menu().as_deref() == Some(control_key.as_str());
+                let pop = ui.popup_button(
+                    control_key,
+                    setting.label,
+                    &labels,
+                    selected,
+                    open,
+                    focus,
+                    move |_: &mut SettingsWindow| proto::toggle_menu(&toggle),
+                    move |_: &mut SettingsWindow| {
+                        if proto::menu().as_deref() == Some(close.as_str()) {
+                            proto::toggle_menu(&close)
+                        }
+                    },
+                    move |s: &mut SettingsWindow, i| {
+                        proto::toggle_menu("");
+                        set_theme(s, side, key, Value::Choice(choices[i].id))
+                    },
+                    layer,
+                );
+                // Narrow: the trigger's own 8 pt of padding is given back, so its text fits.
+                return if proto::narrow() { pop.ml(-8.0) } else { pop };
+            }
             ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut SettingsWindow, i| {
                 set_theme(s, side, key, Value::Choice(choices[i].id))
             })
@@ -593,50 +610,49 @@ fn swatch_tip(key: &str, rgb: Value, ui: &Ui) -> String {
             let now = proto::read(ui.tokens(), d);
             if now.a < 1.0 { format!("{} at {:.0}%", d.base, now.a * 100.0) } else { format!("{} · follows {}", proto::hex(now), d.base) }
         }
-        None => proto::base_now(key, ui.tokens()).map_or(String::new(), |c| format!("{} · Phantom's colour", proto::hex(c))),
+        None => proto::base_now(key, ui.tokens()).map_or(String::new(), |c| format!("{} · theme default", proto::hex(c))),
     }
 }
 
-/// PROTOTYPE (#417): the editor under a swatch pressed: the hex, where it comes from, and, for a
-/// colour set by hand, Follow.
-fn colour_editor(setting: &'static crate::theme::setting::Setting, side: Side, value: Value, editor: &Editor, ui: &Ui) -> El {
+/// PROTOTYPE (#417): the popup of a swatch pressed, next to it as a browser's colour picker is:
+/// the picker, a hex field, Follow <base> (a derived colour set by hand) or Reset (a base changed
+/// from the theme default), and under them any contrast warning.
+fn colour_popup(setting: &'static crate::theme::setting::Setting, side: &str, value: Value, ui: &Ui, layer: &mut Vec<El>) {
     use crate::theme::phantom::proto;
     let key = setting.key;
-    let rgb = match value {
-        Value::Colour(rgb) => rgb,
-        _ => return el(),
-    };
+    let Value::Colour(rgb) = value else { return };
     let follows = rgb == proto::FOLLOW;
     let derived = proto::derived(key);
-    let control_key = format!("{EDIT}-{key}-{}", side.key());
-    let (text, status) = if follows {
-        let now = derived.map(|d| proto::read(ui.tokens(), d)).or_else(|| proto::base_now(key, ui.tokens())).unwrap_or(rune::Color::BLACK);
-        let hex = if now.a < 1.0 { format!("{:.0}%", now.a * 100.0) } else { proto::hex(now) };
-        (rune::TextEdit::new(hex), derived.map_or("Phantom's colour".to_owned(), |d| format!("Follows {}", d.base)))
+    let now = if follows {
+        derived.map(|d| proto::read(ui.tokens(), d)).or_else(|| proto::base_now(key, ui.tokens())).unwrap_or(rune::Color::BLACK)
     } else {
-        let t = editor.colour(side, key).map_or_else(|| rune::TextEdit::new(rgb.hex()), |f| f.text.clone());
-        (t, "Set by hand".to_owned())
+        rgb.color()
     };
-    let field = ui.text_field(format!("{control_key}-hex"), &text, setting.label).width(COLOUR_WIDTH).build();
-    let mut line = row()
-        .key(format!("{control_key}-editor"))
-        .w_full()
-        .gap(8.0)
-        .center_y()
-        .py(4.0)
-        .pb(8.0)
-        .child(field)
-        .child(ui.caption(status).min_w(0.0).wrap());
-    if let (false, Some(d)) = (follows, derived) {
+    let hex = if now.a < 1.0 { format!("{:.0}%", now.a * 100.0) } else { proto::hex(now) };
+    let id = format!("{key}|{side}");
+    let which = if side == "dark" { Side::Only(Appearance::Dark) } else { Side::Only(Appearance::Light) };
+    let ck = format!("{EDIT}-{key}-{side}");
+    let field = ui.text_field(format!("{ck}-hex"), &rune::TextEdit::new(hex), setting.label).width(COLOUR_WIDTH).build();
+    let mut line = row().gap(8.0).center_y().child(field);
+    if !follows {
+        let (label, accessible) = match derived {
+            Some(d) => (format!("Follow {}", d.base), format!("Follow {}", d.base)),
+            None => ("Reset".to_owned(), format!("Reset {} to the theme default", setting.label)),
+        };
         line = line.child(
-            ui.button(format!("{EDIT}-{key}-follow-{}", side.key()), "Follow")
+            ui.button(format!("{ck}-reset"), &label)
                 .small()
-                .accessible(&format!("Follow {}", d.base))
-                .on_press(move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Colour(proto::FOLLOW)))
+                .accessible(&accessible)
+                .on_press(move |s: &mut SettingsWindow| set_theme(s, which, key, Value::Colour(proto::FOLLOW)))
                 .build(),
         );
     }
-    line
+    let mut below = vec![line];
+    for (n, w) in proto::warnings(key, ui.tokens()).into_iter().enumerate() {
+        below.push(ui.warning_line(&format!("{ck}-warning-{n}"), w));
+    }
+    let body = ui.picker_body(&ck, now, below);
+    ui.popup_under(&format!("{ck}-popup"), &format!("{ck}-swatch"), body, move |_: &mut SettingsWindow| proto::toggle_open(&id), layer);
 }
 
 /// The Look Presets: the Active look's row, then a row for each saved one, in the order they were
