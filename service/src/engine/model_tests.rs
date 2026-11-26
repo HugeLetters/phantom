@@ -782,6 +782,8 @@ impl Model {
     /// an error. Either way it's refused. With the trash held, the first item goes, and the rest
     /// wait for the gate.
     fn delete(&mut self, id: TorrentId, pack: usize) -> Answer {
+        // What ran before it on the lane has started.
+        self.grant_running();
         // A folder that isn't there (every file moved to the Trash by a Move to Trash took it) has nothing to go.
         let items: Vec<Item> = if !self.folder[pack] {
             Vec::new()
@@ -2371,7 +2373,12 @@ impl Model {
                 p.open[f] = None;
             }
         }
-        // Let run, its files are granted, those not there made (#374).
+        self.grant_running();
+    }
+
+    /// Each torrent let run has its files granted, those not there made (#374): as it starts, before
+    /// anything after it on its lane.
+    fn grant_running(&mut self) {
         for t in self.torrents.values_mut() {
             let Torrent::Pack(p) = t else { continue };
             if !matches!(p.status(), Status::Seeding | Status::Downloading) || p.letting_go || p.deleting || p.delete_failed {
@@ -3571,6 +3578,20 @@ fn a_file_put_back_by_hand_then_moved_to_the_trash_isnt_had_after_a_restart() {
         Step::PutBack { pack: 0, file: 2 },
         Step::TrashFiles { id: 1, files: vec![2] },
         Step::Restart,
+    ]);
+}
+
+/// Found at 256 cases (#374): a Resume behind a Delete's rollback starts the torrent, which makes the
+/// file that wasn't there; the Delete after it takes that file to the Trash with the rest.
+#[test]
+fn a_file_made_as_a_resume_behind_a_rollback_starts_goes_with_the_next_delete() {
+    replay(&[
+        Step::DeleteFile { pack: 0, file: 0 },
+        Step::Add { pack: Some(0), paused: true },
+        Step::Burst(vec![Step::HoldTrash, Step::Delete(0)]),
+        Step::Burst(vec![Step::Undo, Step::Resume(0)]),
+        Step::Delete(0),
+        Step::ReleaseTrash,
     ]);
 }
 
