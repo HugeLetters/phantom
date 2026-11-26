@@ -5585,6 +5585,7 @@ async fn send_end(engine: &Engine, id: u64, task: tokio::task::Id, added: anyhow
 
 mod counted;
 mod crashed;
+mod late_write;
 mod letgo;
 mod links;
 mod moving;

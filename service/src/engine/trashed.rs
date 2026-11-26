@@ -619,6 +619,8 @@ impl Layout {
 /// keeps it open, and a write or a length set through it would change it there, so its undo
 /// wouldn't find it as it went. Its length isn't set; what's written into it is kept aside, and read
 /// over the file; the file itself is read where it went (#218's S1), opened there after a restart.
+/// A write through a storage already taken is refused, as for every other file: librqbit asks
+/// for the piece again.
 pub(super) struct Files {
     layout: Layout,
     destination: PathBuf,
@@ -642,7 +644,8 @@ enum Place<'a> {
     InPlace(&'a std::fs::File),
     /// In the Trash for an undo: read where it went (if it's open), never made again at its path.
     Trashed(Option<&'a std::fs::File>),
-    /// Moved or gone some other way, or never there: made again where it's written.
+    /// Moved or gone some other way, or never there: made again where it's written. Or the storage
+    /// was taken: neither read nor written ([`Opened::HandedOn`]).
     Elsewhere,
 }
 
@@ -655,11 +658,15 @@ impl Files {
     }
 
     /// Where the file of `path`, as `opened`, stands now. Looked at on disk only for a file a Move to
-    /// Trash took: its undo puts it back, and may take it back to the Trash, without a move.
+    /// Trash took: its undo puts it back, and may take it back to the Trash, without a move. One
+    /// handed on is [`Place::Elsewhere`], whose write makes nothing ([`Handle::change`] refuses it).
     fn place<'a>(&self, path: Option<&Path>, opened: &'a Opened) -> Place<'a> {
         let file = match opened {
             Opened::File(file) => Some(file),
-            Opened::NotThere | Opened::HandedOn => None,
+            Opened::NotThere => None,
+            // Through a storage already taken, its peer late: refused, in the Trash too, where it
+            // would replace what a newer storage kept, which the undo writes into the file (#374).
+            Opened::HandedOn => return Place::Elsewhere,
         };
         let (looked, trashed) = match (path, self.torrent.any.load(Ordering::SeqCst)) {
             (Some(path), true) => {
@@ -1504,24 +1511,40 @@ mod tests {
         taken.pread_exact(1, 0, &mut [0; 10]).unwrap();
     }
 
-    /// A write into a file in the Trash through a storage already taken, its peer late at a pause: kept
-    /// aside as any other, even once the torrent was taken out.
+    /// A write into a file in the Trash through a storage already taken, its peer late at a pause, is
+    /// refused, as for every other file: kept, it would replace a newer part, which its undo would
+    /// write into the file. Whether the new storage has the files (taken) or the torrent was taken
+    /// out and added again (out). A read through it is refused too.
     #[test]
-    fn a_late_write_into_a_file_in_the_trash_is_kept_aside() {
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (Trashed::default(), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let files = storage(&trashed, dir.path(), &path);
-        take(&trashed, &trash, dir.path(), &path);
-        let taken = files.take().unwrap();
-        files.pwrite_all(0, 0, &[2; 10]).unwrap();
-        drop(taken);
-        files.pwrite_all(0, 10, &[3; 10]).unwrap();
-        files.pread_exact(0, 5, &mut [0; 10]).unwrap();
-        assert!(files.pread_exact(0, 0, &mut [0; 30]).is_err(), "the file itself is no longer its own");
-        assert!(!path.exists());
-        assert_eq!(trashed.put_back("t", &[(0, path)]).written, BTreeSet::new(), "not back yet");
+    fn a_late_write_into_a_file_in_the_trash_is_refused() {
+        for out in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let parts = dir.path().join("parts");
+            let trashed = Trashed::default().keeping_parts_in(parts.clone());
+            let path = dir.path().join("a.bin");
+            std::fs::write(&path, [1; 100]).unwrap();
+            let old = storage(&trashed, dir.path(), &path);
+            take(&trashed, &bin(dir.path()), dir.path(), &path);
+            let mut new = old.take().unwrap();
+            if out {
+                drop(new);
+                let mut again = trashed.storage("t", Layout::new(dir.path().to_owned(), Some(&[])), dir.path().to_owned());
+                let opened = again.open_off(0, &path).unwrap();
+                again.files = trashed.torrent("t").slots.open(vec![(Some(path.clone()), opened)]);
+                new = Box::new(again);
+            }
+            new.pwrite_all(0, 0, &[2; 10]).unwrap();
+            assert!(old.pwrite_all(0, 0, &[3; 10]).is_err(), "out={out}: written late");
+            assert!(old.pwrite_all(0, 50, &[3; 10]).is_err(), "out={out}: written late where nothing was");
+            assert!(old.pread_exact(0, 0, &mut [0; 10]).is_err(), "out={out}: read late");
+            let mut read = [0; 10];
+            new.pread_exact(0, 0, &mut read).unwrap();
+            assert_eq!(read, [2; 10], "out={out}: the newer part");
+            assert_eq!(std::fs::read(parts.join("t/0/0")).unwrap(), [2; 10], "out={out}: on disk");
+            assert!(!parts.join("t/0/50").exists(), "out={out}");
+            drop(new);
+            assert_eq!(trashed.put_back("t", &[(0, path)]).written, BTreeSet::new(), "out={out}: not back yet");
+        }
     }
 
     /// A file in the Trash that can't be opened where it went after a restart (the Trash out of
