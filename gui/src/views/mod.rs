@@ -34,11 +34,12 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     s.mounted.begin();
     let look = s.looks.borrow().shown(Appearance::of(cx.system_dark())).clone();
     let ui = &look.ui;
+    let sp = ui.spacing();
     cx.help_look(ui.help_look());
     let mut overlays = Vec::new();
     // The room the list and the pane share, as last laid out; the window's default size before
     // the first layout.
-    let [width, room] = cx.layout_size("body").map_or([936.0, 420.0], |[w, h]| [w - 2.0 * MARGIN, h]);
+    let [width, room] = cx.layout_size("body").map_or([936.0, 420.0], |[w, h]| [w - 2.0 * sp.margin, h]);
     let fitted = table::fitted(s, ui, width);
     let shown: Vec<Column> = fitted.iter().map(|(c, _)| *c).collect();
     s.drawn_columns.borrow_mut().clone_from(&shown);
@@ -48,7 +49,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         table::torrent_table(s, ui, &fitted, width)
     });
     let list = list.children((!s.torrents.is_empty()).then(|| ui.focus_goes_nowhere()));
-    let mut body = col().key("body").w_full().grow(1.0).min_h(0.0).px(MARGIN).child(list);
+    let mut body = col().key("body").w_full().grow(1.0).min_h(0.0).px(sp.margin).child(list);
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
         let files = torrent.content.map(|_| s.pane.details.as_ref().filter(|d| d.id == torrent.id).map_or(1, |d| d.files.len()));
         let pane = layout::pane(room, details::content(torrent, files), s.prefs.dragged(), s.torrents.len());
@@ -70,6 +71,8 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         inset,
         add: cx.layout_size("add-focus").map_or(50.0, |[w, _]| w),
         add_file: cx.layout_size("add-file").map_or(84.0, |[w, _]| w),
+        edge: sp.s6,
+        gap: sp.s3,
     };
     let toolbar = toolbar::toolbar(s, ui, band, &mut overlays);
     let page = ui.page().key("app").child(toolbar);
@@ -77,9 +80,9 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     // The room above the status bar for its popover, from where it was last drawn: under the
     // toolbar, and under the message by Add while it's shown, which the popover never covers.
     let under = |key: &str| cx.layout(key).map(|at| at[1] + at[3]);
-    let top = under("toolbar").into_iter().chain(under("add-note-content")).fold(inset, f32::max) + 8.0;
-    let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - 4.0);
-    page = page.child(row().w_full().px(MARGIN).pt(8.0).pb(10.0).child(status_bar::status_bar(s, ui, room, &mut overlays)));
+    let top = under("toolbar").into_iter().chain(under("add-note-content")).fold(inset, f32::max) + sp.s4;
+    let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - sp.s2);
+    page = page.child(row().w_full().px(sp.margin).pt(sp.s4).pb(sp.s5).child(status_bar::status_bar(s, ui, room, &mut overlays)));
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
     let window = cx.layout("app").map(|at| (at[2], at[3]));
     row_menu::overlay(s, ui, window, |key| cx.layout(key), &mut overlays);
@@ -97,15 +100,12 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     )
 }
 
-/// The window's margin, either side of the list, the pane and the status bar.
-const MARGIN: f32 = 12.0;
-
 /// The divider between the list and the pane, `height` tall now in `room`: a drag moves it, the
 /// pane never under a one-line header over one file nor into the list's header and three rows; let
 /// go, its height is kept (`gui.json`).
 fn divider(ui: &Ui, room: f32, height: f32) -> El {
     let clamp = move |h: f32| h.clamp(layout::PANE_LEAST, layout::pane_most(room).max(layout::PANE_LEAST));
-    ui.divider(layout::DIVIDER).key("divider").on_drag(move |s: &mut Phantom, d: &mut Drag, _: &mut Tx| match d.phase {
+    ui.divider(ui.spacing().divider).key("divider").on_drag(move |s: &mut Phantom, d: &mut Drag, _: &mut Tx| match d.phase {
         Phase::Down => d.data = height,
         Phase::Move => s.prefs.dragging = Some(clamp(d.data - d.dy)),
         Phase::Up if d.cancelled() => s.prefs.dragging = None,

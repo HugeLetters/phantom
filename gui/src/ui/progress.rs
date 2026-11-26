@@ -20,7 +20,7 @@ pub(super) fn phantom(ui: &Ui, fraction: f32) -> El {
     bar.c.border_weak = rune::Color::TRANSPARENT;
     row()
         .w_full()
-        .gap(8.0)
+        .gap(ui.spacing().s4)
         .center_y()
         .child(el().grow(1.0).child(Progress::new(Some(fraction)).build(&bar)))
         .child(text(format!("{:.0}%", (fraction * 100.0).floor())).font(k.ty.text_small).color(k.c.text_muted).w(34.0).align(Align::End))

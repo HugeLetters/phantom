@@ -23,7 +23,7 @@ pub(super) fn phantom_tab(ui: &Ui, label: &str, selected: bool) -> El {
     rune::col()
         .h_full()
         .justify_end()
-        .gap(5.0)
+        .gap(ui.spacing.tab_mark_gap)
         .cursor(rune::Cursor::Pointer)
         .role("tab")
         .label(label.to_owned())
@@ -35,7 +35,7 @@ pub(super) fn phantom_tab(ui: &Ui, label: &str, selected: bool) -> El {
 /// Phantom's tab bar: the tabs in a row, a hairline under them.
 pub(super) fn phantom_tab_bar(ui: &Ui, tabs: Vec<El>) -> El {
     let rule = el().key("rule").pin(Some(0.0), None, Some(0.0), Some(0.0)).h(1.0).fill(ui.k.c.border_weak);
-    row().role("tablist").px(10.0).gap(18.0).child(rule).children(tabs)
+    row().role("tablist").px(ui.spacing().s5).gap(ui.spacing.tabs_gap).child(rule).children(tabs)
 }
 
 /// Phantom puts nothing in the band's free room: it's only there to drag the window by.

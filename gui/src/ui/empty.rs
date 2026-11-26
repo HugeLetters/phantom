@@ -11,7 +11,7 @@ impl Ui {
             .w_full()
             .h_full()
             .center()
-            .gap(6.0)
+            .gap(self.spacing.s3)
             .child(text(title.to_owned()).font(self.k.ty.body_medium).color(self.k.c.text_base))
             .child(text(hint.to_owned()).font(self.k.ty.text_small).color(self.k.c.text_muted))
     }

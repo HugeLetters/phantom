@@ -10,10 +10,9 @@ use std::ops::Add;
 use super::{Icon, Tone, Ui};
 use crate::notice::{Line, Listing};
 
-/// The popover's padding; part of it inside the scrolling body, so a focused control's ring isn't
-/// cut off at its edges; how far its edges fade while there's more under them; what its pager
-/// takes of its height.
-const PANEL_PADDING: f32 = 10.0;
+/// Of the popover's padding (the look's `s5`), what's inside the scrolling body, so a focused
+/// control's ring isn't cut off at its edges; how far its edges fade while there's more under them;
+/// what its pager takes of its height.
 const RING_ROOM: f32 = 4.0;
 const FADE: f32 = 16.0;
 const HEAD_ROOM: f32 = 40.0;
@@ -37,10 +36,10 @@ impl Ui {
         let k = &self.k;
         let button = row()
             .key("notice")
-            .gap(6.0)
+            .gap(self.spacing.s3)
             .center_y()
-            .h(20.0)
-            .px(6.0)
+            .h(self.spacing.status_line)
+            .px(self.spacing.s3)
             .radius(k.radius.sm)
             .role("button")
             .focusable(true)
@@ -89,7 +88,7 @@ impl Ui {
             Line::Muted(t) => text(t.clone()).font(k.ty.text_small).color(k.c.text_muted).wrap(),
             Line::Path(t) => self.listing_path(t),
         };
-        let groups = listing.groups.iter().map(|group| col().w_full().gap(2.0).children(group.iter().map(line)));
+        let groups = listing.groups.iter().map(|group| col().w_full().gap(self.spacing.s1).children(group.iter().map(line)));
         col().key("notice-listing").w_full().gap(if listing.is_apart() { 6.0 } else { 2.0 }).children(groups)
     }
 
@@ -121,16 +120,16 @@ impl Ui {
     /// padding and border.
     pub fn notice_need(&self, line: &str, listing: Option<&Listing>, buttons: &[(String, Option<String>)]) -> f32 {
         use rune::text::advance;
-        let k = &self.k;
+        let (k, sp) = (&self.k, &self.spacing);
         // Mark and its gap; × and its gap; the panel's padding and border.
-        let (mark, cross, frame) = (16.0 + 8.0, 8.0 + 24.0, 2.0 * PANEL_PADDING + 2.0);
+        let (mark, cross, frame) = (16.0 + sp.s4, 8.0 + 24.0, 2.0 * sp.s5 + 2.0);
         let title = mark + advance(line, k.ty.text_small_medium) + cross;
         // A path counts for its real width; the popover cuts it in the middle at its widest.
         let texts = listing.into_iter().flat_map(Listing::lines).map(|l| mark + advance(l.text(), k.ty.text_small));
         let row: f32 = buttons
             .iter()
             .map(|(label, hint)| {
-                20.0 + advance(label, k.ty.small_medium) + hint.as_ref().map_or(0.0, |h| 6.0 + advance(h, k.ty.text_xsmall)) + 8.0
+                20.0 + advance(label, k.ty.small_medium) + hint.as_ref().map_or(0.0, |h| sp.s3 + advance(h, k.ty.text_xsmall)) + sp.s4
             })
             .sum();
         texts.chain([title, row]).fold(0.0, f32::max).add(frame)
@@ -187,7 +186,7 @@ impl Ui {
             .key(format!("{key}-scroll"))
             .shrink()
             .min_h(0.0)
-            .max_h(tallest - 2.0 * PANEL_PADDING - head_room)
+            .max_h(tallest - 2.0 * self.spacing.s5 - head_room)
             .scroll(ScrollSpec { stick_bottom: false })
             .scroll_edge_fade(FADE)
             .scroll_margin(FADE)
@@ -210,8 +209,8 @@ impl Ui {
             .role("dialog")
             .w(width)
             .max_h(tallest)
-            .padding(PANEL_PADDING - RING_ROOM)
-            .gap(2.0)
+            .padding(self.spacing.s5 - RING_ROOM)
+            .gap(self.spacing.s1)
             .children(head.map(|head| head.px(RING_ROOM)))
             .child(body)
             .child(self.tail(fill, border))

@@ -42,7 +42,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         let foot = row()
             .key("buttons")
             .w_full()
-            .gap(8.0)
+            .gap(ui.spacing().s4)
             .child(el().grow(1.0))
             .child(cancel())
             .child(ui.button("clash-move", move_in).primary().on_press(submit_name).build());
@@ -70,13 +70,14 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
     let room = window.is_none_or(|(_, h)| h >= ROOMY);
     let paths = paths(clash, ui, show, if room { PATHS } else { 1 });
     // The buttons along the bottom, at the right, the default last, as macOS orders them.
-    let buttons = |choices: Vec<El>| row().key("clash-choices").w_full().gap(8.0).center_y().child(el().grow(1.0)).children(choices);
-    let foot = |choices: Vec<El>| col().key("buttons").w_full().gap(10.0).children(rest).child(buttons(choices));
+    let buttons =
+        |choices: Vec<El>| row().key("clash-choices").w_full().gap(ui.spacing().s4).center_y().child(el().grow(1.0)).children(choices);
+    let foot = |choices: Vec<El>| col().key("buttons").w_full().gap(ui.spacing().s5).children(rest).child(buttons(choices));
     match &clash.other {
         Some(_) => {
             let title = display::clash_title(&display::clash_question_another(&clash.name, &clash.to), clash.at, clash.of);
             let keeps = ui.dialog_line(display::clash_another_keeps());
-            let body = col().key("clash-body").w_full().gap(6.0).child(keeps).child(paths);
+            let body = col().key("clash-body").w_full().gap(ui.spacing().s3).child(keeps).child(paths);
             let show = ui.button("clash-show-in-list", display::clash_show_in_list()).on_press_tx(show_in_list).build();
             let foot = foot(vec![presses(show, show_in_list), cancel(), rename_button(true)]);
             let on_key = |s: &mut Phantom, ev: &KeyEvent, _: &mut Tx| return_does(ev, || rename(s));
@@ -127,7 +128,7 @@ fn paths(clash: &Clash, ui: &Ui, show: &str, most: usize) -> El {
     };
     let lines = files.iter().take(most).enumerate().map(|(i, f)| {
         let path = ui.dialog_path(&f.display().to_string());
-        let line = row().w_full().gap(8.0).center_y().child(path);
+        let line = row().w_full().gap(ui.spacing().s4).center_y().child(path);
         if i == 0 {
             let button = ui.button("clash-reveal", show).small().on_press(reveal).build();
             // With the focus, Return presses it, as on any button of the dialog.
@@ -140,7 +141,7 @@ fn paths(clash: &Clash, ui: &Ui, show: &str, most: usize) -> El {
     let first: Vec<El> = lines.collect();
     let more = files.len().saturating_sub(most);
     let more = (more > 0).then(|| ui.dialog_line(&display::clash_more(more)));
-    col().key("clash-files").w_full().gap(2.0).children(first).children(more)
+    col().key("clash-files").w_full().gap(ui.spacing().s1).children(first).children(more)
 }
 
 /// Rename…'s field: Return moves the torrent in under the name, Escape goes back to the choices; a

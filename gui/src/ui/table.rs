@@ -17,12 +17,18 @@ const DISABLED: f32 = 0.5;
 impl Ui {
     /// The table, filling the height its parent gives it.
     pub fn table<S: 'static>(&self, s: &S, table: Table<S>) -> El {
-        table.build(s, &self.k)
+        table.style(self.table_style()).build(s, &self.k)
+    }
+
+    /// The kit's table style, with the look's row and header heights and cell padding.
+    fn table_style(&self) -> TableStyle {
+        let sp = &self.spacing;
+        TableStyle { row_height: sp.row, header_height: sp.table_header, cell_pad: sp.cell_pad, ..TableStyle::from_kit(&self.k) }
     }
 
     /// Text as a table draws it, in `tone`: for a cell that is an element, see [`Ui::menu_cell`].
     pub fn cell_text(&self, text_: impl Into<String>, tone: Tone, mono: bool) -> El {
-        let style = TableStyle::from_kit(&self.k);
+        let style = self.table_style();
         let color = match tone {
             Tone::Normal => style.text,
             Tone::Muted => style.muted,
@@ -40,7 +46,7 @@ impl Ui {
 
     /// How wide a cell holding `text_` is, padding included, as [`Ui::cell_text`] sets it.
     pub fn cell_width(&self, text_: &str) -> f32 {
-        let style = TableStyle::from_kit(&self.k);
+        let style = self.table_style();
         rune::text::measure(text_, &[], style.font, None).0 + 2.0 * style.cell_pad
     }
 
@@ -49,7 +55,7 @@ impl Ui {
 
     /// How wide a column's header is with its sort mark, padding included.
     pub fn header_width(&self, title: &str) -> f32 {
-        let style = TableStyle::from_kit(&self.k);
+        let style = self.table_style();
         rune::text::measure(title, &[], style.header_font, None).0 + 2.0 * style.cell_pad + Self::SORT_MARK
     }
 
@@ -74,7 +80,7 @@ impl Ui {
         let why = why.into();
         let icon = icon(self.icon(Icon::Warning), 14.0).color(color).key(key.into());
         row()
-            .gap(4.0)
+            .gap(self.spacing.s2)
             .center_y()
             .min_w(0.0)
             .child(text(text_.into()).font(self.k.ty.text_small).color(color).truncate().shrink().min_w(0.0))

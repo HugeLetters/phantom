@@ -18,6 +18,7 @@ pub mod phantom;
 pub mod preset;
 pub mod saved;
 pub mod setting;
+mod spacing;
 #[cfg(all(debug_assertions, not(test)))]
 pub mod standin;
 
@@ -32,6 +33,7 @@ use crate::model::Phantom;
 use crate::ui::{BlockOverrides, Blocks, Ui};
 pub use colours::Colours;
 use setting::{Setting, Values};
+pub use spacing::Spacing;
 
 /// A theme: built into the app, with its assets in its own folder.
 pub trait Theme: Sync {
@@ -55,6 +57,8 @@ pub struct Built {
     pub tokens: Kit,
     /// The colours its blocks draw that `tokens` has no field for.
     pub colours: Colours,
+    /// The room between and around things, and the fixed heights.
+    pub spacing: Spacing,
     /// The blocks it draws itself; the rest are its parent's.
     pub blocks: BlockOverrides,
     /// The screens it lays out itself, as a last resort; the rest are its parent's.
@@ -148,7 +152,7 @@ impl Look {
         }
         let base = (Blocks::phantom(phantom::icon), Screens::phantom());
         let (blocks, screens) = chain.iter().rev().fold(base, |(blocks, screens), (b, s)| (blocks.over(b), screens.over(s)));
-        Look { ui: Ui::new(built.tokens, built.colours, blocks), screens, app_icon: built.app_icon }
+        Look { ui: Ui::new(built.tokens, built.colours, built.spacing, blocks), screens, app_icon: built.app_icon }
     }
 }
 

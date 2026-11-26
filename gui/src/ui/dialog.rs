@@ -50,14 +50,15 @@ impl Ui {
             .mt(-2.0)
             .mr(-2.0);
         let title = text(title.to_owned()).key(format!("{key}-title")).font(k.ty.ui_medium.lh(20.0)).color(c.text_base).wrap();
-        let head = row().key("header").w_full().gap(12.0).items_start().child(col().grow(1.0).min_w(0.0).child(title)).child(dismiss);
+        let head =
+            row().key("header").w_full().gap(self.spacing.s6).items_start().child(col().grow(1.0).min_w(0.0).child(title)).child(dismiss);
         let panel = col()
             .key(format!("{key}-dialog"))
             .role("dialog")
             .w_full()
             .max_w(WIDTH)
-            .padding(16.0)
-            .gap(14.0)
+            .padding(self.spacing.s7)
+            .gap(self.spacing.dialog_gap)
             .child(head)
             .child(body)
             .child(foot)
@@ -75,7 +76,7 @@ impl Ui {
         let surface = surface.border(1.0, self.colours.dialog_edge);
         let surface = surface.modal(true, on_close).modal_click_outside(false).token_motion(k.motion.overlay);
         layer.push(el().key(format!("{key}-scrim")).absolute(0.0, 0.0).w_full().h_full().fill(c.scrim).a11y_hidden());
-        layer.push(el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(16.0).center().child(surface));
+        layer.push(el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(self.spacing.s7).center().child(surface));
     }
 
     /// A labelled checkbox in a dialog; a press calls `on_toggle`, which flips it in the app's state.

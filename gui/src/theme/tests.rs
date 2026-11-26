@@ -47,6 +47,7 @@ impl Theme for Sample {
         let tokens = Kit::neutral(false);
         Built {
             colours: crate::theme::Colours::of(&tokens),
+            spacing: crate::theme::Spacing::phantom(),
             tokens,
             blocks: BlockOverrides {
                 icons: Some(Rc::new(|icon| (icon == Icon::Copy).then_some(&SAMPLE_COPY))),
@@ -87,6 +88,7 @@ impl Theme for Link {
     fn build(&self, _: &Values) -> Built {
         Built {
             colours: crate::theme::Colours::of(&Kit::neutral(false)),
+            spacing: crate::theme::Spacing::phantom(),
             tokens: Kit::neutral(false),
             blocks: self.blocks.clone(),
             screens: self.screens.clone(),

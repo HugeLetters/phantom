@@ -689,7 +689,7 @@ fn the_link_field_is_centred_in_the_band() {
         let field = rect(&rt, "magnet-field");
         let add = rect(&rt, "add-focus");
         let band = rect(&rt, "toolbar");
-        assert_eq!((band[1], band[3]), (0.0, toolbar::BAND), "the band");
+        assert_eq!((band[1], band[3]), (0.0, crate::theme::Spacing::phantom().toolbar), "the band");
         assert!(field[1] >= 0.0 && field[1] + field[3] <= band[3], "the field in the band");
         assert!(add[0] > field[0] + field[2] && rect(&rt, "add-file")[0] > add[0] + add[2], "Add, then Add file…, after the field");
         let middle = (field[0] + add[0] + add[2]) / 2.0;

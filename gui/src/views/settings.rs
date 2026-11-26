@@ -101,7 +101,7 @@ fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: Appe
     let page = match (sheet.tab, &sheet.service) {
         (Tab::Appearance, _) => col()
             .w_full()
-            .gap(12.0)
+            .gap(ui.spacing().s6)
             .child(section(ui, display::setting_label(presets::SETTING), look_presets(s, sheet, ui, appearance)))
             .child(ui.card([app_icon(&s.app_icon, sheet, ui)])),
         (tab, Some(settings)) => ui.card(service_rows(tab, settings, s, sheet, ui)),
@@ -149,7 +149,7 @@ fn default_destination(settings: &Settings, unavailable: Option<&proto::Unavaila
         None => "None: every add asks where".into(),
     };
     let controls = row()
-        .gap(6.0)
+        .gap(ui.spacing().s3)
         .child(ui.button("choose-folder", "Choose…").first_focus(first(sheet, "default_destination")).on_press_tx(choose_folder).build())
         .child(ui.button("clear-folder", "Clear").disabled(settings.default_destination.is_none()).on_press(clear_folder).build());
     let mut notes = notes(sheet, Row::Folder, Some(folder));
@@ -165,7 +165,7 @@ fn listen_port(settings: &Settings, sheet: &SettingsSheet, ui: &Ui) -> El {
         .on_key(escape_key)
         .width(width_of("port-field"))
         .build();
-    let mut controls = row().gap(6.0).center_y().child(field);
+    let mut controls = row().gap(ui.spacing().s3).center_y().child(field);
     if matches!(settings.listen_port, ListenPort::Pinned(_)) {
         controls = controls.child(ui.button("pick-port", "Pick automatically").on_press(pick_port_automatically).build());
     }
@@ -226,7 +226,7 @@ fn switch(which: Switch, sheet: &SettingsSheet, ui: &Ui) -> El {
 
 /// A section of a tab: `title` over `content`.
 fn section(ui: &Ui, title: &str, content: El) -> El {
-    col().w_full().gap(8.0).child(ui.heading(title)).child(content)
+    col().w_full().gap(ui.spacing().s4).child(ui.heading(title)).child(content)
 }
 
 /// The editor of a Look Preset's theme settings, in two columns, ☀ Light and ☾ Dark
@@ -281,7 +281,7 @@ fn editor(
         )
     };
     let theme_joined = matches!(rows, ThemeRows::Same { theme_joined: true, .. });
-    let page = col().w_full().gap(4.0);
+    let page = col().w_full().gap(ui.spacing().s2);
     match rows {
         ThemeRows::Same { rows, .. } => {
             let theme = match theme_joined {
@@ -317,7 +317,7 @@ fn editor(
             };
             let light = column(Side::Only(Appearance::Light), &light);
             let dark = column(Side::Only(Appearance::Dark), &dark);
-            page.child(row().key("halves-columns").w_full().gap(8.0).items_start().child(light).child(dark))
+            page.child(row().key("halves-columns").w_full().gap(ui.spacing().s4).items_start().child(light).child(dark))
         }
     }
 }
@@ -387,7 +387,15 @@ const EDIT: &str = "edit";
 fn save_as(sheet: &SettingsSheet, ui: &Ui) -> Option<El> {
     let save_as = sheet.save_as.as_ref()?;
     // As tall asking Replace? as with its field, so the list under it stays put (#343).
-    let line = row().key("save-as").w_full().min_h(SAVE_AS_HEIGHT).gap(6.0).center_y().justify_end().px(8.0).pb(4.0);
+    let line = row()
+        .key("save-as")
+        .w_full()
+        .min_h(SAVE_AS_HEIGHT)
+        .gap(ui.spacing().s3)
+        .center_y()
+        .justify_end()
+        .px(ui.spacing().s4)
+        .pb(ui.spacing().s2);
     if let Some(name) = &save_as.replace {
         let ask = ui.caption(display::replace_preset(name.as_str())).key("save-as-replace-ask");
         let replace = ui.button(presets::REPLACE, "Replace").first_focus(first(sheet, presets::REPLACE)).on_press(presets::replace).build();
@@ -403,7 +411,7 @@ fn save_as(sheet: &SettingsSheet, ui: &Ui) -> Option<El> {
         .width(SAVE_AS_WIDTH)
         .build();
     let save = ui.button("save-as-save", "Save").on_press_tx(presets::save).build();
-    let mut open = col().w_full().gap(4.0).items_end().child(line.child(field).child(save));
+    let mut open = col().w_full().gap(ui.spacing().s2).items_end().child(line.child(field).child(save));
     if let Some(why) = sheet.refused(Row::PresetName) {
         open = open.child(ui.error_caption(why).key("save-as-refused"));
     }
@@ -436,7 +444,7 @@ fn theme_control(setting: &'static crate::theme::setting::Setting, side: Side, v
                 .on_key(escape_key)
                 .width(COLOUR_WIDTH)
                 .build();
-            row().gap(6.0).center_y().child(ui.swatch(rgb.color())).child(text)
+            row().gap(ui.spacing().s3).center_y().child(ui.swatch(rgb.color())).child(text)
         }
         // A value is always of its setting's kind (`Values`).
         (Kind::Choice { .. } | Kind::Toggle { .. } | Kind::Colour { .. }, _) => el(),
@@ -509,7 +517,7 @@ fn look_presets(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: 
     if s.saved.list().is_empty() {
         rows.push(ui.muted_row("none-saved", "None saved"));
     }
-    col().key(presets::SETTING).w_full().gap(8.0).child(ui.card(rows))
+    col().key(presets::SETTING).w_full().gap(ui.spacing().s4).child(ui.card(rows))
 }
 
 /// The Active look's row: its chips, which open its Edit…, Edit… and Save as….
@@ -599,7 +607,7 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         .build();
     // One line: the caption (whole on hover), the previews, Edit….
     let caption = ui.caption(icon_name(icon, icon.choice.as_ref())).key("app_icon-note").help(icon_full_name(icon, icon.choice.as_ref()));
-    let controls = row().gap(8.0).center_y().child(caption).child(preview).child(edit);
+    let controls = row().gap(ui.spacing().s4).center_y().child(caption).child(preview).child(edit);
     ui.setting_row("app_icon", label, controls, Vec::new())
 }
 
@@ -684,7 +692,7 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appear
     let mut body = col()
         .key("app_icon_tiles")
         .w_full()
-        .gap(8.0)
+        .gap(ui.spacing().s4)
         .child(ui.heading("Pairs"))
         .child(ui.tile_grid(pairs.collect()))
         .child(ui.heading("Icons"))
