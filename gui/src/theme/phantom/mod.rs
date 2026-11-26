@@ -9,7 +9,7 @@ use rune_kit::Kit;
 #[cfg(test)]
 use super::Look;
 use super::setting::{Choice, Kind, Setting, Show, Value, Values};
-use super::{Built, Colours, Motion, Spacing, Theme, ThemeLook};
+use super::{Built, Colors, Motion, Spacing, Theme, ThemeLook};
 use crate::ui::Icon;
 
 pub struct Phantom;
@@ -103,7 +103,7 @@ impl Theme for Phantom {
         let mut tokens = Kit::neutral(dark);
         tokens.radius = radius(settings.get(CORNERS));
         Built {
-            colours: Colours::of(&tokens),
+            colors: Colors::of(&tokens),
             spacing: Spacing::phantom(),
             tokens,
             blocks: Default::default(),

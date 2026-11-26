@@ -2,7 +2,7 @@
 //! popover shows, if it's open. Pure; [`super::Bar`] carries it out.
 //!
 //! A notice is **told**: something happened (an add, the settings reset, a failure) and it stays
-//! until it's dismissed. The bar shows the newest, in its own colour, and a pill with how many
+//! until it's dismissed. The bar shows the newest, in its own color, and a pill with how many
 //! there are, tinted by the worst of them ([`State::pill`]); a click always opens the
 //! popover, which shows **one notice at a time**, newest first, and steps through them: ‹ to a
 //! newer one, › to an older one, stopping at the ends (no wrap: the count says where you are, and
@@ -37,7 +37,7 @@
 //!
 //! **Errors** are notices of severity Error: a failure that has no better place (a refused add in
 //! a batch, a failed command, Open…), told like any other, a batch as one with its list as its
-//! view, shown in the bar in the error colour. **An error never opens the popover**: it shows in
+//! view, shown in the bar in the error color. **An error never opens the popover**: it shows in
 //! the bar, the pill red, and a click opens it, as for any notice. Notices, errors included, are
 //! kept up to [`MAX_TOLD`], the oldest dropped first. Dismiss all clears every one at once.
 //!

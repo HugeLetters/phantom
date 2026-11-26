@@ -8,7 +8,7 @@
 //! sheet) and removing one, and, among the Look Presets (#228), applying a saved one to the Active
 //! look (its ◐ chip, or a half's ☀ or ☾), Edit… on the Active look (or its ☀ or ☾ chip) or a saved
 //! preset (the one sheet, in two columns: setting each theme setting for both Appearances, joined,
-//! or in one half's column (Tone, and the tests' second theme's toggle, choice and colour), joining
+//! or in one half's column (Tone, and the tests' second theme's toggle, choice and color), joining
 //! and splitting rows and the Theme row, choosing a half's theme in its pop-up, Done, Escape, ⌘W),
 //! Delete, and
 //! Save as… (a name typed, Return or Save; a blank name refused under the field; a taken one asking
@@ -28,14 +28,14 @@
 //!   the system's Appearance, and Follow theme shows each look's App icon;
 //! - the sheet shows each row joined or split as the model says (with a theme in each half, each
 //!   column its own theme's settings, and no setting row joining), each control with its value,
-//!   Join or Split where it applies, each Theme pop-up its half's theme, and a colour's field what's typed in it and its
+//!   Join or Split where it applies, each Theme pop-up its half's theme, and a color's field what's typed in it and its
 //!   refusal until its text changes; a choice is a dropdown (a combobox named for its setting, showing
 //!   the chosen label whole), Tone's two a radio group, its segments radios (Tab reaches it and an
 //!   arrow key picks the next or previous, #247); and ⌘Z focuses it like any other control;
 //! - the windows that show and the one in front are the model's: ⌘W closes the one in front, the
 //!   other staying; the Dock brings the main window back;
 //! - Settings losing the front (a click on the main window, the Dock, ⌘Z there) leaves the field
-//!   being edited, which applies it as a change of its own, a port, a limit or a colour (#254);
+//!   being edited, which applies it as a change of its own, a port, a limit or a color (#254);
 //! - ⌘Z takes back the newest change, whoever made it, in Settings or in the main window (#255): a
 //!   setting's is as it was, Settings opens (if it was closed) in front at its tab with its control focused,
 //!   and the status bar tells it was undone ("Port undone"; the popover, "Port back from 40001 to 40000"), or "Couldn't be
@@ -229,9 +229,9 @@ enum Step {
     Arrow(Side, &'static str, bool),
     /// A toggle theme setting's switch, on a side.
     Flip(Side, &'static str),
-    /// Typed over a colour theme setting's field, and Return in it.
-    TypeColour(Side, &'static str, String),
-    SendColour(Side, &'static str),
+    /// Typed over a color theme setting's field, and Return in it.
+    TypeColor(Side, &'static str, String),
+    SendColor(Side, &'static str),
     /// A row's Split or Join (the Theme row's is [`THEME`]'s), splitting it, or joining it.
     Split(&'static str),
     Join(&'static str),
@@ -360,8 +360,8 @@ fn name_texts(m: &Model) -> Vec<String> {
     texts
 }
 
-/// What's typed into a colour's field: colours, either case, and not colours.
-fn colour_texts() -> Vec<String> {
+/// What's typed into a color's field: colors, either case, and not colors.
+fn color_texts() -> Vec<String> {
     ["#3366ff", "#FF0000", "#00ff7f", "#123", "red", ""].map(String::from).to_vec()
 }
 
@@ -381,8 +381,8 @@ enum Fld {
     Port,
     Limit(Direction),
     Seeding(SeedingLimit),
-    /// A colour theme setting's field, in the sheet, on a side.
-    Colour(Side, &'static str),
+    /// A color theme setting's field, in the sheet, on a side.
+    Color(Side, &'static str),
 }
 
 /// The text a refusal is about, and why when the app words it (a service's refusal is shown, not checked).
@@ -452,11 +452,11 @@ struct Model {
 }
 
 /// An editor's own state: the rows split by hand or set in one column since it opened ([`THEME`]
-/// for the Theme row), and each colour field shown, its text and the text a refusal is about.
+/// for the Theme row), and each color field shown, its text and the text a refusal is about.
 #[derive(Debug, Clone, Default)]
 struct Ed {
     split: BTreeSet<&'static str>,
-    colours: BTreeMap<(Side, &'static str), (String, Refusal)>,
+    colors: BTreeMap<(Side, &'static str), (String, Refusal)>,
 }
 
 impl Stored {
@@ -515,7 +515,7 @@ impl Model {
             Fld::Port => &self.field,
             Fld::Limit(d) => &self.limit_fields[d as usize],
             Fld::Seeding(at) => &self.seeding_fields[at as usize],
-            Fld::Colour(side, key) => &self.ed().colours[&(side, key)].0,
+            Fld::Color(side, key) => &self.ed().colors[&(side, key)].0,
         }
     }
 
@@ -524,7 +524,7 @@ impl Model {
             Fld::Port => &mut self.field,
             Fld::Limit(d) => &mut self.limit_fields[d as usize],
             Fld::Seeding(at) => &mut self.seeding_fields[at as usize],
-            Fld::Colour(side, key) => &mut self.ed_mut().colours.get_mut(&(side, key)).expect("its field").0,
+            Fld::Color(side, key) => &mut self.ed_mut().colors.get_mut(&(side, key)).expect("its field").0,
         }
     }
 
@@ -533,7 +533,7 @@ impl Model {
             Fld::Port => &mut self.port_refused,
             Fld::Limit(d) => &mut self.limits_refused[d as usize],
             Fld::Seeding(at) => &mut self.seeding_refused[at as usize],
-            Fld::Colour(side, key) => &mut self.ed_mut().colours.get_mut(&(side, key)).expect("its field").1,
+            Fld::Color(side, key) => &mut self.ed_mut().colors.get_mut(&(side, key)).expect("its field").1,
         }
     }
 
@@ -543,8 +543,8 @@ impl Model {
             Fld::Port => self.port_text(),
             Fld::Limit(d) => self.limit_text(d),
             Fld::Seeding(at) => self.seeding_text(at),
-            Fld::Colour(side, key) => match self.value(side, key) {
-                Value::Colour(rgb) => rgb.hex(),
+            Fld::Color(side, key) => match self.value(side, key) {
+                Value::Color(rgb) => rgb.hex(),
                 Value::Toggle(_) | Value::Choice(_) => unreachable!(),
             },
         }
@@ -553,22 +553,22 @@ impl Model {
     /// Whether the field is shown.
     fn fld_shown(&self, f: Fld) -> bool {
         match f {
-            Fld::Colour(side, key) => self.ed_opt().is_some_and(|ed| ed.colours.contains_key(&(side, key))),
+            Fld::Color(side, key) => self.ed_opt().is_some_and(|ed| ed.colors.contains_key(&(side, key))),
             Fld::Port | Fld::Limit(_) | Fld::Seeding(_) => true,
         }
     }
 
     /// Why `text` isn't a value of the field, as the app words it.
     fn fld_problem(f: Fld, text: &str) -> Option<String> {
-        if let Fld::Colour(..) = f {
-            return Rgb::parse(text).is_none().then(|| crate::model::settings::NOT_A_COLOUR.to_owned());
+        if let Fld::Color(..) = f {
+            return Rgb::parse(text).is_none().then(|| crate::model::settings::NOT_A_COLOR.to_owned());
         }
         let why = match f {
             Fld::Port => setting::port(text).err(),
             Fld::Limit(_) if text.trim().is_empty() => None,
             Fld::Limit(_) => setting::speed(text).err(),
             Fld::Seeding(at) => seeding_value(at, text).err(),
-            Fld::Colour(..) => unreachable!(),
+            Fld::Color(..) => unreachable!(),
         };
         why.map(|why| client::display::value_problem(why).to_owned())
     }
@@ -599,9 +599,9 @@ impl Model {
                 let limit = if text.trim().is_empty() { None } else { setting::speed(&text).ok() };
                 self.stored.speed_limits.set(d, limit);
             }
-            Fld::Colour(side, key) => {
+            Fld::Color(side, key) => {
                 let rgb = Rgb::parse(&text).unwrap();
-                self.set(side, key, Value::Colour(rgb));
+                self.set(side, key, Value::Color(rgb));
             }
             // A new port that fails stores nothing: it's refused under its row and listed. The port
             // it has: nothing to send.
@@ -827,7 +827,7 @@ impl Model {
         if side != Side::Both {
             self.ed_mut().split.insert(key);
         }
-        self.show_colours();
+        self.show_colors();
     }
 
     /// What the sheet edits is now `preset`.
@@ -861,31 +861,31 @@ impl Model {
         if side != Side::Both {
             self.ed_mut().split.insert(THEME);
         }
-        self.show_colours();
+        self.show_colors();
     }
 
-    /// In the sheet, a field for each colour shown: one still shown keeps its text, a new one shows
-    /// the colour.
-    fn show_colours(&mut self) {
+    /// In the sheet, a field for each color shown: one still shown keeps its text, a new one shows
+    /// the color.
+    fn show_colors(&mut self) {
         if self.sheet.is_none() {
             return;
         }
         let mut fields = BTreeMap::new();
-        for shown in self.shown().into_iter().filter(|s| matches!(s.kind, Kind::Colour { .. })) {
+        for shown in self.shown().into_iter().filter(|s| matches!(s.kind, Kind::Color { .. })) {
             let side = shown.side;
-            let Value::Colour(rgb) = self.value(side, shown.key) else { unreachable!() };
-            let field = self.ed_mut().colours.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
+            let Value::Color(rgb) = self.value(side, shown.key) else { unreachable!() };
+            let field = self.ed_mut().colors.remove(&(side, shown.key)).unwrap_or((rgb.hex(), None));
             fields.insert((side, shown.key), field);
         }
-        self.ed_mut().colours = fields;
+        self.ed_mut().colors = fields;
     }
 
-    /// The sheet's colour fields show what they hold again, whatever was typed in them.
-    fn refresh_colours(&mut self) {
+    /// The sheet's color fields show what they hold again, whatever was typed in them.
+    fn refresh_colors(&mut self) {
         if let Some((_, ed)) = &mut self.sheet {
-            ed.colours.clear();
+            ed.colors.clear();
         }
-        self.show_colours();
+        self.show_colors();
     }
 
     /// What's shown in both windows: the saved preset the sheet's open on, else the Active look.
@@ -927,19 +927,18 @@ impl ReferenceStateMachine for Sheet {
         // A fresh install's; one theme in both halves, its values the same, so its fields start
         // joined; or any.
         let same = crate::theme::tests::theme_look().prop_map(|look| LookPreset { light: look.clone(), dark: look });
-        // One with a colour setting, so the colour fields' steps are met often (#254).
-        let coloured = || {
-            crate::theme::tests::theme_look().prop_filter("a colour setting", |look| {
-                look.settings.iter().any(|(setting, _)| matches!(setting.kind, Kind::Colour { .. }))
-            })
+        // One with a color setting, so the color fields' steps are met often (#254).
+        let colored = || {
+            crate::theme::tests::theme_look()
+                .prop_filter("a color setting", |look| look.settings.iter().any(|(setting, _)| matches!(setting.kind, Kind::Color { .. })))
         };
-        // Both halves alike sometimes, so a colour's field is one for both, and its Join
+        // Both halves alike sometimes, so a color's field is one for both, and its Join
         // button meets it (#332).
-        let coloured = prop_oneof![
-            (coloured(), coloured()).prop_map(|(light, dark)| LookPreset { light, dark }),
-            coloured().prop_map(|look| LookPreset { light: look.clone(), dark: look }),
+        let colored = prop_oneof![
+            (colored(), colored()).prop_map(|(light, dark)| LookPreset { light, dark }),
+            colored().prop_map(|look| LookPreset { light: look.clone(), dark: look }),
         ];
-        let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset(), 3 => coloured];
+        let preset = prop_oneof![1 => Just(LookPreset::fresh()), 1 => same, 2 => crate::theme::tests::preset(), 3 => colored];
         // Some saved, one of them the active one sometimes.
         // Some start with Settings open on Appearance, as after ⌘, and a click on its tab, and some
         // of those with a sheet open, the first saved preset's or the Active look's, as after
@@ -1046,9 +1045,9 @@ impl ReferenceStateMachine for Sheet {
                     .boxed(),
                     Kind::Choice { choices, .. } => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)).boxed(),
                     Kind::Toggle { .. } => Just(Step::Flip(side, key)).boxed(),
-                    Kind::Colour { .. } => prop_oneof![
-                        proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(side, key, text)),
-                        Just(Step::SendColour(side, key)),
+                    Kind::Color { .. } => prop_oneof![
+                        proptest::sample::select(color_texts()).prop_map(move |text| Step::TypeColor(side, key, text)),
+                        Just(Step::SendColor(side, key)),
                     ]
                     .boxed(),
                 });
@@ -1202,8 +1201,8 @@ impl ReferenceStateMachine for Sheet {
             Step::Arrow(side, key, _)
             | Step::Choose(side, key, _)
             | Step::Flip(side, key)
-            | Step::TypeColour(side, key, _)
-            | Step::SendColour(side, key) => editor && m.shown().iter().any(|s| s.key == *key && s.side == *side),
+            | Step::TypeColor(side, key, _)
+            | Step::SendColor(side, key) => editor && m.shown().iter().any(|s| s.key == *key && s.side == *side),
             // A row joins and splits with one theme in both halves.
             Step::Split(THEME) => editor && m.theme_joined(),
             Step::Join(THEME) => editor && m.same_theme() && !m.theme_joined(),
@@ -1228,7 +1227,7 @@ impl ReferenceStateMachine for Sheet {
             Step::TypePort(_) | Step::SendPort => Some(Fld::Port),
             Step::TypeLimit(d, _) | Step::SendLimit(d) => Some(Fld::Limit(*d)),
             Step::TypeSeeding(at, _) | Step::SendSeeding(at) => Some(Fld::Seeding(*at)),
-            Step::TypeColour(side, key, _) | Step::SendColour(side, key) => Some(Fld::Colour(*side, key)),
+            Step::TypeColor(side, key, _) | Step::SendColor(side, key) => Some(Fld::Color(*side, key)),
             // The main window to the front: Settings losing it leaves its field (#254), so ⌘Z
             // there takes that change first.
             Step::Front(Which::Main) | Step::Reopen | Step::Remove(_) | Step::Undo(Which::Main) if m.front == Some(Which::Settings) => None,
@@ -1249,7 +1248,7 @@ impl ReferenceStateMachine for Sheet {
         if m.focused != keeps {
             let left = m.focused;
             let target = match left {
-                Some(Fld::Colour(..)) => m.sheet.as_ref().map(|(target, _)| target.clone()),
+                Some(Fld::Color(..)) => m.sheet.as_ref().map(|(target, _)| target.clone()),
                 Some(Fld::Port | Fld::Limit(_) | Fld::Seeding(_)) | None => None,
             };
             if let Some(f) = left {
@@ -1260,7 +1259,7 @@ impl ReferenceStateMachine for Sheet {
             for name in changed {
                 m.push(Change::Service(name, before.clone()));
             }
-            if let (Some(Fld::Colour(side, key)), Some(target)) = (left, target)
+            if let (Some(Fld::Color(side, key)), Some(target)) = (left, target)
                 && m.presets() != was
             {
                 m.push(Change::Theme(was, target, side, key));
@@ -1294,7 +1293,7 @@ impl ReferenceStateMachine for Sheet {
                     }
                 }
                 let theme = match step {
-                    Step::Arrow(side, key, _) | Step::Choose(side, key, _) | Step::Flip(side, key) | Step::SendColour(side, key) => {
+                    Step::Arrow(side, key, _) | Step::Choose(side, key, _) | Step::Flip(side, key) | Step::SendColor(side, key) => {
                         Some((*side, *key))
                     }
                     Step::Theme(side, _) => Some((*side, THEME)),
@@ -1355,7 +1354,7 @@ impl Model {
         self.focused = None;
         (self.sheet, self.opened) = (None, None);
         (self.save_as, self.name_refused, self.name_focused) = (None, None, false);
-        self.show_colours();
+        self.show_colors();
     }
 
     /// The open sheet's fields that showed what was stored `before` show what's stored now; what's
@@ -1460,7 +1459,7 @@ impl Model {
             Change::Presets(was, _, name, half) => {
                 self.restore(was);
                 self.close_sheet();
-                self.refresh_colours();
+                self.refresh_colors();
                 self.tab = Tab::Appearance;
                 // The chip that did it (◐, ☀ or ☾ of the saved preset), or, with the preset gone,
                 // the Active look's Edit….
@@ -1473,7 +1472,7 @@ impl Model {
             Change::Edit(was, target) => {
                 self.restore(was);
                 self.close_sheet();
-                self.refresh_colours();
+                self.refresh_colors();
                 self.tab = Tab::Appearance;
                 // The Look Presets' first chip.
                 self.focus = (!self.saved.is_empty()).then(|| "preset-0-both".to_owned());
@@ -1494,7 +1493,7 @@ impl Model {
                     Side::Only(_) => self.ed_mut().split.insert(key),
                 };
                 // The fields show the values they went back to, whatever was typed in them.
-                self.refresh_colours();
+                self.refresh_colors();
                 self.tab = Tab::Appearance;
                 let sides: Vec<Side> = match key {
                     THEME => self.theme_sides(),
@@ -1557,14 +1556,14 @@ impl Model {
         }
         self.close_editor(true);
         (self.sheet, self.opened) = (Some((target, Ed::default())), Some(self.presets()));
-        self.show_colours();
+        self.show_colors();
     }
 
     /// A Look Preset's sheet closes: its changes leave the list; Done's become one, if the presets
     /// aren't as it opened on them; Cancel's put them back so.
     fn close_editor(&mut self, done: bool) {
         let (Some((target, _)), Some(opened)) = (self.sheet.take(), self.opened.take()) else { return };
-        if matches!(self.focused, Some(Fld::Colour(..))) {
+        if matches!(self.focused, Some(Fld::Color(..))) {
             self.focused = None;
         }
         self.changes.retain(|c| !matches!(c, Change::Theme(..)));
@@ -1783,15 +1782,15 @@ fn act(mut m: Model, step: &Step) -> Model {
             let Value::Toggle(on) = m.value(*side, key) else { unreachable!() };
             m.set(*side, key, Value::Toggle(!on));
         }
-        Step::TypeColour(side, key, text) => *m.fld_text_mut(Fld::Colour(*side, key)) = text.clone(),
-        Step::SendColour(side, key) => m.send(Fld::Colour(*side, key)),
+        Step::TypeColor(side, key, text) => *m.fld_text_mut(Fld::Color(*side, key)) = text.clone(),
+        Step::SendColor(side, key) => m.send(Fld::Color(*side, key)),
         Step::Split(key) => {
             m.ed_mut().split.insert(key);
-            m.show_colours();
+            m.show_colors();
         }
         Step::Join(THEME) => {
             m.ed_mut().split.remove(THEME);
-            m.show_colours();
+            m.show_colors();
         }
         // The Dark half takes the Light one's value where they differ.
         Step::Join(key) => {
@@ -1800,7 +1799,7 @@ fn act(mut m: Model, step: &Step) -> Model {
                 m.set(Side::Only(Appearance::Dark), key, value);
             }
             m.ed_mut().split.remove(key);
-            m.show_colours();
+            m.show_colors();
         }
         Step::Theme(side, i) => m.choose_theme(*side, crate::theme::themes()[*i]),
         Step::ActiveChip(_) => m.open_editor(Target::Active),
@@ -2050,7 +2049,7 @@ impl StateMachineTest for Sheet {
                 r.key(KeyEvent { key: if *right { Key::Right } else { Key::Left }, mods: Mods::default() });
             }
             Step::Flip(side, key) => press(d, &format!("edit-{key}-{}", side.key())),
-            Step::TypeColour(side, key, text) => {
+            Step::TypeColor(side, key, text) => {
                 let field = format!("edit-{key}-{}", side.key());
                 press(d, &field);
                 let r = &mut d.settings;
@@ -2061,7 +2060,7 @@ impl StateMachineTest for Sheet {
                     r.paste(text);
                 }
             }
-            Step::SendColour(side, key) => {
+            Step::SendColor(side, key) => {
                 press(d, &format!("edit-{key}-{}", side.key()));
                 d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
             }
@@ -2204,8 +2203,8 @@ impl StateMachineTest for Sheet {
         for at in SEEDING {
             fields.push((seeding_field(at).to_owned(), m.seeding_fields[at as usize].clone(), m.seeding_text(at)));
         }
-        for ((side, key), (text, _)) in m.ed_opt().map(|ed| ed.colours.clone()).unwrap_or_default() {
-            let Value::Colour(rgb) = m.value(side, key) else { unreachable!() };
+        for ((side, key), (text, _)) in m.ed_opt().map(|ed| ed.colors.clone()).unwrap_or_default() {
+            let Value::Color(rgb) = m.value(side, key) else { unreachable!() };
             fields.push((format!("edit-{key}-{}", side.key()), text.clone(), rgb.hex()));
         }
         // Save as…'s field: being edited with any name typed.
@@ -2322,7 +2321,7 @@ impl StateMachineTest for Sheet {
 
 /// Each row joined or split as the model says, each control with its value, Join or Split where it applies
 /// (with a theme in each half, on the Theme row only), each Theme pop-up showing its half's theme,
-/// and each colour field's text and refusal.
+/// and each color field's text and refusal.
 fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
     let prefix = "edit";
     let preset = m.preset_edited();
@@ -2408,10 +2407,10 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
                     let shows = rt.elements().into_iter().find(|e| e.path.ends_with(&value) && !e.exiting).and_then(|e| e.text);
                     assert_eq!(shows.as_deref(), Some(label), "{control} shows {id}");
                 }
-                (Kind::Colour { .. }, _) => {
-                    let (typed, _) = &m.ed().colours[&(*side, key)];
+                (Kind::Color { .. }, _) => {
+                    let (typed, _) = &m.ed().colors[&(*side, key)];
                     let field =
-                        rt.state.sheet.as_ref().and_then(|sheet| sheet.editor()).and_then(|e| e.colour(*side, key)).expect("its field");
+                        rt.state.sheet.as_ref().and_then(|sheet| sheet.editor()).and_then(|e| e.color(*side, key)).expect("its field");
                     assert_eq!(&field.text.text, typed, "{control}'s text");
                 }
                 (Kind::Toggle { .. } | Kind::Choice { .. }, _) => {}
@@ -2419,7 +2418,7 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
         }
         let refused = sides
             .iter()
-            .any(|side| m.ed().colours.get(&(*side, key)).is_some_and(|(text, why)| why.as_ref().is_some_and(|(t, _)| t == text)));
+            .any(|side| m.ed().colors.get(&(*side, key)).is_some_and(|(text, why)| why.as_ref().is_some_and(|(t, _)| t == text)));
         let drawn = rt
             .elements()
             .into_iter()
@@ -3150,7 +3149,7 @@ fn shown_label(m: &Model, key: &str) -> &'static str {
 /// so its field is one for both.
 fn accent_sheet() -> Desk {
     let mut look = crate::theme::ThemeLook::defaults(crate::theme::find("sample").unwrap());
-    let _ = look.settings.set("accent", Value::Colour(Rgb([0, 0, 0])));
+    let _ = look.settings.set("accent", Value::Color(Rgb([0, 0, 0])));
     let mut d = desk(MemoryService::new());
     *d.main.state.looks.borrow_mut() = Looks::new(LookPreset { light: look.clone(), dark: look }, |_: &LookPreset| {});
     d.main.set_viewport((960.0, 900.0), 2.0);
@@ -3175,36 +3174,36 @@ fn accents(d: &Desk) -> [Option<Value>; 2] {
     Appearance::BOTH.map(|a| looks.preset().get(a).settings.get("accent"))
 }
 
-/// Split, pressed while a colour is typed into the field for both, applies the colour first, as
+/// Split, pressed while a color is typed into the field for both, applies the color first, as
 /// leaving the field does, and ⌘Z then takes it back (#332). The field went with the split, and
-/// the colour with it: Edit ▸ Undo named the change before.
+/// the color with it: Edit ▸ Undo named the change before.
 #[test]
-fn split_applies_the_colour_being_typed_first() {
+fn split_applies_the_color_being_typed_first() {
     let mut d = accent_sheet();
     type_into(&mut d, "edit-accent-both", "#3366ff");
     press(&mut d, "edit-accent-split");
-    let blue = Some(Value::Colour(Rgb([0x33, 0x66, 0xff])));
+    let blue = Some(Value::Color(Rgb([0x33, 0x66, 0xff])));
     assert_eq!(accents(&d), [blue, blue], "both halves");
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Accent Change");
 }
 
-/// So does Join, the colour typed into the Light column applied, then copied into the Dark one.
+/// So does Join, the color typed into the Light column applied, then copied into the Dark one.
 #[test]
-fn join_applies_the_colour_being_typed_first() {
+fn join_applies_the_color_being_typed_first() {
     let mut d = accent_sheet();
     press(&mut d, "edit-accent-split");
     type_into(&mut d, "edit-accent-light", "#3366ff");
     press(&mut d, "edit-accent-join");
-    let blue = Some(Value::Colour(Rgb([0x33, 0x66, 0xff])));
+    let blue = Some(Value::Color(Rgb([0x33, 0x66, 0xff])));
     assert_eq!(accents(&d), [blue, blue], "the Light half's, in both");
     d.settings.update(|_, tx| tx.blur());
     d.key(cmd('z'));
     d.settle();
-    assert_eq!(accents(&d), [blue, Some(Value::Colour(Rgb([0, 0, 0])))], "⌘Z: the join's copy undone, the colour typed kept");
+    assert_eq!(accents(&d), [blue, Some(Value::Color(Rgb([0, 0, 0])))], "⌘Z: the join's copy undone, the color typed kept");
 }
 
-/// A refusal goes with its field: Split, pressed while text that's no colour is typed into the field
-/// for both, then Join, gives a new field for both, which shows the colour and no refusal (#408).
+/// A refusal goes with its field: Split, pressed while text that's no color is typed into the field
+/// for both, then Join, gives a new field for both, which shows the color and no refusal (#408).
 /// The old field's came back under it.
 #[test]
 fn a_refusal_goes_with_the_field_a_split_takes_away() {
@@ -3216,12 +3215,12 @@ fn a_refusal_goes_with_the_field_a_split_takes_away() {
     type_into(&mut d, "edit-accent-both", "#123");
     d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
     d.settle();
-    assert!(refused(&d), "Return says why it's no colour");
+    assert!(refused(&d), "Return says why it's no color");
     press(&mut d, "edit-accent-split");
     assert!(!refused(&d), "the two new fields were refused nothing");
     press(&mut d, "edit-accent-join");
     assert!(!refused(&d), "nor was the new field for both");
-    let black = Some(Value::Colour(Rgb([0, 0, 0])));
+    let black = Some(Value::Color(Rgb([0, 0, 0])));
     assert_eq!(accents(&d), [black, black], "nothing changed");
 }
 
@@ -3240,22 +3239,22 @@ pub(super) fn appearance_tab() -> Desk {
     d
 }
 
-/// What a frame shows of an element: where it's drawn, how opaque, and its colours (fill, text).
+/// What a frame shows of an element: where it's drawn, how opaque, and its colors (fill, text).
 type Drawn = (String, [i32; 4], i32, [i32; 4], Option<[i32; 4]>);
 
 /// What a frame shows of each element of the tab shown.
 fn tab_frame(rt: &Runtime<SettingsWindow>) -> Vec<Drawn> {
     let round = |r: [f32; 4]| r.map(|v| (v * 2.0).round() as i32);
-    let colour = |c: rune::Color| [c.r, c.g, c.b, c.a].map(|v| (v * 255.0).round() as i32);
+    let color = |c: rune::Color| [c.r, c.g, c.b, c.a].map(|v| (v * 255.0).round() as i32);
     rt.elements()
         .into_iter()
         .filter(|e| !e.exiting && e.path.contains("tab-page"))
-        .map(|e| (e.path, round(e.rect), (e.opacity * 100.0).round() as i32, colour(e.fill), e.text_color.map(colour)))
+        .map(|e| (e.path, round(e.rect), (e.opacity * 100.0).round() as i32, color(e.fill), e.text_color.map(color)))
         .collect()
 }
 
 /// A tab switch lands at once (#342): the first frame after the press shows the new tab as it
-/// settles, its rows and their dividers where they end up, nothing fading in and no colour easing
+/// settles, its rows and their dividers where they end up, nothing fading in and no color easing
 /// in (the App icon's row among them), for every pair of tabs.
 #[test]
 fn a_tab_switch_lands_at_once() {
@@ -3373,7 +3372,7 @@ fn the_editors_halves_are_drawn_each_in_its_halfs_look() {
             assert_eq!(fill(&d.settings, &format!("{row}-left")), Some(light.bg_base), "{row}: the left half in the Light look");
             assert_eq!(fill(&d.settings, &format!("{row}-right")), Some(dark.bg_base), "{row}: the right half in the Dark look");
         }
-        assert!(texts(&d, "edit-theme-left").contains(&light.text_base), "the Light half's text in its look's colour");
+        assert!(texts(&d, "edit-theme-left").contains(&light.text_base), "the Light half's text in its look's color");
         assert!(texts(&d, "edit-tone-right").contains(&dark.text_base), "the Dark half's in its");
     }
     let rect = |key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
@@ -3938,7 +3937,7 @@ fn a_visit_to_the_app_icons_sheet_is_one_undo_step() {
     assert_eq!(choice(&d), None, "the earlier visit is the next step");
 }
 
-/// The page colour a chip keyed `key` is drawn on.
+/// The page color a chip keyed `key` is drawn on.
 fn face(d: &Desk, key: &str) -> Option<rune::Color> {
     d.settings.elements().into_iter().find(|e| e.path.ends_with(&format!("{key}/#0/face")) && !e.exiting).map(|e| e.fill)
 }
@@ -4162,7 +4161,7 @@ fn a_pair_in_use_marks_both_chips_below() {
     }
 }
 
-/// Same theme, a hairline between the editor's rows is one line across both halves, in one colour,
+/// Same theme, a hairline between the editor's rows is one line across both halves, in one color,
 /// whether the rows are joined or split (#87).
 #[test]
 fn a_rows_hairline_runs_unbroken_across_both_halves() {
@@ -4175,7 +4174,7 @@ fn a_rows_hairline_runs_unbroken_across_both_halves() {
         }
         let card = rect(&d, "halves-card");
         let seam = rect(&d, "edit-tone-right")[0];
-        let mut colours = Vec::new();
+        let mut colors = Vec::new();
         for i in 1..=2 {
             let key = format!("halves-rule-{i}-line");
             let lines: Vec<_> = d.settings.elements().into_iter().filter(|e| e.key.as_deref() == Some(&key) && !e.exiting).collect();
@@ -4183,9 +4182,9 @@ fn a_rows_hairline_runs_unbroken_across_both_halves() {
             let line = lines[0].rect;
             assert!(line[0] < seam - 8.0 && line[0] + line[2] > seam + 8.0, "rule {i} crosses the seam: {line:?}, seam {seam}");
             assert!(line[0] - card[0] <= 12.0 && (card[0] + card[2]) - (line[0] + line[2]) <= 12.0, "and runs the card's width: {line:?}");
-            colours.push(lines[0].fill);
+            colors.push(lines[0].fill);
         }
-        assert_eq!(colours[0], colours[1], "one colour for every rule");
+        assert_eq!(colors[0], colors[1], "one color for every rule");
     }
 }
 

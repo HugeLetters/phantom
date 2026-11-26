@@ -1,6 +1,6 @@
 from lib import *
 
-# Round 5, keyhole ghost (from 08g/08h/08i): angular eyes, colour swap, reworked burst
+# Round 5, keyhole ghost (from 08g/08h/08i): angular eyes, color swap, reworked burst
 R, NECK, LENGTH, FLARE, TEETH, DEPTH, TILT = 230, 160, 430, 210, 3, 60, -6
 
 

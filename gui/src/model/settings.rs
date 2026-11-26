@@ -9,7 +9,7 @@
 //! A value that can't be used is refused with why, under its row, and nothing changes. Each change
 //! that takes effect is one step of Undo ([`crate::changes`], #221, #255).
 //!
-//! A text setting (port, speed limits, seeding limits, theme colours; one path, [`Row`]) is applied by Return, or when its field
+//! A text setting (port, speed limits, seeding limits, theme colors; one path, [`Row`]) is applied by Return, or when its field
 //! loses focus ([`follow_focus`], and by hand on closing the sheet or the window losing the front,
 //! [`left_window`]) (#254): a value
 //! that can't be used isn't kept then, the stored one comes back with the reason under the row.
@@ -117,7 +117,7 @@ pub struct SettingsSheet {
     pub had_focus: Vec<Row>,
     /// Save as…, while it's open.
     pub save_as: Option<SaveAs>,
-    /// Where an edit goes that's for a colour field no longer shown (an Apply or an undo changed
+    /// Where an edit goes that's for a color field no longer shown (an Apply or an undo changed
     /// the theme under it, and the window still had it focused): nowhere.
     gone: TextEdit,
 }
@@ -136,9 +136,9 @@ pub struct Editor {
     pub split: BTreeSet<&'static str>,
     /// The pop-up open: its row's key ([`THEME`] for the Theme row, else a setting's) and side.
     pub menu: Option<(&'static str, Side)>,
-    /// Each colour setting's field, by which side it sets and its key, or what's typed over it
+    /// Each color setting's field, by which side it sets and its key, or what's typed over it
     /// until it's applied (Return, or the field losing focus).
-    pub colours: Vec<ColourField>,
+    pub colors: Vec<ColorField>,
 }
 
 /// The sheet over Settings that edits a Look Preset, the Active look or a saved one: its editor.
@@ -282,8 +282,8 @@ impl Side {
     }
 }
 
-/// A colour setting's text field.
-pub struct ColourField {
+/// A color setting's text field.
+pub struct ColorField {
     pub side: Side,
     pub key: &'static str,
     pub text: TextEdit,
@@ -299,8 +299,8 @@ pub enum Row {
     Switch(Switch),
     Limit(Direction),
     Seeding(SeedingLimit),
-    /// A colour theme setting's field, in the sheet's editor, on a side.
-    Colour(Side, &'static str),
+    /// A color theme setting's field, in the sheet's editor, on a side.
+    Color(Side, &'static str),
     /// The name to save the active Look Preset as.
     PresetName,
     /// The App icon's sheet: an image added that can't be read.
@@ -357,7 +357,7 @@ impl SettingsSheet {
             Row::Port => Some(&self.port),
             Row::Limit(direction) => Some(self.limit(direction)),
             Row::Seeding(at) => Some(self.seeding(at)),
-            Row::Colour(side, key) => self.editor()?.colour(side, key).map(|f| &f.text),
+            Row::Color(side, key) => self.editor()?.color(side, key).map(|f| &f.text),
             Row::PresetName => self.save_as.as_ref().map(|a| &a.name),
             Row::All | Row::Folder | Row::Switch(_) | Row::Image => None,
         }
@@ -368,26 +368,26 @@ impl SettingsSheet {
             Row::Port => Some(&mut self.port),
             Row::Limit(direction) => Some(self.limit_mut(direction)),
             Row::Seeding(at) => Some(self.seeding_mut(at)),
-            Row::Colour(side, key) => self.editor_mut()?.colour_mut(side, key).map(|f| &mut f.text),
+            Row::Color(side, key) => self.editor_mut()?.color_mut(side, key).map(|f| &mut f.text),
             Row::PresetName => self.save_as.as_mut().map(|a| &mut a.name),
             Row::All | Row::Folder | Row::Switch(_) | Row::Image => None,
         }
     }
 
-    /// The rows with a text field, in the order the tabs show them, then each colour's.
+    /// The rows with a text field, in the order the tabs show them, then each color's.
     fn text_rows(&self) -> Vec<Row> {
-        let colours = self.editor().into_iter().flat_map(|e| e.colours.iter().map(|f| Row::Colour(f.side, f.key)));
-        TEXT_ROWS.into_iter().chain(colours).collect()
+        let colors = self.editor().into_iter().flat_map(|e| e.colors.iter().map(|f| Row::Color(f.side, f.key)));
+        TEXT_ROWS.into_iter().chain(colors).collect()
     }
 
-    /// The text of the colour field of `key` on `side`, for its edits; one no longer shown edits
+    /// The text of the color field of `key` on `side`, for its edits; one no longer shown edits
     /// nothing.
-    pub fn colour_edit(&mut self, side: Side, key: &str) -> &mut TextEdit {
-        let Some(i) = self.editor().and_then(|e| e.colours.iter().position(|f| f.side == side && f.key == key)) else {
+    pub fn color_edit(&mut self, side: Side, key: &str) -> &mut TextEdit {
+        let Some(i) = self.editor().and_then(|e| e.colors.iter().position(|f| f.side == side && f.key == key)) else {
             self.gone = TextEdit::new("");
             return &mut self.gone;
         };
-        &mut self.editor_mut().expect("it's shown").colours[i].text
+        &mut self.editor_mut().expect("it's shown").colors[i].text
     }
 
     /// Whether a sheet is open over the window: a Look Preset's, or the App icon's.
@@ -412,10 +412,10 @@ impl SettingsSheet {
     /// What a row's field shows for what's stored; `None` for a row without a field, or before
     /// the service has answered.
     fn stored_text(&self, row: Row, looks: &Looks, saved: &Saved) -> Option<String> {
-        if let Row::Colour(side, key) = row {
+        if let Row::Color(side, key) = row {
             let presets = Presets::of(looks, saved);
             return match presets.get(self.target()?)?.get(side.appearances()[0]).settings.get(key) {
-                Some(Value::Colour(rgb)) => Some(rgb.hex()),
+                Some(Value::Color(rgb)) => Some(rgb.hex()),
                 Some(Value::Toggle(_) | Value::Choice(_)) | None => None,
             };
         }
@@ -424,7 +424,7 @@ impl SettingsSheet {
             Row::Port => Some(port_text(settings)),
             Row::Limit(direction) => Some(limit_text(settings, direction)),
             Row::Seeding(at) => Some(seeding_text(settings, at)),
-            Row::All | Row::Folder | Row::Switch(_) | Row::Colour(..) | Row::PresetName | Row::Image => None,
+            Row::All | Row::Folder | Row::Switch(_) | Row::Color(..) | Row::PresetName | Row::Image => None,
         }
     }
 
@@ -1050,7 +1050,7 @@ pub fn tell_editing(s: &mut SettingsWindow) {
 /// What a text field's text is, once it's a value.
 enum Change {
     Send(Waiting, Setting),
-    Colour(Rgb),
+    Color(Rgb),
 }
 
 /// A row's text field as a change: what's to be made of it, or why its text can't be.
@@ -1074,7 +1074,7 @@ fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<Change, String>> 
             };
             value.map(|value| send(Waiting::Seeding(at), Setting::StopSeeding { at, value })).map_err(problem)
         }
-        Row::Colour(..) => Rgb::parse(text).map(Change::Colour).ok_or_else(|| NOT_A_COLOUR.to_owned()),
+        Row::Color(..) => Rgb::parse(text).map(Change::Color).ok_or_else(|| NOT_A_COLOR.to_owned()),
         Row::All | Row::Folder | Row::Switch(_) | Row::PresetName | Row::Image => return None,
     })
 }
@@ -1083,16 +1083,16 @@ fn change_of(sheet: &SettingsSheet, row: Row) -> Option<Result<Change, String>> 
 fn apply(s: &mut SettingsWindow, row: Row, change: Change) {
     match (change, row) {
         (Change::Send(waiting, setting), _) => send_field(s, waiting, setting),
-        (Change::Colour(rgb), Row::Colour(side, key)) => {
+        (Change::Color(rgb), Row::Color(side, key)) => {
             if let Some(sheet) = &mut s.sheet {
                 sheet.refused.retain(|r| r.row != row);
-                if let Some(field) = sheet.editor_mut().and_then(|e| e.colour_mut(side, key)) {
+                if let Some(field) = sheet.editor_mut().and_then(|e| e.color_mut(side, key)) {
                     field.text = TextEdit::new(rgb.hex());
                 }
             }
-            set_theme(s, side, key, Value::Colour(rgb));
+            set_theme(s, side, key, Value::Color(rgb));
         }
-        (Change::Colour(_), _) => {}
+        (Change::Color(_), _) => {}
     }
 }
 
@@ -1122,9 +1122,9 @@ pub fn submit_seeding(s: &mut SettingsWindow, at: SeedingLimit) {
     submit(s, Row::Seeding(at));
 }
 
-/// Sets a colour field's colour, or says why its text isn't one.
-pub fn submit_colour(s: &mut SettingsWindow, side: Side, key: &'static str) {
-    submit(s, Row::Colour(side, key));
+/// Sets a color field's color, or says why its text isn't one.
+pub fn submit_color(s: &mut SettingsWindow, side: Side, key: &'static str) {
+    submit(s, Row::Color(side, key));
 }
 
 /// Called before every frame: a text field that had the focus and hasn't now (Tab, a click
@@ -1386,9 +1386,9 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
     s.saved.set(was.saved);
     if let Some(sheet) = &mut s.sheet {
         if let Some(edit) = &mut sheet.edit {
-            edit.editor.colours.clear();
+            edit.editor.colors.clear();
         }
-        sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
+        sheet.refused.retain(|r| !matches!(r.row, Row::Color(..)));
         // A saved preset that's gone has its sheet closed.
         if let Some(Target::Saved(name)) = sheet.target()
             && s.saved.get(name).is_none()
@@ -1434,7 +1434,7 @@ fn named(icon: &AppIcon, choice: Option<&Icons>, chars: usize) -> String {
 }
 
 /// The theme setting `key`'s value in `preset` on `side` (Light's, for both), as an undo tells it:
-/// a choice's label, on or off, a colour's hex. Split, the side's in the setting's name
+/// a choice's label, on or off, a color's hex. Split, the side's in the setting's name
 /// ([`theme_named`]).
 pub fn theme_value(preset: &LookPreset, side: Side, key: &str) -> String {
     let look = preset.get(side.appearances()[0]);
@@ -1448,7 +1448,7 @@ pub fn theme_value(preset: &LookPreset, side: Side, key: &str) -> String {
             choices.iter().find(|c| c.id == id).map_or(id, |c| c.label).to_owned()
         }
         (_, Value::Toggle(on)) => if on { "on" } else { "off" }.to_owned(),
-        (_, Value::Colour(rgb)) => rgb.hex(),
+        (_, Value::Color(rgb)) => rgb.hex(),
         (_, Value::Choice(id)) => id.to_owned(),
     }
 }
@@ -1484,7 +1484,7 @@ pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: V
     }
 }
 
-/// The looks may have changed: the App icon follows the Active look, the colour fields show what
+/// The looks may have changed: the App icon follows the Active look, the color fields show what
 /// they hold, and a saved preset's sheet shows it over both windows. The main window draws in them
 /// once it runs what's posted with the change: the change itself, for the undo list, or what its
 /// undo went back to, for the status bar.
@@ -1495,10 +1495,10 @@ fn looks_changed(s: &mut SettingsWindow) {
     if let Some(sheet) = &mut s.sheet {
         let preset = sheet.target().and_then(|t| presets.get(t).cloned());
         if let (Some(editor), Some(preset)) = (sheet.editor_mut(), preset) {
-            editor.show_colours(&preset);
+            editor.show_colors(&preset);
             // A refusal goes with its field: a new one in its place was refused nothing.
-            let shown: Vec<Row> = editor.colours.iter().map(|f| Row::Colour(f.side, f.key)).collect();
-            sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)) || shown.contains(&r.row));
+            let shown: Vec<Row> = editor.colors.iter().map(|f| Row::Color(f.side, f.key)).collect();
+            sheet.refused.retain(|r| !matches!(r.row, Row::Color(..)) || shown.contains(&r.row));
         }
     }
     presets::preview(s);
@@ -1616,32 +1616,32 @@ pub fn choose_theme(s: &mut SettingsWindow, side: Side, id: &str) {
     edited(s, was, target, side, THEME, THEME_LABEL);
 }
 
-/// Why a colour isn't one.
-pub const NOT_A_COLOUR: &str = "A colour is # and six hex digits, like #3366ff";
+/// Why a color isn't one.
+pub const NOT_A_COLOR: &str = "A color is # and six hex digits, like #3366ff";
 
 impl Editor {
-    /// The field of the colour setting `key` on `side`.
-    pub fn colour(&self, side: Side, key: &str) -> Option<&ColourField> {
-        self.colours.iter().find(|f| f.side == side && f.key == key)
+    /// The field of the color setting `key` on `side`.
+    pub fn color(&self, side: Side, key: &str) -> Option<&ColorField> {
+        self.colors.iter().find(|f| f.side == side && f.key == key)
     }
 
-    pub fn colour_mut(&mut self, side: Side, key: &str) -> Option<&mut ColourField> {
-        self.colours.iter_mut().find(|f| f.side == side && f.key == key)
+    pub fn color_mut(&mut self, side: Side, key: &str) -> Option<&mut ColorField> {
+        self.colors.iter_mut().find(|f| f.side == side && f.key == key)
     }
 
-    /// A field for each colour the sheet shows of `preset`, by its side: one still shown keeps
-    /// what's typed in it and its refusal, a new one shows the colour it holds.
-    pub fn show_colours(&mut self, preset: &LookPreset) {
+    /// A field for each color the sheet shows of `preset`, by its side: one still shown keeps
+    /// what's typed in it and its refusal, a new one shows the color it holds.
+    pub fn show_colors(&mut self, preset: &LookPreset) {
         let mut fields = Vec::new();
         for (side, setting, value) in theme_rows(preset, self).controls() {
-            let Value::Colour(rgb) = value else { continue };
-            let field = match self.colours.iter().position(|f| f.side == side && f.key == setting.key) {
-                Some(i) => self.colours.swap_remove(i),
-                None => ColourField { side, key: setting.key, text: TextEdit::new(rgb.hex()) },
+            let Value::Color(rgb) = value else { continue };
+            let field = match self.colors.iter().position(|f| f.side == side && f.key == setting.key) {
+                Some(i) => self.colors.swap_remove(i),
+                None => ColorField { side, key: setting.key, text: TextEdit::new(rgb.hex()) },
             };
             fields.push(field);
         }
-        self.colours = fields;
+        self.colors = fields;
     }
 }
 
@@ -1926,7 +1926,7 @@ fn row_setting(row: Row) -> Option<&'static str> {
         Row::Limit(Direction::Upload) => "upload_limit",
         Row::Seeding(SeedingLimit::Ratio) => "seed_ratio",
         Row::Seeding(SeedingLimit::Time) => "seed_time",
-        Row::All | Row::Colour(..) | Row::PresetName | Row::Image => return None,
+        Row::All | Row::Color(..) | Row::PresetName | Row::Image => return None,
     })
 }
 

@@ -46,7 +46,7 @@ impl Theme for Sample {
         let motion = settings.get("pulse") == Some(Value::Toggle(true));
         let tokens = Kit::neutral(false);
         Built {
-            colours: crate::theme::Colours::of(&tokens),
+            colors: crate::theme::Colors::of(&tokens),
             spacing: crate::theme::Spacing::phantom(),
             tokens,
             blocks: BlockOverrides {
@@ -88,7 +88,7 @@ impl Theme for Link {
     }
     fn build(&self, _: &Values) -> Built {
         Built {
-            colours: crate::theme::Colours::of(&Kit::neutral(false)),
+            colors: crate::theme::Colors::of(&Kit::neutral(false)),
             spacing: crate::theme::Spacing::phantom(),
             tokens: Kit::neutral(false),
             blocks: self.blocks.clone(),

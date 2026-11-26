@@ -3,7 +3,7 @@
 //! in it; around it, rows selected and the row menu opened. A reference model knows the notices,
 //! whether the popover is open, the selection and the menu. After
 //! every step, through what's drawn:
-//! - the bar shows the newest notice's short line in its own colour, then (elements of their own,
+//! - the bar shows the newest notice's short line in its own color, then (elements of their own,
 //!   which never shrink) a pill counting them, tinted by the worst severity among them, when there
 //!   are several, and ›; nothing when there are none;
 //! - the popover is drawn exactly while it's open, and shows one notice, the one the model says, under a head: ‹ n of m › when
@@ -19,7 +19,7 @@
 //!   it and keeps the notices and the selection, and only the next Escape clears the selection;
 //!   a click outside closes it;
 //! - no notice told opens the popover, an error included: it shows in the bar in its severity's
-//!   colour with the count, and only a click opens it; one told while it's open leaves it on what
+//!   color with the count, and only a click opens it; one told while it's open leaves it on what
 //!   it shows; a notice told never moves the focus, and typed text goes to the field. Errors have
 //!   a cap of their own, apart from the others';
 //! - one overlay at a time: the popover and the row menu, opening one closing the other;
@@ -310,8 +310,8 @@ fn drawn_color(rt: &Runtime<Phantom>, key: &str) -> Option<rune::Color> {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting).and_then(|e| e.text_color)
 }
 
-/// The colour of a notice of `severity` (0 info, 1 warning, 2 error) in the look the tests draw.
-fn colour(severity: u8) -> rune::Color {
+/// The color of a notice of `severity` (0 info, 1 warning, 2 error) in the look the tests draw.
+fn color(severity: u8) -> rune::Color {
     let severity = [Severity::Info, Severity::Warning, Severity::Error][severity as usize];
     crate::ui::Ui::phantom(true).tone_color(crate::views::status_bar::tone_of(severity))
 }
@@ -321,7 +321,7 @@ fn check(rt: &Runtime<Phantom>, m: &Model) {
     let newest = m.shown.last();
     assert_eq!(drawn_text(rt, "notice-text"), newest.map(|n| n.short.clone()), "the bar shows the newest");
     if let Some(newest) = newest {
-        assert_eq!(drawn_color(rt, "notice-text"), Some(colour(newest.severity)), "in its own colour, a receipt never amber");
+        assert_eq!(drawn_color(rt, "notice-text"), Some(color(newest.severity)), "in its own color, a receipt never amber");
     }
     let pill = m.pill();
     assert_eq!(
@@ -330,7 +330,7 @@ fn check(rt: &Runtime<Phantom>, m: &Model) {
         "the pill counts the notices, from two up"
     );
     if let Some((_, worst)) = pill {
-        assert_eq!(drawn_color(rt, "notice-count-text"), Some(colour(worst)), "tinted by the worst of them");
+        assert_eq!(drawn_color(rt, "notice-count-text"), Some(color(worst)), "tinted by the worst of them");
     }
     assert_eq!(drawn_text(rt, "notice-open").is_some(), newest.is_some(), "› whenever there's a notice: a click opens it");
     assert_eq!(rt.find("notices-panel").is_some(), m.open.is_some(), "the popover is drawn exactly while open");
@@ -580,7 +580,7 @@ fn error_with_list(short: String) -> Notice {
 
 /// An example, not a property: where the focus is is a walk through the real elements. Typing in the
 /// link field while an error arrives: the popover stays closed, the error shows in the bar in the
-/// error colour, the field keeps the focus and every key after it, and a click on the bar opens it.
+/// error color, the field keeps the focus and every key after it, and a click on the bar opens it.
 #[test]
 fn an_error_arriving_while_typing_stays_in_the_bar_and_leaves_the_focus() {
     let mut rt = app(MemoryService::new());
@@ -1241,7 +1241,7 @@ fn the_connections_words_are_red_when_its_dot_is() {
         rt.update(|s, _| s.connection = state);
         settle(&mut rt);
         assert_eq!(drawn_text(&rt, "connection").as_deref(), Some(said));
-        assert_eq!(words(&rt), colour(2), "{said} in the error colour");
+        assert_eq!(words(&rt), color(2), "{said} in the error color");
         assert_ne!(words(&rt), muted);
     }
 }

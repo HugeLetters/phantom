@@ -100,7 +100,7 @@ fn a_long_path_wraps_in_the_tooltip_whole() {
     }
 }
 
-/// WCAG's contrast ratio of two opaque colours, as Rune holds them (linear).
+/// WCAG's contrast ratio of two opaque colors, as Rune holds them (linear).
 fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
     let lum = |c: [f32; 4]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
     let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
@@ -127,7 +127,7 @@ fn in_dark_a_tooltips_edge_is_fainter_than_the_notices_popovers_but_shows() {
         .find(|i| i.params[1] == KIND_RECT && (i.rect[0] - panel[0] * 2.0).abs() < 1.0 && (i.rect[1] - panel[1] * 2.0).abs() < 1.0)
         .copied()
         .expect("the panel's card");
-    // The panel is the page's own colour in Dark.
+    // The panel is the page's own color in Dark.
     let page = popover.fill;
     let wanted = contrast(popover.border, page);
     assert!(wanted > 1.2, "the popover's edge shows: {wanted}");

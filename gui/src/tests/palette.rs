@@ -475,7 +475,7 @@ fn a_screen_that_registers_no_command_offers_none() {
                 std::rc::Rc::new(|_: &Phantom, _: &crate::ui::Ui, _: &proto::TorrentInfo, _| rune::el());
             let tokens = rune_kit::Kit::neutral(true);
             Built {
-                colours: crate::theme::Colours::of(&tokens),
+                colors: crate::theme::Colors::of(&tokens),
                 spacing: crate::theme::Spacing::phantom(),
                 tokens,
                 blocks: Default::default(),

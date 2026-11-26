@@ -183,7 +183,7 @@ pub(crate) fn phantom_thieves_button(s: &S, key: &str, label: &str, primary: boo
         scale += (0.92 - scale) * pressed_k;
         turn += (tilt(seed, 0.02, 0.05) - turn) * pressed_k;
     }
-    // The face is drawn in its rest colours; the red comes in as the wipe below.
+    // The face is drawn in its rest colors; the red comes in as the wipe below.
     let idle = if primary { (paper(), black()) } else { (black(), paper()) };
     let mut fill = idle.0;
     let mut edge = idle.1.mix(black(), pressed_k);
@@ -210,9 +210,9 @@ pub(crate) fn phantom_thieves_button(s: &S, key: &str, label: &str, primary: boo
     if dis > 0.001 {
         face_sh = hatch(face_sh, w, h, 5.0, 1.2, hex("#8a0a12").alpha(dis), 0.0);
     }
-    // On press the face turns red and the red letters paper. Rune tweens text colour for at
+    // On press the face turns red and the red letters paper. Rune tweens text color for at
     // least 0.1 s (even with `Spring::NONE`), passing through red on red, so the label would
-    // vanish for a moment. Instead both labels are always there, in rest and press colours, each
+    // vanish for a moment. Instead both labels are always there, in rest and press colors, each
     // clipped to its side of the wipe; opacity in an `instant_changes` element lands at once.
     let rest = if primary { (red(), paper()) } else { (paper(), black()) };
     // The letters dim to the disabled ink, keeping their lettering.

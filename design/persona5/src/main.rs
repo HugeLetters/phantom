@@ -229,7 +229,7 @@ fn sheet(s: &S, p: &Parts) -> El {
         again = again.child((p.button)(s, &format!("sheet-again-{k}"), "OPEN…", false, Look::Hover));
     }
     buttons = buttons.child(col().gap(8.0).child(again).child(cap("HOVER, FOUR TIMES").opacity(0.7)));
-    // The bars as unselected rows draw them: the selected row's colours are for its lemon flag
+    // The bars as unselected rows draw them: the selected row's colors are for its lemon flag
     // and read dark on the sheet's ground.
     let unsel = {
         let mut u = s.clone();

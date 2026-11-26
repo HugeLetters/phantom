@@ -52,7 +52,7 @@ pub(crate) fn nebula_rgba(tw: u32, th: u32, seed: u32) -> Vec<u8> {
         (0.85, [0x7f, 0xb4, 0xff]),
         (1.0, [0xcf, 0xe6, 0xff]),
     ];
-    let colour = |v: f32| {
+    let color = |v: f32| {
         let v = v.clamp(0.0, 1.0);
         let k = ramp.iter().position(|r| r.0 >= v).unwrap_or(ramp.len() - 1).max(1);
         let (a, b) = (ramp[k - 1], ramp[k]);
@@ -86,7 +86,7 @@ pub(crate) fn nebula_rgba(tw: u32, th: u32, seed: u32) -> Vec<u8> {
             // Bright filaments and knots where the warped noise folds.
             let f = ridged(sx * 1.6 + 1.5 * qx, sy * 1.6 + 1.5 * qy, foct, 41 + seed);
             let glow = (v + 0.45 * smooth(f0, f1, f) * mask * v.sqrt()).min(1.0);
-            let c = colour(glow);
+            let c = color(glow);
             let a = (v * 1.1).min(0.92);
             let o = ((j * tw + i) * 4) as usize;
             out[o] = c[0] as u8;

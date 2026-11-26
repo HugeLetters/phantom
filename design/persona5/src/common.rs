@@ -1,4 +1,4 @@
-//! What both themes share: the theme switch and its colours, the fonts, the sketch's state, and
+//! What both themes share: the theme switch and its colors, the fonts, the sketch's state, and
 //! the demo torrents.
 
 use rune::{Color, El, Family, Phase, TextStyle};
@@ -6,10 +6,10 @@ use rune::{Color, El, Family, Phase, TextStyle};
 use crate::motion::*;
 
 pub fn hex(s: &str) -> Color {
-    rune::color::hex(s).expect("a hex colour")
+    rune::color::hex(s).expect("a hex color")
 }
 
-/// The two themes the sketch draws. Global, so every colour function follows it; a scene sets it.
+/// The two themes the sketch draws. Global, so every color function follows it; a scene sets it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Theme {
     /// Persona 5's Phantom Thieves: red, black and white paper.
@@ -29,15 +29,15 @@ pub fn jose_shop() -> bool {
     JOSE_SHOP.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The theme's main colour: red, or Jose's blue.
+/// The theme's main color: red, or Jose's blue.
 pub fn red() -> Color {
     if jose_shop() { hex("#1f4fe0") } else { hex("#e60012") }
 }
-/// The main colour's dark shade: deep red, or navy.
+/// The main color's dark shade: deep red, or navy.
 pub fn deep() -> Color {
     if jose_shop() { hex("#0c2466") } else { hex("#a8000c") }
 }
-/// The selection band's colour: the main colour, or Jose's yellow flag.
+/// The selection band's color: the main color, or Jose's yellow flag.
 pub fn select() -> Color {
     if jose_shop() { jose_shop_yellow() } else { red() }
 }
@@ -68,13 +68,13 @@ pub fn jose_shop_yellow_glow() -> Color {
 /// Jose's rounded face.
 pub const JOSE_SHOP_FAMILY: &str = ".SF Compact Rounded";
 
-/// The colour an error is drawn in: the main colour, or on Jose's navy the bars' red, so an
+/// The color an error is drawn in: the main color, or on Jose's navy the bars' red, so an
 /// error's status, number and bar all match.
 pub fn error_c() -> Color {
     if jose_shop() { hex("#ff5a6a") } else { red() }
 }
 /// The download and upload slabs: cyan and pink, or Jose's teal and cream.
-pub fn speed_colours() -> (Color, Color) {
+pub fn speed_colors() -> (Color, Color) {
     if jose_shop() { (hex("#7fe7ff"), hex("#fff3c4")) } else { (hex("#4fe3e3"), hex("#ff5ec4")) }
 }
 

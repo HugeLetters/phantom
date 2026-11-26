@@ -629,7 +629,7 @@ fn a_renamed_name_s_hover_has_the_new_name_and_the_original() {
 }
 
 /// An all-well torrent's path line has nothing on its right; a problem is there, short, in the error
-/// colour. A seeding limit reached isn't a problem: it's on the Info tab.
+/// color. A seeding limit reached isn't a problem: it's on the Info tab.
 #[test]
 fn the_path_line_says_why_it_needs_the_user() {
     let reason = Unavailable::DriveNotConnected { name: "MyDisk".into() };
@@ -825,7 +825,7 @@ fn the_toggle_is_no_column_and_stays_first() {
     assert_eq!(items.len(), Column::ALL.len(), "the header menu lists the columns only: {items:?}");
 }
 
-/// The toggle's glyph colour in row `id`.
+/// The toggle's glyph color in row `id`.
 fn glyph(rt: &Runtime<Phantom>, id: u64) -> Option<rune::Color> {
     let inside = format!("/rows/{id}/");
     rt.elements()

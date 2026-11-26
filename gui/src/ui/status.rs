@@ -1,11 +1,11 @@
-//! Small status pieces: a coloured dot and secondary text.
+//! Small status pieces: a colored dot and secondary text.
 
 use rune::{Color, El, el, text};
 
 use super::Ui;
 
-/// What a piece of text or a status dot means, for the look to colour: screens pick the tone,
-/// only the building blocks turn it into a colour, so a theme can restyle each.
+/// What a piece of text or a status dot means, for the look to color: screens pick the tone,
+/// only the building blocks turn it into a color, so a theme can restyle each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
     Normal,
@@ -19,7 +19,7 @@ pub enum Tone {
 }
 
 impl Ui {
-    /// The colour of text in `tone`.
+    /// The color of text in `tone`.
     pub(crate) fn tone_color(&self, tone: Tone) -> Color {
         match tone {
             Tone::Normal => self.k.c.text_base,
@@ -30,7 +30,7 @@ impl Ui {
         }
     }
 
-    /// A dot in the colour of `tone`, as the look draws it.
+    /// A dot in the color of `tone`, as the look draws it.
     pub fn status_dot(&self, tone: Tone) -> El {
         (self.blocks.status_dot)(self, tone)
     }
@@ -50,7 +50,7 @@ impl Ui {
         rune::text::measure(s, &[], self.k.ty.text_small, None).0
     }
 
-    /// [`caption`](Self::caption) in the error colour: something the user must see to.
+    /// [`caption`](Self::caption) in the error color: something the user must see to.
     pub fn error_caption(&self, s: impl Into<String>) -> El {
         text(s.into()).font(self.k.ty.text_small).color(self.tone_color(Tone::Error))
     }

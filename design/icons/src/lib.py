@@ -162,7 +162,7 @@ MASK4_EYE_R = [(722, 410), (556, 420), (606, 458)]
 
 
 def stars(cx, cy, n, r0, step, colors, ratio=0.62, phase=-math.pi / 2, rotate_step=0.0):
-    """Concentric star outlines, largest first, alternating colours (P5-style tonal pattern)."""
+    """Concentric star outlines, largest first, alternating colors (P5-style tonal pattern)."""
     out, r, i = "", r0, 0
     while r > step:
         pts_ = []
@@ -270,7 +270,7 @@ def splatter2(spots, seed=1, color="#000"):
 
 
 def rim_body(uid, d, base, rim, shade=None, shade_pts=None, shade2=None, shade2_pts=None, dx=-20, dy=-8):
-    """Fill path d with a rim of colour `rim` along its lower-right edge: the body is drawn in `rim`, then
+    """Fill path d with a rim of color `rim` along its lower-right edge: the body is drawn in `rim`, then
     again in `base` clipped to a copy shifted by (dx, dy). Cel-shade polygons are clipped the same way."""
     shades = ""
     if shade:

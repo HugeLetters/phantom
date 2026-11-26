@@ -33,7 +33,7 @@ pub(crate) fn jose_shop_brand() -> El {
     r
 }
 
-/// The fill colour of Jose's bars by state: lemon, a cooler cyan once seeding, pale when paused,
+/// The fill color of Jose's bars by state: lemon, a cooler cyan once seeding, pale when paused,
 /// red on error.
 pub(crate) fn jose_shop_bar_fill(t: &Torrent) -> Color {
     match t.kind {
@@ -230,7 +230,7 @@ pub(crate) fn jose_shop_pattern(
     sh
 }
 
-/// Jose's percent: the number alone, in the row's colours (red on error), now that the card's
+/// Jose's percent: the number alone, in the row's colors (red on error), now that the card's
 /// smoke keeps it legible.
 pub(crate) fn jose_shop_pill(s: &S, t: &Torrent, pct: &str, pw: f32, ph: f32) -> El {
     let ink = if t.kind == Kind::Error {

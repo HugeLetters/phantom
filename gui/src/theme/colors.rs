@@ -1,6 +1,6 @@
-//! The colours Phantom's blocks draw that `Kit` has no field for: each a token named by what it's
-//! for, which a theme sets ([`Colours::of`] derives Phantom's from its `Kit`). Blocks read these and
-//! never compute a colour themselves.
+//! The colors Phantom's blocks draw that `Kit` has no field for: each a token named by what it's
+//! for, which a theme sets ([`Colors::of`] derives Phantom's from its `Kit`). Blocks read these and
+//! never compute a color themselves.
 
 use rune::Color;
 use rune_kit::Kit;
@@ -8,7 +8,7 @@ use rune_kit::Kit;
 use crate::ui::Tone;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Colours {
+pub struct Colors {
     /// A hairline over the page, made opaque so it doesn't tint the fill under it (popovers, the
     /// palette, a sheet's card).
     pub border_on_page: Color,
@@ -36,8 +36,8 @@ pub struct Colours {
     pub field_sheen: (Color, Color),
 }
 
-impl Colours {
-    /// Phantom's colours for `k`.
+impl Colors {
+    /// Phantom's colors for `k`.
     pub fn of(k: &Kit) -> Self {
         let c = &k.c;
         let raised_edge_at = |alpha: f32| opaque_over(k.alpha(c.std_border, alpha), c.page);
@@ -108,7 +108,7 @@ mod tests {
         for dark in [false, true] {
             let k = Kit::neutral(dark);
             let c = &k.c;
-            let t = Colours::of(&k);
+            let t = Colors::of(&k);
             let edge = |a: f32| opaque_over(k.alpha(c.std_border, a), c.page);
 
             assert_eq!(t.border_on_page, opaque_over(c.border_weak, c.page));

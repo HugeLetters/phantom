@@ -5,7 +5,7 @@
 //! - the disk is short exactly while the torrents wanted running need more than is free together,
 //!   files set Off not counting;
 //! - then every torrent that still needs space has the ⚠ in its status cell, in the warning
-//!   colour, and on hover the disk's whole picture (how much is free, this torrent and how many
+//!   color, and on hover the disk's whole picture (how much is free, this torrent and how many
 //!   others still need how much), and no other row has either; free the space, and they all go;
 //! - nothing is ever refused for space.
 //!
@@ -151,19 +151,19 @@ fn check(rt: &Runtime<Phantom>, m: &Model) {
         .collect();
     expected.sort();
     assert_eq!(hovers, expected, "the hover on each warned row");
-    // The warning icon and the status text beside it are in the warning colour, for those rows only.
+    // The warning icon and the status text beside it are in the warning color, for those rows only.
     let warning = crate::ui::Ui::phantom(true).tone_color(crate::ui::Tone::Warning);
     assert!(
         elements
             .iter()
             .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("short-on-space/")))
             .all(|e| e.text_color == Some(warning)),
-        "the icon is in the warning colour"
+        "the icon is in the warning color"
     );
     let statuses = ["Downloading", "Paused"];
-    let coloured =
+    let colored =
         elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| statuses.contains(&t)) && e.text_color == Some(warning)).count();
-    assert_eq!(coloured, warned.len(), "the status text is in the warning colour exactly for those");
+    assert_eq!(colored, warned.len(), "the status text is in the warning color exactly for those");
     assert!(!elements.iter().any(|e| e.text.as_deref().is_some_and(|t| t.starts_with("Won't fit"))), "the status keeps its own words");
     let needed: Vec<u64> = rt.state.volumes.iter().flat_map(|v| v.needs.iter().map(|n| n.id)).collect();
     let expected: Vec<u64> = (0..3).filter(|&i| m.needs(i) > 0).map(|i| i as u64).collect();

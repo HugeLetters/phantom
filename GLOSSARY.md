@@ -191,7 +191,7 @@ _Avoid_: revert, restore, put back (for the action)
 
 **Settings change**:
 A change of one setting that took effect: Return in a field, a switch, a folder, an App icon, a
-theme setting (of the Active look, or of a Saved Look Preset in its sheet: "Accent colour (Dark) of
+theme setting (of the Active look, or of a Saved Look Preset in its sheet: "Accent color (Dark) of
 Evening undone", its undo opening the sheet again), or an Apply, a save, a replace or a delete of a
 Saved Look Preset (Edit ▸ Undo "Undo Apply Evening", and the status bar "Apply Evening undone"),
 from the app or from `phantom settings`. ⌘Z (and Edit ▸ Undo, which names it: "Undo

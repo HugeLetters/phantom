@@ -1,6 +1,6 @@
 from lib import *
 
-# Round 11, Persona 5 colour swaps (81-85): darker versions of 46 and the cards 50/51 for a dark
+# Round 11, Persona 5 color swaps (81-85): darker versions of 46 and the cards 50/51 for a dark
 # Appearance, plus a red-ground card. The ghost always stays white. Shapes copied from r7_mask.py.
 TRI = poly(MASK7_EYE_L, fill="#fff") + poly(MASK7_EYE_R, fill="#fff")
 DARK_RED, DEEP_RED = "#a8000c", "#5c0007"
@@ -68,7 +68,7 @@ def card_icon(name, ground, dots, edge, card_fill, card_print=""):
 # 84: 51 with a deep-red card printed with darker stars, red edge, on black
 card_icon("r11-84-card-deep-red", "#0d0d0d", "#2e2e2e", RED, DEEP_RED,
           stars(*CARD_STARS, [DEEP_RED, "#2a0004"], phase=-math.pi / 2 - 0.2))
-# 85: colours swapped: a black card with a red edge and dark star print on red, grey-red halftone
+# 85: colors swapped: a black card with a red edge and dark star print on red, grey-red halftone
 card_icon("r11-85-card-black-on-red", RED, DARK_RED, "#fff", "#0d0d0d",
           stars(*CARD_STARS, ["#0d0d0d", "#262626"], phase=-math.pi / 2 - 0.2))
 

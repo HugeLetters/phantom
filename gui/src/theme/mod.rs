@@ -13,7 +13,7 @@
 //! [ADR 0004]: ../../../docs/adr/0004-themes-override-building-blocks.md
 //! [ADR 0011]: ../../../docs/adr/0011-look-presets.md
 
-mod colours;
+mod colors;
 pub mod phantom;
 pub mod preset;
 pub mod saved;
@@ -31,7 +31,7 @@ use rune_kit::Kit;
 
 use crate::model::Phantom;
 use crate::ui::{BlockOverrides, Blocks, Ui};
-pub use colours::Colours;
+pub use colors::Colors;
 use setting::{Setting, Values};
 pub use spacing::Spacing;
 
@@ -53,10 +53,10 @@ pub trait Theme: Sync {
 
 /// What a theme builds from a Theme Look's settings.
 pub struct Built {
-    /// Every colour, font, radius and timing its blocks draw with.
+    /// Every color, font, radius and timing its blocks draw with.
     pub tokens: Kit,
-    /// The colours its blocks draw that `tokens` has no field for.
-    pub colours: Colours,
+    /// The colors its blocks draw that `tokens` has no field for.
+    pub colors: Colors,
     /// The room between and around things, and the fixed heights.
     pub spacing: Spacing,
     /// The blocks it draws itself; the rest are its parent's.
@@ -177,7 +177,7 @@ impl Look {
         }
         let base = (Blocks::phantom(phantom::icon), Screens::phantom());
         let (blocks, screens) = chain.iter().rev().fold(base, |(blocks, screens), (b, s)| (blocks.over(b), screens.over(s)));
-        Look { ui: Ui::new(built.tokens, built.colours, built.spacing, blocks, built.motion), screens, app_icon: built.app_icon }
+        Look { ui: Ui::new(built.tokens, built.colors, built.spacing, blocks, built.motion), screens, app_icon: built.app_icon }
     }
 }
 

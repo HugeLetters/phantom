@@ -1055,7 +1055,7 @@ fn check_is_off_while_fetching_info() {
     assert!(!row_menu(&mut rt, id).contains(&"Check".to_owned()));
 }
 
-/// The colour the text `text` is drawn in, inside the element at `key`.
+/// The color the text `text` is drawn in, inside the element at `key`.
 fn text_color(rt: &Runtime<Phantom>, key: &str, text: &str) -> rune::Color {
     let elements = rt.elements();
     let e = elements.iter().find(|e| e.path.contains(key) && e.text.as_deref() == Some(text));
@@ -1169,7 +1169,7 @@ fn pressing_the_disabled_add_says_why_until_the_text_changes() {
 }
 
 /// What's known before anything is sent says so in a neutral tooltip on the button clicked, Add's
-/// and Resume's alike: the text in the look's own text colour, no error colour anywhere in it.
+/// and Resume's alike: the text in the look's own text color, no error color anywhere in it.
 #[test]
 fn add_clicked_with_text_that_isnt_a_link_says_why_in_a_neutral_tooltip() {
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a")]));
@@ -1180,8 +1180,8 @@ fn add_clicked_with_text_that_isnt_a_link_says_why_in_a_neutral_tooltip() {
     let neutral = |rt: &Runtime<Phantom>, note: &str| {
         let inside: Vec<rune::ElementInfo> = rt.elements().into_iter().filter(|e| !e.exiting && e.path.contains(note)).collect();
         let text = inside.iter().find(|e| e.text.is_some()).unwrap_or_else(|| panic!("{note} shows"));
-        assert_eq!(text.text_color, Some(k.c.text_base), "{note}: the text's own colour");
-        assert!(inside.iter().all(|e| e.fill != k.c.danger.bg && e.text_color != Some(k.c.danger.fg)), "{note}: no error colour");
+        assert_eq!(text.text_color, Some(k.c.text_base), "{note}: the text's own color");
+        assert!(inside.iter().all(|e| e.fill != k.c.danger.bg && e.text_color != Some(k.c.danger.fg)), "{note}: no error color");
         text.text.clone().unwrap_or_default()
     };
     tap(&mut rt, "add");
@@ -1948,19 +1948,19 @@ fn a_notice_prints_its_short_line_and_the_list_draws_its_buttons() {
     assert_eq!(notice(&rt), Some("Revealed"), "the action runs on the state");
 }
 
-/// An example, not a property: colours are what's drawn, which only a comparison of two draws
-/// shows. The status bar reads a notice's severity in its colour again.
+/// An example, not a property: colors are what's drawn, which only a comparison of two draws
+/// shows. The status bar reads a notice's severity in its color again.
 #[test]
-fn the_status_bar_shows_a_notice_in_the_colour_of_its_severity() {
+fn the_status_bar_shows_a_notice_in_the_color_of_its_severity() {
     use crate::notice::Notice;
-    let mut colours = Vec::new();
+    let mut colors = Vec::new();
     for notice in [Notice::new("Same words"), Notice::warning("Same words"), Notice::error("Same words")] {
         let mut rt = app(MemoryService::new());
         rt.update(move |s, _| s.bar.tell(notice.clone()));
         settle(&mut rt);
-        colours.push(text_color(&rt, "notice", "Same words"));
+        colors.push(text_color(&rt, "notice", "Same words"));
     }
-    assert!(colours[0] != colours[1] && colours[1] != colours[2] && colours[0] != colours[2], "{colours:?}");
+    assert!(colors[0] != colors[1] && colors[1] != colors[2] && colors[0] != colors[2], "{colors:?}");
 }
 
 /// An example, not a property, for the reason above: the settings-reset notice explains; its

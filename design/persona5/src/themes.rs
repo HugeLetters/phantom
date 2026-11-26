@@ -207,7 +207,7 @@ pub(crate) fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -
     // the tilt are all drawn from these, so selecting, deselecting and hovering in any order
     // animate from wherever the row is.
     let (ha, sa, band_seed) = row_amounts(s, &key, matches!(look, Look::Hover | Look::Press), selected, selection_seed(s, t));
-    // The text turns to the selection's colours once the band is half in (or half out).
+    // The text turns to the selection's colors once the band is half in (or half out).
     let shown_sel = sa > 0.5;
     let (name, muted, mut status_c) = if shown_sel { (on_select(), on_select(), on_select()) } else { (paper(), muted(), hex("#e2e2e2")) };
     if t.kind == Kind::Error && !shown_sel {
@@ -217,7 +217,7 @@ pub(crate) fn torrent_row(s: &S, i: usize, look: Look, selected: bool, w: f32) -
     // Jose's flag glows through a blur.
     let mut glow_sh: Option<Shape> = None;
     // On Jose's shop, hovering draws the selection's own flag, the same shape, at a quarter
-    // strength, so clicking only fills its colour in. Pressed counts as hovered here, so the
+    // strength, so clicking only fills its color in. Pressed counts as hovered here, so the
     // faint flag stays through the click until the selection fades in over it.
     let ghost_flag = jose_shop() && ha > 0.001 && !selected;
     let come = ha.min(1.0);
@@ -473,9 +473,9 @@ pub(crate) fn step_offset(i: usize) -> f32 {
 
 /// The speed `v` (down or up) on a slab whose corners drift, as the game's highlighted shapes:
 /// black figures on cyan or pink, or on Jose's shop an italic figure on a near-black,
-/// see-through counter plate, over a thin underline in the speed's colour.
+/// see-through counter plate, over a thin underline in the speed's color.
 pub(crate) fn speed_cell(v: &str, down: bool, t: f32) -> El {
-    let (dc, uc) = speed_colours();
+    let (dc, uc) = speed_colors();
     let c = if down { dc } else { uc };
     if jose_shop() {
         let (pw, ph) = (70.0, 20.0);

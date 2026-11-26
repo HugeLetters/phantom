@@ -1,5 +1,5 @@
 //! Phantom's building blocks: every screen draws with these, never with rune-kit or raw styling,
-//! so a theme can override them one at a time ([ADR 0004]). Every colour, font, radius and
+//! so a theme can override them one at a time ([ADR 0004]). Every color, font, radius and
 //! timing a block uses is a token of the look (a rune-kit [`Kit`]); the blocks a theme can draw
 //! itself are in [`blocks`].
 //!
@@ -28,7 +28,7 @@ mod text_field;
 use rune::{El, col, el, row};
 use rune_kit::Kit;
 
-use crate::theme::{Colours, Motion, Spacing};
+use crate::theme::{Colors, Motion, Spacing};
 
 pub use blocks::{BlockOverrides, Blocks};
 #[cfg(test)]
@@ -49,8 +49,8 @@ pub use text_field::TEXT_INSET;
 pub struct Ui {
     /// The look's tokens: palette, type, radii, elevation, motion, glyphs.
     k: Kit,
-    /// The colours the look sets that `k` has no field for.
-    colours: Colours,
+    /// The colors the look sets that `k` has no field for.
+    colors: Colors,
     /// The room between and around things, and the fixed heights, as the look sets them.
     spacing: Spacing,
     blocks: Blocks,
@@ -59,8 +59,8 @@ pub struct Ui {
 
 impl Ui {
     /// The look of `tokens` and `blocks`, as a theme resolved them, moving as `motion` says.
-    pub fn new(tokens: Kit, colours: Colours, spacing: Spacing, blocks: Blocks, motion: Motion) -> Self {
-        Self { k: tokens, colours, spacing, blocks, motion }
+    pub fn new(tokens: Kit, colors: Colors, spacing: Spacing, blocks: Blocks, motion: Motion) -> Self {
+        Self { k: tokens, colors, spacing, blocks, motion }
     }
 
     /// The look's spacing, which screens lay out with.
@@ -82,7 +82,7 @@ impl Ui {
     }
 
     /// The look's tokens, as a block of another look's reads them (a Look Preset's editor draws
-    /// each half's column on its own card colour).
+    /// each half's column on its own card color).
     pub fn tokens(&self) -> &Kit {
         &self.k
     }

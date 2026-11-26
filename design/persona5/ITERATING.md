@@ -12,7 +12,7 @@ when missed.
   outside every worktree (see the README's "Game references"), never in an issue or the PR.
   Catalogue its patterns first (one desk entry per area, confirmed by the reviewer), so every
   proposal can sit beside its reference crop.
-- **Sample the reference colours** before the first render, not after the reviewer notices the
+- **Sample the reference colors** before the first render, not after the reviewer notices the
   yellow is too red.
 - **Write down what will be merged** (spec, final components, helpers, tooling, these notes), so
   exploration stays out of git from the start.
@@ -45,8 +45,8 @@ when missed.
 
 - **Children matched by position.** Dropping or adding a child (a shadow on hover) makes the next
   child a "new" element, and Rune cross-fades it over the old one. Keep every layer and fade it.
-- **Text colour always tweens** for at least 0.1 s, even with `Spring::NONE`. Where text swaps
-  colours, keep both labels and clip each to its side of a wipe.
+- **Text color always tweens** for at least 0.1 s, even with `Spring::NONE`. Where text swaps
+  colors, keep both labels and clip each to its side of a wipe.
 - **Offsets spring.** A brief shake needs `instant_changes()`, and a look at the exact frames.
 - **Concave polygons fill wrongly**, flickering into a fan, or a clipped chevron filling its
   notch. Draw and clip them as convex pieces, and check 30+ consecutive frames, not one still.

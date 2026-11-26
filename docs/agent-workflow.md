@@ -57,7 +57,7 @@
    generator changes it draws another case, so it no longer pins the bug.
 5. **Artifacts:** for every user-visible change, render the real app headlessly:
    - stills: `target/debug/phantom-gui --snap out.png --scene <scene> --size 960x600 --scale 2`
-     (both `--theme dark` and `light` when colours change), plus the 640x320 minimum size. Add
+     (both `--theme dark` and `light` when colors change), plus the 640x320 minimum size. Add
      `--at 0.5` when the scene shows anything the service sends later, such as a torrent's files:
      the first frame has none yet;
    - interactions: a `--script` run written to frames (`--out frames/`) with `--keys --pointer`,

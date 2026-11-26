@@ -34,7 +34,7 @@ pub enum Kind {
         /// How Settings draws it.
         show: Show,
     },
-    Colour {
+    Color {
         default: Rgb,
     },
 }
@@ -54,7 +54,7 @@ pub struct Choice {
     pub label: &'static str,
 }
 
-/// A colour a person picks, stored as `"#rrggbb"`.
+/// A color a person picks, stored as `"#rrggbb"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rgb(pub [u8; 3]);
 
@@ -71,7 +71,7 @@ impl Rgb {
         format!("#{r:02x}{g:02x}{b:02x}")
     }
 
-    /// The colour as Rune holds it: linear, decoded from the sRGB bytes by Rune's own `hex`.
+    /// The color as Rune holds it: linear, decoded from the sRGB bytes by Rune's own `hex`.
     pub fn color(self) -> rune::Color {
         rune::color::hex(&self.hex()).expect("`hex` is always `#rrggbb`")
     }
@@ -83,7 +83,7 @@ pub enum Value {
     Toggle(bool),
     /// The id of one of the setting's choices.
     Choice(&'static str),
-    Colour(Rgb),
+    Color(Rgb),
 }
 
 impl Kind {
@@ -91,7 +91,7 @@ impl Kind {
         match *self {
             Kind::Toggle { default } => Value::Toggle(default),
             Kind::Choice { default, .. } => Value::Choice(default),
-            Kind::Colour { default } => Value::Colour(default),
+            Kind::Color { default } => Value::Color(default),
         }
     }
 
@@ -100,16 +100,16 @@ impl Kind {
         match self {
             Kind::Toggle { .. } => json.as_bool().map(Value::Toggle),
             Kind::Choice { choices, .. } => json.as_str().and_then(|id| choices.iter().find(|c| c.id == id)).map(|c| Value::Choice(c.id)),
-            Kind::Colour { .. } => json.as_str().and_then(Rgb::parse).map(Value::Colour),
+            Kind::Color { .. } => json.as_str().and_then(Rgb::parse).map(Value::Color),
         }
     }
 
     /// Whether `value` is one this kind holds.
     fn holds(&self, value: &Value) -> bool {
         match (self, value) {
-            (Kind::Toggle { .. }, Value::Toggle(_)) | (Kind::Colour { .. }, Value::Colour(_)) => true,
+            (Kind::Toggle { .. }, Value::Toggle(_)) | (Kind::Color { .. }, Value::Color(_)) => true,
             (Kind::Choice { choices, .. }, Value::Choice(id)) => choices.iter().any(|c| c.id == *id),
-            (Kind::Toggle { .. } | Kind::Choice { .. } | Kind::Colour { .. }, _) => false,
+            (Kind::Toggle { .. } | Kind::Choice { .. } | Kind::Color { .. }, _) => false,
         }
     }
 }
@@ -119,7 +119,7 @@ impl Value {
         match self {
             Value::Toggle(on) => Json::Bool(on),
             Value::Choice(id) => Json::String(id.to_owned()),
-            Value::Colour(rgb) => Json::String(rgb.hex()),
+            Value::Color(rgb) => Json::String(rgb.hex()),
         }
     }
 }
@@ -185,9 +185,9 @@ pub(crate) mod tests {
 
     use super::*;
 
-    /// A picked colour is sRGB; `rune::Color` is linear, so it is decoded as Rune decodes a hex.
+    /// A picked color is sRGB; `rune::Color` is linear, so it is decoded as Rune decodes a hex.
     #[test]
-    fn a_picked_colour_is_decoded_from_srgb() {
+    fn a_picked_color_is_decoded_from_srgb() {
         let picked = Rgb::parse("#2f7fe3").unwrap().color();
         assert_eq!(picked, rune::color::hex("#2f7fe3").unwrap());
         assert!(picked.r < 0.1, "0x2f as linear is 0.18, as sRGB 0.03");
@@ -209,7 +209,7 @@ pub(crate) mod tests {
                 show: Show::Dropdown,
             },
         },
-        Setting { key: "accent", label: "Accent", kind: Kind::Colour { default: Rgb([0x33, 0x66, 0xff]) } },
+        Setting { key: "accent", label: "Accent", kind: Kind::Color { default: Rgb([0x33, 0x66, 0xff]) } },
     ];
 
     /// Any value of `setting`'s kind.
@@ -219,7 +219,7 @@ pub(crate) mod tests {
             Kind::Choice { choices, .. } => {
                 proptest::sample::select(choices.iter().map(|c| c.id).collect::<Vec<_>>()).prop_map(Value::Choice).boxed()
             }
-            Kind::Colour { .. } => any::<[u8; 3]>().prop_map(|c| Value::Colour(Rgb(c))).boxed(),
+            Kind::Color { .. } => any::<[u8; 3]>().prop_map(|c| Value::Color(Rgb(c))).boxed(),
         }
     }
 
@@ -233,8 +233,8 @@ pub(crate) mod tests {
         let other = prop_oneof![Just(json!(null)), Just(json!(3)), Just(json!([])), Just(json!({})), "[a-z]{1,6}".prop_map(Json::String)];
         match setting.kind {
             Kind::Toggle { .. } => other.boxed(),
-            // Strings that aren't a colour or a choice: none of these is "#" and six hex digits, or a choice's id.
-            Kind::Choice { .. } | Kind::Colour { .. } => {
+            // Strings that aren't a color or a choice: none of these is "#" and six hex digits, or a choice's id.
+            Kind::Choice { .. } | Kind::Color { .. } => {
                 prop_oneof![Just(json!(true)), Just(json!(1.5)), "x[a-z]{0,6}".prop_map(Json::String), Just(json!("#12345"))].boxed()
             }
         }
@@ -288,7 +288,7 @@ pub(crate) mod tests {
         fn set_takes_only_a_value_of_the_settings_kind(values in values_of(&SAMPLE), i in 0..SAMPLE.len(), value in prop_oneof![
             any::<bool>().prop_map(Value::Toggle),
             prop_oneof![Just("round"), Just("square"), Just("cut"), Just("oval")].prop_map(Value::Choice),
-            any::<[u8; 3]>().prop_map(|c| Value::Colour(Rgb(c))),
+            any::<[u8; 3]>().prop_map(|c| Value::Color(Rgb(c))),
         ]) {
             let mut set = values.clone();
             let took = set.set(SAMPLE[i].key, value);
@@ -301,7 +301,7 @@ pub(crate) mod tests {
         }
 
         #[test]
-        fn a_colour_reads_back_from_its_hex(rgb in any::<[u8; 3]>()) {
+        fn a_color_reads_back_from_its_hex(rgb in any::<[u8; 3]>()) {
             prop_assert_eq!(Rgb::parse(&Rgb(rgb).hex()), Some(Rgb(rgb)));
             prop_assert_eq!(Rgb::parse(&Rgb(rgb).hex().to_uppercase()), Some(Rgb(rgb)));
         }

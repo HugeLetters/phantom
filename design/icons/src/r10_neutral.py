@@ -50,7 +50,7 @@ ROUND_EYES = (f'<circle cx="{CX - 86}" cy="436" r="44" fill="{BG_BOTTOM}"/>'
 out("r10-68-neutral-round-eyes", f'<rect width="1024" height="1024" fill="url(#bg)"/><path d="{GHOST_N}" fill="{INK}"/>{ROUND_EYES}')
 
 # 69: 68 with rounded bottom corners and hem points, like 67's outline: the ghost is traced with a thick
-# same-colour stroke with round joins, scaled down a touch so the extra stroke width doesn't grow it
+# same-color stroke with round joins, scaled down a touch so the extra stroke width doesn't grow it
 SOFT = (f'<g transform="translate({CX} 500) scale(0.955) translate(-{CX} -500)">'
         f'<path d="{GHOST_N}" fill="{INK}" stroke="{INK}" stroke-width="40" stroke-linejoin="round"/></g>')
 out("r10-69-neutral-soft", f'<rect width="1024" height="1024" fill="url(#bg)"/>{SOFT}{ROUND_EYES}')

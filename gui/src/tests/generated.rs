@@ -1666,7 +1666,7 @@ fn check_landed(rt: &Runtime<Phantom>, rows: &Rows, frame: u64) {
         match said {
             Said::Added(id) => assert!(s.torrents.iter().any(|t| t.id == *id), "added torrent {id} is listed from frame {frame}"),
             Said::Noted(note) => {
-                // The error is in the status bar from the frame it lands, in the error colour's severity,
+                // The error is in the status bar from the frame it lands, in the error color's severity,
                 // with the popover still closed; its list is what a click on the bar shows.
                 assert!(!s.bar.is_open(), "the error of {note:?} didn't open the popover at frame {frame}");
                 assert!(

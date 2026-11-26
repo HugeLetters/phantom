@@ -11,7 +11,7 @@ pub struct Button<'a> {
     key: String,
     label: String,
     inner: rune_kit::Button,
-    /// Borderless, its label in the muted text colour.
+    /// Borderless, its label in the muted text color.
     muted: bool,
     /// What a press on the button does while it's disabled.
     when_disabled: Option<Box<dyn FnOnce(El) -> El>>,
@@ -46,7 +46,7 @@ impl Ui {
 
 impl Button<'_> {
     /// The action a group of buttons leads with. While it's off it looks as quiet as any button
-    /// that's off (#33): the lead's colour is for when it can act.
+    /// that's off (#33): the lead's color is for when it can act.
     pub fn primary(mut self) -> Self {
         self.primary = true;
         self
@@ -110,7 +110,7 @@ impl Button<'_> {
         self
     }
 
-    /// A text button in the muted colour, for what shouldn't draw the eye (Dismiss all).
+    /// A text button in the muted color, for what shouldn't draw the eye (Dismiss all).
     pub fn muted(mut self) -> Self {
         self.muted = true;
         self

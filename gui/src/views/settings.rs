@@ -16,7 +16,7 @@ use crate::model::settings::presets;
 use crate::model::settings::{
     AppIcon, Chip, Editor, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, add_image, chip_in_use, choose_chip, choose_folder,
     choose_image, choose_pair, choose_theme, clear_folder, close, close_icons, close_menu, edit_icons, escape, icon_full_name, icon_name,
-    pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_colour, submit_limit, submit_port, submit_seeding,
+    pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_color, submit_limit, submit_port, submit_seeding,
     toggle, toggle_menu,
 };
 use crate::model::settings::{Held, THEME, ThemeRow, ThemeRows, focused_side, join_row, split_row, theme_rows};
@@ -112,7 +112,7 @@ fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: Appe
         },
     };
     // A tab lands at once: its rows and their dividers don't spring from where the last tab's
-    // were, and, keyed by its tab, nothing of the last tab's is reused, so no colour eases from
+    // were, and, keyed by its tab, nothing of the last tab's is reused, so no color eases from
     // what it was there either (#342).
     let page = col().key(format!("tab-page-{}", sheet.tab.label())).w_full().instant_changes().child(page);
     page.transition(rune::Transition::none())
@@ -310,8 +310,7 @@ fn editor(
                 let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
                 let lines = held.iter().map(|(setting, value)| {
                     let control = theme_control(setting, side, *value, editor, ui, wants(setting.key, side, &[side]), layer);
-                    let notes =
-                        sheet.refused(Row::Colour(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
+                    let notes = sheet.refused(Row::Color(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
                     ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes)
                 });
                 ui.card([heading, theme].into_iter().chain(lines).collect::<Vec<_>>()).grow(1.0).min_w(0.0)
@@ -337,7 +336,7 @@ fn join_control(ui: &Ui, key: &'static str, label: &str, joined: bool) -> El {
 }
 
 /// A setting's row, one theme in both halves: one control across both columns, drawn in both
-/// looks, or one in each, in its half's; its Split or Join; and why a colour typed there was
+/// looks, or one in each, in its half's; its Split or Join; and why a color typed there was
 /// refused.
 #[allow(clippy::too_many_arguments)]
 fn same_row(
@@ -367,7 +366,7 @@ fn same_row(
     let notes = sides
         .iter()
         .filter_map(|&side| {
-            let why = sheet.refused(Row::Colour(side, key))?;
+            let why = sheet.refused(Row::Color(side, key))?;
             Some((if row.joined { why.to_owned() } else { format!("{}: {why}", side_label(side)) }, Tone::Error))
         })
         .collect();
@@ -429,7 +428,7 @@ fn save_as(sheet: &SettingsSheet, ui: &Ui) -> Option<El> {
 }
 
 /// The control that sets `setting` to a value of its kind on `side`, showing `value`, keyed
-/// `edit-<key>-<side>`. `focus` makes a toggle or a choice first in the Tab order; a colour's
+/// `edit-<key>-<side>`. `focus` makes a toggle or a choice first in the Tab order; a color's
 /// field takes focus through its text.
 fn theme_control(
     setting: &'static crate::theme::setting::Setting,
@@ -470,19 +469,19 @@ fn theme_control(
         (Kind::Toggle { .. }, Value::Toggle(on)) => {
             ui.switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Toggle(!on)))
         }
-        (Kind::Colour { .. }, Value::Colour(rgb)) => {
-            let Some(field) = editor.colour(side, key) else { return el() };
+        (Kind::Color { .. }, Value::Color(rgb)) => {
+            let Some(field) = editor.color(side, key) else { return el() };
             let text = ui
                 .text_field(control_key, &field.text, setting.label)
-                .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").colour_edit(side, key))
-                .on_submit(move |s: &mut SettingsWindow, _| submit_colour(s, side, key))
+                .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").color_edit(side, key))
+                .on_submit(move |s: &mut SettingsWindow, _| submit_color(s, side, key))
                 .on_key(escape_key)
-                .width(COLOUR_WIDTH)
+                .width(COLOR_WIDTH)
                 .build();
             row().gap(ui.spacing().s3).center_y().child(ui.swatch(rgb.color())).child(text)
         }
         // A value is always of its setting's kind (`Values`).
-        (Kind::Choice { .. } | Kind::Toggle { .. } | Kind::Colour { .. }, _) => el(),
+        (Kind::Choice { .. } | Kind::Toggle { .. } | Kind::Color { .. }, _) => el(),
     }
 }
 
@@ -495,12 +494,12 @@ fn theme_control(
 fn look_presets(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: Appearance) -> El {
     let looks = s.looks();
     let active = looks.preset();
-    let colours = |half: Appearance, preset: &LookPreset| {
+    let colors = |half: Appearance, preset: &LookPreset| {
         let look = preset.get(half);
         let c = look.theme.build(&look.settings).tokens.c;
         (c.page, c.text_base, c.bg_accent)
     };
-    let mut rows = vec![active_row(active, sheet, ui, &colours)];
+    let mut rows = vec![active_row(active, sheet, ui, &colors)];
     rows.extend(save_as(sheet, ui));
     // The first chip takes the focus as the section does: an undo's, or the first preset's ◐.
     let wanted = match (&sheet.chip, first(sheet, presets::SETTING)) {
@@ -513,14 +512,14 @@ fn look_presets(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: 
         let chip = |half: Option<Appearance>| {
             let halves = half.map_or(Appearance::BOTH.to_vec(), |h| vec![h]);
             let in_use = halves.iter().all(|h| saved.preset.get(*h) == active.get(*h));
-            let shown: Vec<_> = halves.iter().map(|h| colours(*h, &saved.preset)).collect();
+            let shown: Vec<_> = halves.iter().map(|h| colors(*h, &saved.preset)).collect();
             let help = match (half, in_use) {
                 (None, false) => display::apply_both(name),
                 (None, true) => display::both_in_use(name),
                 (Some(half), false) => display::apply_half(name, half.label()),
                 (Some(half), true) => display::half_in_use(name, half.label()),
             };
-            let accent = colours(half.unwrap_or(appearance), &saved.preset).2;
+            let accent = colors(half.unwrap_or(appearance), &saved.preset).2;
             let glyph = match half {
                 None => Icon::Both,
                 Some(Appearance::Light) => Icon::Light,
@@ -560,10 +559,10 @@ fn active_row(
     active: &LookPreset,
     sheet: &SettingsSheet,
     ui: &Ui,
-    colours: &dyn Fn(Appearance, &LookPreset) -> (rune::Color, rune::Color, rune::Color),
+    colors: &dyn Fn(Appearance, &LookPreset) -> (rune::Color, rune::Color, rune::Color),
 ) -> El {
     let [light, dark] = Appearance::BOTH.map(|half| {
-        let (page, text, accent) = colours(half, active);
+        let (page, text, accent) = colors(half, active);
         let glyph = if half == Appearance::Light { Icon::Light } else { Icon::Dark };
         let help = display::edit_active_half(half.label());
         let chip = LookChip { glyph, pages: vec![page], texts: vec![text], accent, in_use: false, help };
@@ -616,8 +615,8 @@ const SAVE_AS_WIDTH: f32 = 160.0;
 /// How tall Save as…'s line is, its field or its question: a field and the line's padding under it.
 const SAVE_AS_HEIGHT: f32 = 32.0;
 
-/// How wide a colour's field is: `#rrggbb`.
-const COLOUR_WIDTH: f32 = 84.0;
+/// How wide a color's field is: `#rrggbb`.
+const COLOR_WIDTH: f32 = 84.0;
 
 /// The App icon's row, one line: what it is, the icon each Appearance shows now, small (both,
 /// each with a ☀ or ☾ at its corner, while they differ; one while they're the same), and Edit…,

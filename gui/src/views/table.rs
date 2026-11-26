@@ -96,7 +96,7 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
                 }
                 ("name", _) => cui.cell_text(t.display_name(), Tone::Normal, false),
                 // The free-space warning, while its disk is short for the torrents that need it (#127,
-                // #209): its status as ever, in the warning colour with a warning icon, and the
+                // #209): its status as ever, in the warning color with a warning icon, and the
                 // disk's picture on hover.
                 ("status", _) => match (space::short_on_space(s, id), status_reason(t)) {
                     (Some(why), _) => cui.warned_text(client::display::status(&t.status), why, format!("short-on-space/{id}")),

@@ -29,9 +29,9 @@ from wherever the element is, and no transition is written for a pair of states.
 
 - **Never swap drawings:** an element keeps the same parts at every state, faded or moved by the
   amounts. Swapping one drawing for another shows as a cross-fade, a double image.
-- **Never blend through low contrast:** where text and its ground swap colours (red letters on
+- **Never blend through low contrast:** where text and its ground swap colors (red letters on
   paper becoming paper letters on red), the change moves as a wipe across the element, each side
-  in its own colours.
+  in its own colors.
 
 ### Progress
 
@@ -73,7 +73,7 @@ from wherever the element is, and no transition is written for a pair of states.
   was dropped because clicks on its clear corners don't pass through.
 - **List sheet:** black (`#0b0b0b`) on a torn white paper panel with a fat black outline.
 
-### Colours
+### Colors
 
 | token | value |
 |---|---|
@@ -104,7 +104,7 @@ from wherever the element is, and no transition is written for a pair of states.
   - **Both:** cut on the slant, over a black shadow.
 - **Hover:**
   - **Face:** the slab morphs into a living slab whose corners drift, 4 points in from the box.
-    It keeps its own colours.
+    It keeps its own colors.
   - **Copies:** cyan and red copies slide out from behind it.
   - **Pose:** it swells to 108% and tilts, fresh each activation.
   - **Shadow:** fades out.
@@ -164,7 +164,7 @@ The ghost mask sits by "Connected" on a black strip, with the totals on the righ
   - **Glints:** 90 white glints twinkling among them, any of which flashes a four-point sparkle
     every 6–10 s.
 
-### Colours
+### Colors
 
 | token | value |
 |---|---|

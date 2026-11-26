@@ -63,17 +63,17 @@ impl Ui {
             .child(body)
             .child(foot)
             .on_key(on_key);
-        // Dark: a wash of the text's colour over the raised surface, lifting it off the window.
-        let panel = match self.colours.dialog_wash {
+        // Dark: a wash of the text's color over the raised surface, lifting it off the window.
+        let panel = match self.colors.dialog_wash {
             Some(wash) => panel.radius(k.radius.lg).fill(wash),
             None => panel,
         };
         let surface = popover::raised(k, panel, k.radius.lg);
-        let surface = match self.colours.dialog_fill {
+        let surface = match self.colors.dialog_fill {
             Some(fill) => surface.fill(fill),
             None => surface,
         };
-        let surface = surface.border(1.0, self.colours.dialog_edge);
+        let surface = surface.border(1.0, self.colors.dialog_edge);
         let surface = surface.modal(true, on_close).modal_click_outside(false).token_motion(k.motion.overlay);
         layer.push(el().key(format!("{key}-scrim")).absolute(0.0, 0.0).w_full().h_full().fill(c.scrim).a11y_hidden());
         layer.push(el().key(format!("{key}-layer")).absolute(0.0, 0.0).w_full().h_full().padding(self.spacing.s7).center().child(surface));
