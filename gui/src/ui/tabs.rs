@@ -15,7 +15,7 @@ pub enum BandSide {
     Right,
 }
 
-/// Phantom's tab: its label, the one shown in the text colour over a line in the accent.
+/// Phantom's tab: its label, the one shown in the text color over a line in the accent.
 pub(super) fn phantom_tab(ui: &Ui, label: &str, selected: bool) -> El {
     let k = &ui.k;
     let color = if selected { k.c.text_base } else { k.c.text_muted };

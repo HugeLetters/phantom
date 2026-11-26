@@ -15,6 +15,6 @@ Themes are built into the app (Rust code with their assets in their own folder).
 
 ## Considered options
 
-- **Colour tokens only**: can't express themes that differ in shape and motion, not just palette.
+- **Color tokens only**: can't express themes that differ in shape and motion, not just palette.
 - **A separate set of views per theme**: duplicates behaviour and doubles every change.
 - **User-made themes with a scripting layer**: what gives herdr-app its range, but it needs a stable scripting API and runs untrusted code; far more than Phantom needs.

@@ -81,13 +81,13 @@ impl Ui {
         layer.push(popover::anchored(&self.k, tip, anchor, Placement::Bottom, 4.0));
     }
 
-    /// The tooltip's surface: raised, in the text's own colour, as wide as its text up to
-    /// [`MAX_WIDTH`]. No tint and no error colour: it says what's so, it isn't an alarm.
+    /// The tooltip's surface: raised, in the text's own color, as wide as its text up to
+    /// [`MAX_WIDTH`]. No tint and no error color: it says what's so, it isn't an alarm.
     fn tooltip(&self, key: &str, message: &str) -> El {
         let k = &self.k;
         let message = text(message.to_owned()).font(k.ty.text_small).color(k.c.text_base).max_lines(3);
         let body =
             col().key(format!("{key}-content")).role("tooltip").max_w(MAX_WIDTH).px(self.spacing.s5).py(self.spacing.s3).child(message);
-        popover::raised(k, body, k.radius.md).border(1.0, self.colours.border_on_page)
+        popover::raised(k, body, k.radius.md).border(1.0, self.colors.border_on_page)
     }
 }

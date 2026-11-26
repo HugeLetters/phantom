@@ -159,8 +159,8 @@ fn open_sheet(s: &mut SettingsWindow, target: Target) {
 pub fn cancel(s: &mut SettingsWindow) {
     let Some(sheet) = &mut s.sheet else { return };
     let Some(edit) = sheet.edit.take() else { return };
-    sheet.had_focus.retain(|row| !matches!(row, Row::Colour(..)));
-    sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
+    sheet.had_focus.retain(|row| !matches!(row, Row::Color(..)));
+    sheet.refused.retain(|r| !matches!(r.row, Row::Color(..)));
     preview(s);
     // Put back once a ⌘Z pressed just before has taken its step, which would otherwise come last.
     let opened = edit.opened;
@@ -182,10 +182,10 @@ pub fn close(s: &mut SettingsWindow) {
     let rows: Vec<Row> = sheet
         .text_rows()
         .into_iter()
-        .filter(|row| matches!(row, Row::Colour(..)))
+        .filter(|row| matches!(row, Row::Color(..)))
         .filter(|&row| sheet.had_focus.contains(&row) || sheet.field(row).is_some_and(|f| f.focused))
         .collect();
-    sheet.had_focus.retain(|row| !matches!(row, Row::Colour(..)));
+    sheet.had_focus.retain(|row| !matches!(row, Row::Color(..)));
     for row in rows {
         if let Some(field) = s.sheet.as_mut().and_then(|sheet| sheet.field_mut(row)) {
             field.focused = false;
@@ -194,7 +194,7 @@ pub fn close(s: &mut SettingsWindow) {
     }
     let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.take()) else { return };
     if let Some(sheet) = &mut s.sheet {
-        sheet.refused.retain(|r| !matches!(r.row, Row::Colour(..)));
+        sheet.refused.retain(|r| !matches!(r.row, Row::Color(..)));
     }
     preview(s);
     // What's left of the visit once a ⌘Z pressed just before has taken its step.
@@ -221,7 +221,7 @@ pub fn preview(s: &mut SettingsWindow) {
 }
 
 /// After an undo, the theme setting `key` of `target` set on `side`, in its sheet (opened, and
-/// Settings with it, if closed), its row joined or split as it was set, its control focused: a colour's
+/// Settings with it, if closed), its row joined or split as it was set, its control focused: a color's
 /// field through its text, any other as the sheet's first in the Tab order.
 pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, side: Side, tx: &mut Tx) {
     if s.sheet.is_none() {
@@ -242,12 +242,12 @@ pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, s
     };
     looks_changed(s);
     let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) else { return };
-    for field in &mut edit.editor.colours {
+    for field in &mut edit.editor.colors {
         field.text.focused = false;
     }
-    let at = edit.editor.colours.iter().position(|f| f.key == key && f.side == side);
-    let at = at.or_else(|| edit.editor.colours.iter().position(|f| f.key == key));
-    match at.map(|i| &mut edit.editor.colours[i]) {
+    let at = edit.editor.colors.iter().position(|f| f.key == key && f.side == side);
+    let at = at.or_else(|| edit.editor.colors.iter().position(|f| f.key == key));
+    match at.map(|i| &mut edit.editor.colors[i]) {
         Some(field) => field.text.focused = true,
         None => {
             edit.focus = Some((key, side));

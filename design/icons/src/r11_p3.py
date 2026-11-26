@@ -42,7 +42,7 @@ def out(name, body, defs=""):
     icon_sizes(name)
 
 
-# 36's Dark Hour colours: sky gradient, moon lime, green sheen on the body
+# 36's Dark Hour colors: sky gradient, moon lime, green sheen on the body
 DH_SKY = grad("dh", [(0, "#2c4a1c"), (1, "#081208")], x2=0)
 LIME, LIME_L, LIME_D = "#c6e65a", "#f4ff9a", "#8fbf3a"
 GREEN_SHARDS = ("#f4ff9a", "#c6e65a", "#e8ffd0")

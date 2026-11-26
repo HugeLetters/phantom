@@ -29,7 +29,7 @@ const TAIL_DEPTH: f32 = 6.0;
 
 impl Ui {
     /// The status bar's notice, keyed `notice`, one button: the newest's `line` (`notice-text`) in
-    /// its colour, which truncates; the `undo` after it, a small button of its own; the `pill` (`notice-count`), a count tinted by the worst
+    /// its color, which truncates; the `undo` after it, a small button of its own; the `pill` (`notice-count`), a count tinted by the worst
     /// severity; and › (`notice-open`). It fills on hover. A control: Tab reaches it, with the
     /// look's focus ring, and the popover gives focus back to it.
     pub fn notice_button(&self, line: impl Into<String>, tone: Tone, undo: Option<El>, pill: Option<(String, Tone)>, open: &str) -> El {
@@ -63,7 +63,7 @@ impl Ui {
             .px(9.0)
             .radius(8.0)
             .center()
-            .fill(self.colours.count_fill(tone))
+            .fill(self.colors.count_fill(tone))
             .child(text(count).key("notice-count-text").font(k.ty.text_xsmall_medium.features("'tnum' 1")).color(ink))
     }
 
@@ -72,7 +72,7 @@ impl Ui {
         icon(self.icon(mark), 16.0).key("notice-mark").color(self.tone_color(tone))
     }
 
-    /// A notice's line in the list: medium weight, in its colour, wrapping.
+    /// A notice's line in the list: medium weight, in its color, wrapping.
     pub fn notice_title(&self, line: impl Into<String>, tone: Tone) -> El {
         text(line.into()).font(self.k.ty.text_small_medium).color(self.tone_color(tone)).wrap()
     }
@@ -233,19 +233,19 @@ impl Ui {
     /// The edge of the notices popover's panel: `std_border` over the page, a surface raised over
     /// it that is to show. (A note's own is fainter: `k.c.border_weak`.)
     pub(super) fn raised_edge(&self) -> rune::Color {
-        self.colours.raised_edge
+        self.colors.raised_edge
     }
 
     /// A tooltip's edge: the panel's in Light, about half as strong in Dark, where the card is the
-    /// page's own colour and a strong edge would outweigh the small text in it.
+    /// page's own color and a strong edge would outweigh the small text in it.
     pub(super) fn tooltip_edge(&self) -> rune::Color {
-        self.colours.tooltip_edge
+        self.colors.tooltip_edge
     }
 
     /// The fill of a surface raised over the page: the card's in Light; in Dark the window's own
     /// surface, set apart from the list by its border and shadow.
     pub(super) fn raised_fill(&self) -> rune::Color {
-        self.colours.raised_fill
+        self.colors.raised_fill
     }
 
     /// The tail under a panel: a turned square in its fill and border, clipped to its lower half,

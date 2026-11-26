@@ -25,7 +25,7 @@ use crate::model::Phantom;
 /// the paths each on a line of its own (as `client::display` words them).
 pub use client::display::{Line, Listing};
 
-/// How much a notice matters; the status bar colours it. Ordered from least to most: the worst of
+/// How much a notice matters; the status bar colors it. Ordered from least to most: the worst of
 /// several is their `max`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {

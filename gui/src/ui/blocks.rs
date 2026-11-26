@@ -28,7 +28,7 @@ use super::{BandSide, Icon, Tone, Ui};
 
 /// Draws a progress bar: `fraction` from 0.0 to 1.0.
 pub type ProgressBar = Rc<dyn Fn(&Ui, f32) -> El>;
-/// Draws a dot in the colour of `tone`.
+/// Draws a dot in the color of `tone`.
 pub type StatusDot = Rc<dyn Fn(&Ui, Tone) -> El>;
 /// Draws one tab, selected or not: the screen keys it and gives it its press.
 pub type Tab = Rc<dyn Fn(&Ui, &str, bool) -> El>;
@@ -38,7 +38,7 @@ pub type TabBar = Rc<dyn Fn(&Ui, Vec<El>) -> El>;
 /// drag the window by.
 pub type Band = Rc<dyn Fn(&Ui, BandSide) -> El>;
 /// Draws how a field edited in place shows its focus, around the `field` (plain, no box of its
-/// own), over `behind`, the colour of the row it's in. It's opaque: the field covers the cell's
+/// own), over `behind`, the color of the row it's in. It's opaque: the field covers the cell's
 /// own text.
 pub type FieldFocus = Rc<dyn Fn(&Ui, El, rune::Color) -> El>;
 /// The icons a theme draws: `None` for one it leaves to its parent.

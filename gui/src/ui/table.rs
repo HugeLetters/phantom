@@ -1,5 +1,5 @@
 //! Tables: screens describe the columns and cells with rune-kit's [`Table`] builder and hand it to
-//! [`Ui::table`], which draws it in the current look. Cells that need the look's colours come
+//! [`Ui::table`], which draws it in the current look. Cells that need the look's colors come
 //! from here too.
 
 use rune::{Align, El, PointerPress, Tx, icon, row, text};
@@ -62,7 +62,7 @@ impl Ui {
     /// What a drag moves a column by, over its header cell: clear, tinted on hover and while its
     /// column is being moved (`active`).
     pub fn column_grip(&self, active: bool) -> El {
-        let tint = self.colours.grip_active;
+        let tint = self.colors.grip_active;
         let grip = rune::el().grow(1.0).h_full().radius(self.k.radius.sm).cursor(rune::Cursor::Pointer).hover(self.k.c.hover);
         if active { grip.fill(tint) } else { grip }
     }
@@ -74,7 +74,7 @@ impl Ui {
     }
 
     /// A status that carries a warning: its text and a warning icon after it, both in the warning
-    /// colour, the whole thing explaining itself on hover with `why`. `key` names the icon.
+    /// color, the whole thing explaining itself on hover with `why`. `key` names the icon.
     pub fn warned_text(&self, text_: impl Into<String>, why: impl Into<String>, key: impl Into<String>) -> El {
         let color = self.tone_color(Tone::Warning);
         let why = why.into();
@@ -108,7 +108,7 @@ impl Ui {
             .my(1.0)
             .center()
             .fill(c.bg_button_neutral)
-            // Around the fill, not over it, so it takes in the row's own colour (selected, hovered).
+            // Around the fill, not over it, so it takes in the row's own color (selected, hovered).
             .box_shadow(rune::Shadow { spread: 1.0, color: c.border_muted, ..Default::default() })
             .radius((self.k.radius.sm - 1.0).max(0.0))
             .child(icon(self.icon(icon_), 12.0).key("toggle-glyph").color(color));

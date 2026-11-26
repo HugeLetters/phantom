@@ -1,6 +1,6 @@
 from lib import *
 
-# 08e iterated: centred on its real bounding box; smaller burst with a thinner outline; colour swap
+# 08e iterated: centred on its real bounding box; smaller burst with a thinner outline; color swap
 R, NECK, LENGTH, FLARE, TEETH, DEPTH = 230, 160, 430, 210, 3, 60
 TILT = -6
 

@@ -9,7 +9,7 @@
 //! The name, shortened in the middle as Finder does where it's too long (whole on hover, with the
 //! original name after a Rename, #331; Rename… turns it into a field, in place, as wide), and on its right the Size and how much is Off when some
 //! files are. Under it, where it is, always, shortened in the middle as well (whole on hover), and
-//! on its right the problem it has, short and in the error colour, when it has one. Where the
+//! on its right the problem it has, short and in the error color, when it has one. Where the
 //! window is short the header is one line (name · size · where), the problem on its hover. Then
 //! two tabs: Files, its files with their progress (or Missing) and priority, which a click cycles;
 //! and Info, what it uploaded, its ratio, the seeding limit it stopped at, its info hash and magnet

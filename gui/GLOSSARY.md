@@ -61,9 +61,9 @@ _Avoid_: current preset, current look
 
 **Look chip**:
 A small square button for a Look Preset's half (☀ Light, ☾ Dark) or both (◐, `circle.lefthalf.filled`),
-drawn as the look it stands for: its glyph in that half's text colour on its page (◐: split along
+drawn as the look it stands for: its glyph in that half's text color on its page (◐: split along
 the diagonal from bottom-left to top-right, the Light's page top-left and the Dark's bottom-right;
-its glyph is one ring on the same diagonal, the top-left half an arc in the Light's text colour,
+its glyph is one ring on the same diagonal, the top-left half an arc in the Light's text color,
 the bottom-right half an arc in the Dark's, nothing along the seam, for every preset alike). It carries no theme name; its hover says what a press does ("Apply Evening's
 Light to the active look"). In use, it's outlined 3 pt in that half's accent, 2 pt out from it.
 The App icon's sheet has the same chips under each icon, ☀ on a light page and ☾ on a dark one. Like the editor, the sheet is an **undo session**: ⌘Z in it takes back this visit's picks one at a time and it stays open; with none left ⌘Z does nothing; closing it makes the visit one undo step ("App icon: Dark Hour → Memento Mori").
@@ -119,7 +119,7 @@ several sent in part takes it away too; one picker opens at a time; a failed Ope
 disk has **Check** after Show folder. A button that no longer applies is not shown: its torrent is
 gone (a torrent removed and added again is another, as is one whose id a new torrent list gave out
 again), its command already went through, or the
-service says it can't run now. A receipt has none. The bar shows the newest notice's line in its own colour (a receipt
+service says it can't run now. A receipt has none. The bar shows the newest notice's line in its own color (a receipt
 is never amber), the Undo of the newest action's notice (the small button the connection's are), then
 the **pill**, an oval with the count of every notice tinted by the worst severity among them (a
 count, not a place: no "1/7"; it shows from two notices), then ›. A click
@@ -151,7 +151,7 @@ _Avoid_: toast, transient notice, auto-dismiss
 A notice of severity Error, "Couldn't undo the change" (or "Couldn't undo the Delete", with the
 names in the list) among them, for a setting as for a torrent: where errors with no better place show: the adds made outside the window
 (files dropped on it or opened from Finder, a magnet clicked in a browser), Add file…, the folder
-picker and failed commands. In the status bar in the error colour, the pill red, explained in the
+picker and failed commands. In the status bar in the error color, the pill red, explained in the
 popover a click opens (an error never opens it by itself), and dismissed with ×; a batch of adds stays one notice ("Couldn't add 2 of
 5", each failure under it as its view). What the service refuses is a notice, the field's own add
 too ("No peers have this torrent"). What's known before anything is sent stays on the control: a
@@ -161,7 +161,7 @@ too ("No peers have this torrent"). What's known before anything is sent stays o
 Why something can't be done, known before anything is sent, on the control clicked: a disabled
 button's (Resume with nothing paused), Add's with text that isn't a link, a name the Rename field
 can't take (under the field, until the next keystroke). Neutral, the same in Light and Dark: one
-shape, a raised surface with a single hairline, the text's own colour, never the error colour. A
+shape, a raised surface with a single hairline, the text's own color, never the error color. A
 hover's explanation (what a clash's choice does, once the pointer rests on it for 0.5 s) is one too. It's Phantom's own block (`ui/popover.rs`), not the system's tooltip, so it looks the same everywhere.
 _Avoid_: error note, red bubble, alert
 

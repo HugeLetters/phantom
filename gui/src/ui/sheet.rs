@@ -49,7 +49,7 @@ pub struct LookChip {
     pub glyph: Icon,
     /// The page of each half it stands for: one, or the Light's then the Dark's, split diagonally.
     pub pages: Vec<rune::Color>,
-    /// The text of each half it stands for, in the same order: its glyph's colour on that page.
+    /// The text of each half it stands for, in the same order: its glyph's color on that page.
     pub texts: Vec<rune::Color>,
     /// The accent that outlines it while it's in use.
     pub accent: rune::Color,
@@ -162,7 +162,7 @@ impl Ui {
                 .child(label)
                 .on_press(move |s: &mut S| on_pick(s, i));
             if !on {
-                segment = segment.hover(c.hover).press(self.colours.pressed_over_hover);
+                segment = segment.hover(c.hover).press(self.colors.pressed_over_hover);
             }
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
         }
@@ -271,7 +271,7 @@ impl Ui {
         let centre = (CHIP - GLYPH) / 2.0;
         // ◐ is two looks split along the diagonal from bottom-left to top-right: the Light's top-left,
         // the Dark's bottom-right. Each half is a square turned 45° (so its clip is a half-plane)
-        // holding its half of a ring centred on the chip, in its own text colour.
+        // holding its half of a ring centred on the chip, in its own text color.
         let half = |page: rune::Color, ink: rune::Color, light: bool| {
             let (size, turn) = (2.0 * CHIP, std::f32::consts::FRAC_PI_4);
             // The square's centre is `size / 2` from the chip's centre, perpendicular to the seam.
@@ -303,7 +303,7 @@ impl Ui {
             _ => el().key("face"),
         };
         let face = face.radius(k.radius.sm).clip_rounded(k.radius.sm);
-        // A hairline over the look, so a chip the colour of the window doesn't vanish; in use, an
+        // A hairline over the look, so a chip the color of the window doesn't vanish; in use, an
         // outline 3 pt wide in the half's accent, 2 pt out from the chip.
         let edge = el().key("edge").absolute(0.0, 0.0).size(CHIP, CHIP).radius(k.radius.sm).border(1.0, c.border_base).a11y_hidden();
         let ring = chip.in_use.then(|| {
@@ -319,7 +319,7 @@ impl Ui {
         if let Some(on_apply) = on_apply {
             chip_el = chip_el.role("button").focusable(true).focus_ring(2.0, 1.0, c.border_focus);
             if !chip.in_use {
-                chip_el = chip_el.hover(c.hover).press(self.colours.pressed_over_hover).on_press(move |s: &mut S| on_apply(s));
+                chip_el = chip_el.hover(c.hover).press(self.colors.pressed_over_hover).on_press(move |s: &mut S| on_apply(s));
             }
             chip_el = if first_focus { chip_el.tab_index(1) } else { chip_el };
         } else {
@@ -432,7 +432,7 @@ impl Ui {
     pub fn card(&self, rows: impl IntoIterator<Item = El>) -> El {
         let k = &self.k;
         let mut card =
-            col().w_full().padding(self.spacing.s2).radius(k.radius.md).fill(k.c.bg_base).border(1.0, self.colours.border_on_page);
+            col().w_full().padding(self.spacing.s2).radius(k.radius.md).fill(k.c.bg_base).border(1.0, self.colors.border_on_page);
         for (i, r) in rows.into_iter().enumerate() {
             if i > 0 {
                 card = card.child(el().h(1.0).mx(8.0).fill(k.c.border_weak).a11y_hidden());
@@ -521,7 +521,7 @@ impl Ui {
     }
 
     /// The heading of a Look Preset's editor's half, drawn in that half's look (`self`): ☀ Light
-    /// or ☾ Dark on its card colour, keyed `halves-header-light` or `-dark`.
+    /// or ☾ Dark on its card color, keyed `halves-header-light` or `-dark`.
     pub fn half_heading(&self, appearance_dark: bool) -> El {
         let k = &self.k;
         let (glyph, name, which) = if appearance_dark { (Icon::Dark, "Dark", "dark") } else { (Icon::Light, "Light", "light") };
@@ -578,7 +578,7 @@ impl Ui {
 
     /// On or off; a press calls `on_toggle`, which flips it in the app's state. `first_focus`: first
     /// in the Tab order, so the page focuses it as it opens. Off, its track is the look's strong
-    /// border colour, so it shows on a light card too.
+    /// border color, so it shows on a light card too.
     pub fn switch<S: 'static>(
         &self,
         key: impl Into<String>,
@@ -616,7 +616,7 @@ impl Ui {
             .gap(TILE_GAP)
             .items_center()
             .radius(k.radius.md)
-            .fill(self.colours.tile_fill)
+            .fill(self.colors.tile_fill)
             .hover_group()
             .child(picture)
             .child(self.tile_name(label))
@@ -720,14 +720,14 @@ impl Ui {
             .gap(TILE_GAP)
             .items_center()
             .radius(k.radius.md)
-            .fill(self.colours.tile_fill)
+            .fill(self.colors.tile_fill)
             .focusable(true)
             .focus_ring(2.0, 1.0, k.c.border_focus)
             .child(both)
             .child(self.tile_name(label))
             .children(ring);
         if !in_use {
-            tile = tile.hover(k.c.hover).press(self.colours.pressed_over_hover).on_press(on_press);
+            tile = tile.hover(k.c.hover).press(self.colors.pressed_over_hover).on_press(on_press);
         }
         tile
     }

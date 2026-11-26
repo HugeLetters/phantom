@@ -15,9 +15,9 @@ selection moving on are all covered.
 
 ## Consequences
 
-- **Low-contrast colour swaps:** where a label and its ground would pass through low contrast
+- **Low-contrast color swaps:** where a label and its ground would pass through low contrast
   (red letters on a face turning red), the change moves as a wipe across the component instead of
-  a colour blend.
-- **Two copies of the label:** Rune still tweens a text colour change for at least 0.1 s, even
-  with `Spring::NONE`, so a label that swaps colours is kept twice, each copy clipped to its side
+  a color blend.
+- **Two copies of the label:** Rune still tweens a text color change for at least 0.1 s, even
+  with `Spring::NONE`, so a label that swaps colors is kept twice, each copy clipped to its side
   of the wipe.

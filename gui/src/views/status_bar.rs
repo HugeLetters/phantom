@@ -1,5 +1,5 @@
 //! The status bar: the connection to the service, its notices ([`crate::bar`]), and the totals.
-//! The bar shows the newest notice's line in its own colour, its Undo while there is one, a pill
+//! The bar shows the newest notice's line in its own color, its Undo while there is one, a pill
 //! (from two notices up) with how many there are tinted by the worst of them, and ›; a click always opens a popover above it, attached by a tail,
 //! showing one notice at a time, newest first: its mark, its line and ×, the names, why, and its
 //! buttons. Only × dismisses (#87). The popover opens over the other overlays ([`crate::overlay`]).
@@ -85,7 +85,7 @@ fn bar_undo(s: &Phantom, ui: &Ui) -> Option<El> {
     })
 }
 
-/// The bar's notice, a button: the newest's line in its colour, its Undo, the pill (how many, in the colour
+/// The bar's notice, a button: the newest's line in its color, its Undo, the pill (how many, in the color
 /// of the worst; none for one) and ›; and the popover, while open.
 fn notices(s: &Phantom, newest: String, tone: Tone, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
     let pill = s.bar.pill().map(|(count, worst)| (client::display::notices_count(count), tone_of(worst)));
@@ -237,7 +237,7 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction], id: crate::bar::machi
     (Some(row), why_shown.map(|why| ui.caption(why).wrap().key("notice-action-why")))
 }
 
-/// The colour a notice's severity reads in: a receipt or an action's notice in the text's own,
+/// The color a notice's severity reads in: a receipt or an action's notice in the text's own,
 /// never amber.
 pub fn tone_of(severity: Severity) -> Tone {
     match severity {
@@ -253,7 +253,7 @@ fn offered(s: &Phantom, action: &NoticeAction) -> bool {
     action.shown.as_ref().is_none_or(|shown| shown(s))
 }
 
-/// A notice's mark and its colour: ✓ done, ⓘ nothing was done, ⚠ a warning, ⛔ an error.
+/// A notice's mark and its color: ✓ done, ⓘ nothing was done, ⚠ a warning, ⛔ an error.
 pub(crate) fn mark_of(notice: &crate::notice::Notice) -> (Icon, Tone) {
     match notice.severity {
         Severity::Info if notice.nothing => (Icon::Info, Tone::Muted),

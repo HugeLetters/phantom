@@ -414,7 +414,7 @@ pub fn names_listed(names: &[String]) -> String {
 /// A line of a notice's list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Line {
-    /// A name or a text of Phantom's, in the text's own colour; it wraps.
+    /// A name or a text of Phantom's, in the text's own color; it wraps.
     Name(String),
     /// A reason or a label, muted; it wraps.
     Muted(String),
@@ -944,13 +944,13 @@ pub fn look_preset_undone() -> &'static str {
 }
 
 /// A theme setting of a saved Look Preset, as the bar's line names it: no name the user chose,
-/// "Accent colour (Dark) of a saved Look Preset".
+/// "Accent color (Dark) of a saved Look Preset".
 pub fn of_a_saved_preset(short: &str) -> String {
     format!("{short} of a saved Look Preset")
 }
 
 /// What an undo of a setting tells, short: "Download limit undone"; `short` is [`setting_short`]'s,
-/// or a theme setting's name ("Accent colour (Dark)").
+/// or a theme setting's name ("Accent color (Dark)").
 pub fn setting_undone_short(short: &str) -> String {
     format!("{short} undone")
 }
@@ -1051,7 +1051,7 @@ pub fn preset_change(verb: &str, preset: &str, half: Option<&str>) -> String {
     }
 }
 
-/// A setting `short` of the saved Look Preset `preset`, as an undo of it names it: "Accent colour
+/// A setting `short` of the saved Look Preset `preset`, as an undo of it names it: "Accent color
 /// (Dark) of Evening".
 pub fn of_preset(short: &str, preset: &str) -> String {
     format!("{short} of {preset}")
@@ -1664,7 +1664,7 @@ mod tests {
     #[test]
     fn a_setting_undo_says_which_and_from_what_to_what() {
         assert_eq!(setting_undone_short("Download limit"), "Download limit undone");
-        assert_eq!(setting_undone_short("Accent colour (Dark)"), "Accent colour (Dark) undone");
+        assert_eq!(setting_undone_short("Accent color (Dark)"), "Accent color (Dark) undone");
     }
 
     /// A change reads "old → new" in a list, the setting's name staying in the line (rule 6).
@@ -1677,7 +1677,7 @@ mod tests {
     #[test]
     fn the_line_of_a_look_preset_undo_names_no_preset() {
         assert_eq!(look_preset_undone(), "Look Preset change undone");
-        assert_eq!(setting_undone_short(&of_a_saved_preset("Accent colour (Dark)")), "Accent colour (Dark) of a saved Look Preset undone");
+        assert_eq!(setting_undone_short(&of_a_saved_preset("Accent color (Dark)")), "Accent color (Dark) of a saved Look Preset undone");
     }
 
     /// One failure, one wording (rule 5): an undo that couldn't be done says "Couldn't undo" with its

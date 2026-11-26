@@ -103,7 +103,7 @@ impl TextField<'_> {
         if !self.plain {
             // The kit's field is flat, its focus ring inside its edge; Phantom's keeps a sheen, and
             // its ring around it.
-            inner = inner.gradient(self.ui.colours.field_sheen.0, self.ui.colours.field_sheen.1);
+            inner = inner.gradient(self.ui.colors.field_sheen.0, self.ui.colors.field_sheen.1);
             if self.edit.focused {
                 inner = inner.outline(1.0, 0.0, k.c.border_focus);
             }
@@ -127,9 +127,9 @@ const PLACEHOLDER_INSET: f32 = 8.0;
 pub const TEXT_INSET: f32 = 8.0;
 
 /// How a field edited in place (the details pane's name) shows that it has the focus, drawn over
-/// `behind`, the colour of what it sits on: Phantom's [`Blocks::field_focus`](super::Blocks) slot,
+/// `behind`, the color of what it sits on: Phantom's [`Blocks::field_focus`](super::Blocks) slot,
 /// an accent line under the text and nothing around it. Opaque: it covers the cell's own text, in
-/// the colour of the row it's in.
+/// the color of the row it's in.
 pub fn phantom_focus(ui: &Ui, field: El, behind: rune::Color) -> El {
     let k = &ui.k;
     let c = &k.c;
@@ -149,7 +149,7 @@ impl Ui {
         (self.blocks.field_focus)(self, field, behind)
     }
 
-    /// A [`heading`](Self::heading)'s text style and the panel's colour, for a field in place of a
+    /// A [`heading`](Self::heading)'s text style and the panel's color, for a field in place of a
     /// heading (the details pane's name).
     pub fn heading_field_look(&self) -> (rune::TextStyle, rune::Color) {
         (self.k.ty.ui_medium, self.k.c.bg_base)

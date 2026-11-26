@@ -124,7 +124,7 @@ impl Ui {
             .min_h(0.0)
             .radius(k.radius.lg)
             .fill(c.layer_01)
-            .border(1.0, self.colours.border_on_page)
+            .border(1.0, self.colors.border_on_page)
             .child(search)
             .child(el().key("rule").w_full().h(1.0).fill(c.border_muted).a11y_hidden())
             .child(rows)

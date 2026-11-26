@@ -35,7 +35,7 @@ new number instead. Numbers stay design history only; the app sees ids and names
 | 51 | Calling Card | `calling-card` | Persona 5 | `round7/51-card-mid-mask-stars.svg`, `src/r7_mask.py` | A red card printed with the star pattern, the masked white ghost breaking out of it, on black |
 | 50 | Calling Card (Alt) | `calling-card-alt` | Persona 5 | `round7/50-card-mid-mask.svg`, `src/r7_mask.py` | 51 without the star print |
 | 84 | Calling Card (Alt 2) | `calling-card-alt-2` | Persona 5 | `round11/84-card-deep-red.svg`, `src/r11_p5.py` | 51 with a deep-red card and darker print |
-| 85 | Black Mask | `black-mask` | Persona 5 | `round11/85-card-black-on-red.svg`, `src/r11_p5.py` | 51's colours swapped: a black card with a white edge on red |
+| 85 | Black Mask | `black-mask` | Persona 5 | `round11/85-card-black-on-red.svg`, `src/r11_p5.py` | 51's colors swapped: a black card with a white edge on red |
 
 The ghost is never red in the Persona 5 icons.
 
@@ -101,7 +101,7 @@ names, themes, pairs, theme icons):
 - `src/iter/app-check.png` (not committed) unpacks each `.icns` again and shows its 16 and 32 px
   images on light and dark, so the check is of what ships. All fourteen hold at 32 px; at 16 px
   the Persona 3 masks shrink to a teal dot and 84's dark card nearly vanishes, but the figure and
-  the colours still read.
+  the colors still read.
 
 To change the set, edit the table in `app_icons.py` (and copy any new pick into `picks/<id>.*`),
 then rerun it and `picks_sheet.py`.
@@ -213,7 +213,7 @@ Feedback on round 3:
 - 07f: the background and the cel shadow are good, but the ghost and especially the mask look
   like Persona 5. Make the ghost more Persona 3, perhaps borrowing from the Shadow enemies.
 - 07g: looks like Flash-game art; dropped. 07h: nice, but off-centre; mix 07f and 07h.
-- 08e: very nice but off-centre. 08f: burst too big and outline too wide; maybe swap colours.
+- 08e: very nice but off-centre. 08f: burst too big and outline too wide; maybe swap colors.
 
 Reference images are saved in `refs/` (gitignored, see `refs/README.md`). From this round on,
 the overview shows the 64 and 32 px renders at 2× with nearest-neighbour scaling, so the
@@ -243,7 +243,7 @@ New shapes in `lib.py`:
 | 07l | shadow-dark-hour | Dark Shadow against a green "Dark Hour" moon | Moon and face read |
 | 08g | bighead-centred | 08e centred on its real rotated bounding box | Very good |
 | 08h | bighead-small-burst | Smaller burst behind the head, thinner white outline | Good |
-| 08i | bighead-white-burst | Colours swapped: white ghost, black eyes, black cut-out, over the smaller burst | Very good |
+| 08i | bighead-white-burst | Colors swapped: white ghost, black eyes, black cut-out, over the smaller burst | Very good |
 
 Dropped this round: a ragged-edged arrowhead for 04 (it read as stair steps), and a white bar
 under 04's arrow tip (clutter).
@@ -263,7 +263,7 @@ Feedback on round 4:
 - 01f: nice, but the eyes are a bit big; they nearly touch the bottom of the mask.
 - 01g: the blocky band doesn't feel Persona. Try flame shapes like the reference mask, if they
   aren't too noisy at small sizes.
-- 01h and 01j: liked a lot. 01i needs more colour. 01k: liked, but tweak the randomness.
+- 01h and 01j: liked a lot. 01i needs more color. 01k: liked, but tweak the randomness.
 - 02d and 02e: nice.
 - 04g: looks like a knight. Other ways to fill the arrowhead?
 - 07i: good idea, but too flat, like Flash-game art. Keep the earlier ghost ideas and give the
@@ -469,7 +469,7 @@ zigzag hem, no white eyes with pupils. Files are in `round10/`; the sheet is
 | 66 | neutral-lit | Softly lit: a radial glow behind the ghost, a white-to-grey body gradient and a blurred floor shadow |
 | 67 | neutral-outline | Line-art ghost (40 px stroke) with light eyes, like an SF Symbol |
 | 68 | neutral-round-eyes | 65 with round eyes (r = 44), after the user liked 65 |
-| 69 | neutral-soft | 68 with the bottom corners and hem points rounded like 67's outline: the ghost traced with a 40 px same-colour stroke with round joins, scaled to 95.5% to compensate |
+| 69 | neutral-soft | 68 with the bottom corners and hem points rounded like 67's outline: the ghost traced with a 40 px same-color stroke with round joins, scaled to 95.5% to compensate |
 | 70 | neutral-soft-oval | 69 with 65's oval eyes |
 | 71 | neutral-soft-shallow | 70 with a shallower hem: scallops rise about 30 px instead of 50 |
 | 72 | neutral-soft-flatter | 70 with an even shallower hem, about 18 px |
@@ -488,7 +488,7 @@ don't dissolve into a dark Dock. Scripts: `r10_neutral.py` and `overview10.py`.
 ## Round 11: light/dark pairs
 
 Pairing the picks for the Appearance swap. Feedback: pair 36 (dark) with 37 (light), and give 40
-and 55 dark versions in 36's Dark Hour green; try dark colour swaps of 46, 50 and 51, never
+and 55 dark versions in 36's Dark Hour green; try dark color swaps of 46, 50 and 51, never
 painting the ghost red. Then: mute 81's and 83's bright red burst towards 82's deep red. The
 candidate pairs were compared on `src/iter/overview-pairs.png` (`src/pairs.py`): the light icon on
 a light Dock-like panel, the dark icon on a dark one.
@@ -502,7 +502,7 @@ a light Dock-like panel, the dark icon on a dark one.
 | 82 | mask-stars-deep-red | 46 | Stars in deep reds, black burst | **Pick**, pairs with 46 |
 | 83 | mask-stars-ember | 46 | Black-red stars, bright red burst | Burst too loud |
 | 84 | card-deep-red | 51 | Deep-red card with darker print, on black | **Pick** on its own; as 46's partner, no |
-| 85 | card-black-on-red | 51 | Colours swapped: black card, white edge, red ground | **Pick**, the light partner of 51 |
+| 85 | card-black-on-red | 51 | Colors swapped: black card, white edge, red ground | **Pick**, the light partner of 51 |
 | 86 | mask-stars-black-deep-burst | 81 | Burst in 82's deep red | Burst disappears at 32 px |
 | 87 | mask-stars-black-mid-burst | 81 | Burst in a mid red (`#7a000b`) | **Pick**, pairs with 46 |
 | 88 | mask-stars-ember-mid-burst | 83 | 83 with a mid-red burst | Too close to 82 |
