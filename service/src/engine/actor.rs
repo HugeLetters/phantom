@@ -68,7 +68,7 @@ use super::held::Held;
 use super::machine::add;
 use super::machine::lib::{self, Librqbit};
 use super::machine::{self, Broke, Event, Observation, Phase, Refusal, State, Wants, decide, seeding};
-use super::slots::{Refused, Want};
+use super::slots::{Granting, Refused};
 use super::snapshot::{Published, Snapshot};
 use super::space;
 use super::store::{Gets, Info, Record, Store};
@@ -1108,28 +1108,12 @@ impl Actor {
     async fn grant(&mut self, id: TorrentId, handle: &Held, files: &BTreeSet<usize>) -> Result<bool, Failure> {
         let Some(torrent) = self.torrents.get(&id) else { return Ok(false) };
         let Some(info) = &torrent.record.info else { return Ok(true) };
-        let (progress, shared) = (handle.stats().file_progress, info.shared_bytes());
         let destination = torrent.record.destination.to_path_buf();
-        let wants: Vec<(usize, Want)> = files
-            .iter()
-            .filter_map(|&i| Some((i, info.files.get(i).filter(|f| !f.padding)?)))
-            .map(|(i, f)| {
-                (
-                    i,
-                    Want {
-                        size: f.len,
-                        complete: progress.get(i).is_some_and(|had| had + shared[i] >= f.len),
-                        destination: destination.clone(),
-                    },
-                )
-            })
-            .collect();
-        let (trashed, hash) = (self.guard.trashed().clone(), torrent.record.info_hash.clone());
-        let refused = tokio::task::spawn_blocking(move || {
-            wants.iter().filter_map(|(i, want)| trashed.grant(&hash, *i, want).err()).collect::<Vec<Refused>>()
-        })
-        .await
-        .map_err(|e| anyhow!("granting its files: {e}"))?;
+        let granting = Granting::of(info, handle.stats().file_progress, destination.clone());
+        let (trashed, hash, files) = (self.guard.trashed().clone(), torrent.record.info_hash.clone(), files.clone());
+        let refused = tokio::task::spawn_blocking(move || trashed.grant(&hash, &granting, &files))
+            .await
+            .map_err(|e| anyhow!("granting its files: {e}"))?;
         if !refused.is_empty() {
             warn!(id, ?refused, "its files aren't the ones its check read, or not its own to write");
         }
@@ -1161,16 +1145,8 @@ impl Actor {
     pub(super) fn grant_now(&self, id: TorrentId) -> bool {
         let Some(torrent) = self.torrents.get(&id) else { return false };
         let (Some(info), Some(handle)) = (&torrent.record.info, torrent.lib.torrent()) else { return false };
-        let (progress, shared) = (handle.stats().file_progress, info.shared_bytes());
-        let destination = torrent.record.destination.to_path_buf();
-        torrent.record.normal().into_iter().filter_map(|i| Some((i, info.files.get(i).filter(|f| !f.padding)?))).all(|(i, f)| {
-            let want = Want {
-                size: f.len,
-                complete: progress.get(i).is_some_and(|had| had + shared[i] >= f.len),
-                destination: destination.clone(),
-            };
-            self.guard.trashed().grant(&torrent.record.info_hash, i, &want).is_ok()
-        })
+        let granting = Granting::of(info, handle.stats().file_progress, torrent.record.destination.to_path_buf());
+        self.guard.trashed().grant(&torrent.record.info_hash, &granting, &torrent.record.normal()).is_empty()
     }
 
     /// Has librqbit, stopped, ask its peers for every piece it doesn't have of the files it gets.

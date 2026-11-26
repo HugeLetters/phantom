@@ -63,12 +63,8 @@ pub(super) fn watch(
     every: Duration,
     report: impl Fn(String, BTreeSet<usize>) -> bool + Send + Sync + 'static,
 ) {
-    let look: Arc<dyn Fn(&String, &BTreeSet<usize>) -> BTreeSet<usize> + Send + Sync> = Arc::new(move |hash, closable| {
-        if !closable.is_empty() {
-            trashed.close_deleted(hash, closable);
-        }
-        trashed.gone(hash)
-    });
+    let look: Arc<dyn Fn(&String, &BTreeSet<usize>) -> BTreeSet<usize> + Send + Sync> =
+        Arc::new(move |hash, closable| trashed.look(hash, closable));
     looks::watch(look, wanted, every, move |hash, found| match found {
         looks::Looked::Read(gone) => gone.is_empty() || report(hash, gone),
         looks::Looked::Stalled => true,
