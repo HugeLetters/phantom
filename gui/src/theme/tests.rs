@@ -44,8 +44,10 @@ impl Theme for Sample {
     }
     fn build(&self, settings: &Values) -> Built {
         let motion = settings.get("motion") == Some(Value::Toggle(true));
+        let tokens = Kit::neutral(false);
         Built {
-            tokens: Kit::neutral(false),
+            colours: crate::theme::Colours::of(&tokens),
+            tokens,
             blocks: BlockOverrides {
                 icons: Some(Rc::new(|icon| (icon == Icon::Copy).then_some(&SAMPLE_COPY))),
                 progress_bar: Some(Rc::new(move |_: &Ui, _| rune::el().key(sample_bar_key(motion)))),
@@ -83,7 +85,13 @@ impl Theme for Link {
         &[]
     }
     fn build(&self, _: &Values) -> Built {
-        Built { tokens: Kit::neutral(false), blocks: self.blocks.clone(), screens: self.screens.clone(), app_icon: "phantom" }
+        Built {
+            colours: crate::theme::Colours::of(&Kit::neutral(false)),
+            tokens: Kit::neutral(false),
+            blocks: self.blocks.clone(),
+            screens: self.screens.clone(),
+            app_icon: "phantom",
+        }
     }
 }
 

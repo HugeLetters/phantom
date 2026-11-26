@@ -13,6 +13,7 @@
 //! [ADR 0004]: ../../../docs/adr/0004-themes-override-building-blocks.md
 //! [ADR 0011]: ../../../docs/adr/0011-look-presets.md
 
+mod colours;
 pub mod phantom;
 pub mod preset;
 pub mod saved;
@@ -29,6 +30,7 @@ use rune_kit::Kit;
 
 use crate::model::Phantom;
 use crate::ui::{BlockOverrides, Blocks, Ui};
+pub use colours::Colours;
 use setting::{Setting, Values};
 
 /// A theme: built into the app, with its assets in its own folder.
@@ -51,6 +53,8 @@ pub trait Theme: Sync {
 pub struct Built {
     /// Every colour, font, radius and timing its blocks draw with.
     pub tokens: Kit,
+    /// The colours its blocks draw that `tokens` has no field for.
+    pub colours: Colours,
     /// The blocks it draws itself; the rest are its parent's.
     pub blocks: BlockOverrides,
     /// The screens it lays out itself, as a last resort; the rest are its parent's.
@@ -144,7 +148,7 @@ impl Look {
         }
         let base = (Blocks::phantom(phantom::icon), Screens::phantom());
         let (blocks, screens) = chain.iter().rev().fold(base, |(blocks, screens), (b, s)| (blocks.over(b), screens.over(s)));
-        Look { ui: Ui::new(built.tokens, blocks), screens, app_icon: built.app_icon }
+        Look { ui: Ui::new(built.tokens, built.colours, blocks), screens, app_icon: built.app_icon }
     }
 }
 
