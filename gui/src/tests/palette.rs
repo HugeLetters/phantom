@@ -482,6 +482,7 @@ fn a_screen_that_registers_no_command_offers_none() {
                 screens: ScreenOverrides { details: Some(details), ..Default::default() },
                 app_icon: "phantom",
                 motion: Default::default(),
+                resolved: Default::default(),
             }
         }
     }

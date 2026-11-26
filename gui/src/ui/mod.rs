@@ -10,6 +10,7 @@
 
 pub mod blocks;
 mod button;
+mod color_picker;
 mod dialog;
 mod empty;
 mod icon;
@@ -33,6 +34,7 @@ use crate::theme::{Colors, Motion, Spacing};
 pub use blocks::{BlockOverrides, Blocks};
 #[cfg(test)]
 pub use blocks::{ProgressBar, StatusDot};
+pub use color_picker::{FIELD_HEIGHT, Pick, PopupParts};
 pub use icon::Icon;
 pub use menu::Entry;
 pub use notice::NOTICES_REST;

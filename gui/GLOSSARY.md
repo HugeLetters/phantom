@@ -16,6 +16,17 @@ A value a theme declares and the user can change, like Phantom's Tone or a theme
 off. Any theme setting can be set differently for the Light and the Dark Appearance.
 _Avoid_: option, variant
 
+**Base color**:
+One of the eight colors of Phantom's Colors setting (Background, Surface, Text, Accent, Border,
+Danger, Warning, Success). Every other color follows one of them.
+_Avoid_: primary color, seed
+
+**Follows**:
+What a color does until it's set by hand: it's worked out from its base color by a rule, or, for a
+base color, it's the theme's own. Follow <Base> (or Reset, on a base color) makes it follow again.
+A color set by hand is stored; one that follows isn't.
+_Avoid_: derived (in the app's text), linked, inherits
+
 **Appearance**:
 Light or Dark, as the system sets it. Every theme can be shown in either; a theme says nothing about
 it. The Settings tab named Appearance holds the theme and the App icon; in the app's text,

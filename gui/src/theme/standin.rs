@@ -5,7 +5,7 @@
 
 use rune_kit::Kit;
 
-use super::setting::{Choice, Kind, Rgb, Setting, Show, Value, Values};
+use super::setting::{Choice, Kind, Resolved, Rgb, Setting, Show, Value, Values};
 use super::{Built, Colors, Spacing, Theme, phantom};
 
 pub struct StandIn;
@@ -13,18 +13,21 @@ pub struct StandIn;
 pub static STAND_IN: StandIn = StandIn;
 
 static SETTINGS: [Setting; 3] = [
-    Setting {
-        key: "shade",
-        label: "Shade",
-        kind: Kind::Choice {
+    Setting::new(
+        "shade",
+        "Shade",
+        Kind::Choice {
             choices: &[Choice { id: "dusk", label: "Dusk" }, Choice { id: "night", label: "Night" }],
             default: "night",
             show: Show::Dropdown,
         },
-    },
-    Setting { key: "accent", label: "Accent", kind: Kind::Color { default: Rgb([0xd9, 0x4f, 0x8a]) } },
-    Setting { key: "animations", label: "Animations", kind: Kind::Toggle { default: true } },
+    ),
+    Setting::new("accent", "Accent", Kind::Color { follows: None }),
+    Setting::new("animations", "Animations", Kind::Toggle { default: true }),
 ];
+
+/// Its Accent until one is picked.
+const ACCENT: Rgb = Rgb([0xd9, 0x4f, 0x8a]);
 
 impl Theme for StandIn {
     fn id(&self) -> &'static str {
@@ -45,10 +48,14 @@ impl Theme for StandIn {
 
     fn build(&self, settings: &Values) -> Built {
         let mut tokens = Kit::neutral(settings.get("shade") == Some(Value::Choice("night")));
-        if let Some(Value::Color(rgb)) = settings.get("accent") {
-            tokens.c.bg_accent = rgb.color();
-            tokens.c.border_focus = rgb.color();
-        }
+        let accent = match settings.get("accent") {
+            Some(Value::Color(Some(rgb))) => rgb,
+            _ => ACCENT,
+        };
+        tokens.c.bg_accent = accent.color();
+        tokens.c.border_focus = accent.color();
+        let mut resolved = Resolved::default();
+        resolved.set_color("accent", accent);
         Built {
             colors: Colors::of(&tokens),
             spacing: Spacing::phantom(),
@@ -57,6 +64,7 @@ impl Theme for StandIn {
             screens: Default::default(),
             app_icon: "dark-hour",
             motion: Default::default(),
+            resolved,
         }
     }
 }

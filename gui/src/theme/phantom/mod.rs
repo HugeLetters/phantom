@@ -1,14 +1,18 @@
 //! Phantom, the default theme: complete, and the end of every theme's parent chain. Its tokens
-//! are rune-kit's neutral kit, light or dark as its Tone says; its blocks are the building blocks
-//! as `ui` writes them, with its own icons; its App icon is the bundle's own.
+//! are rune-kit's neutral kit, light or dark as its Tone says, recolored by its Colors (`palette`);
+//! its blocks are the building blocks as `ui` writes them, with its own icons; its App icon is the
+//! bundle's own.
 
 mod icons;
+pub mod palette;
+
+use std::sync::LazyLock;
 
 use rune_kit::Kit;
 
 #[cfg(test)]
 use super::Look;
-use super::setting::{Choice, Kind, Setting, Show, Value, Values};
+use super::setting::{Choice, Kind, Section, Setting, Show, Value, Values};
 use super::{Built, Colors, Motion, Spacing, Theme, ThemeLook};
 use crate::ui::Icon;
 
@@ -25,43 +29,53 @@ pub const CORNERS: &str = "corners";
 /// Whether things move: On, Off, or as the Mac's Reduce Motion says.
 pub const MOTION: &str = "motion";
 
-static SETTINGS: [Setting; 3] = [
-    Setting {
-        key: TONE,
-        label: "Tone",
-        kind: Kind::Choice {
-            choices: &[Choice { id: "light", label: "Light" }, Choice { id: "dark", label: "Dark" }],
-            default: "light",
-            show: Show::Segments,
-        },
-    },
-    Setting {
-        key: CORNERS,
-        label: "Corners",
-        kind: Kind::Choice {
-            choices: &[
-                Choice { id: "square", label: "Square" },
-                Choice { id: "small", label: "Small" },
-                Choice { id: "round", label: "Round" },
-            ],
-            default: "small",
-            show: Show::Dropdown,
-        },
-    },
-    Setting {
-        key: MOTION,
-        label: "Motion",
-        kind: Kind::Choice {
-            choices: &[
-                Choice { id: "follow", label: "Follow Reduce Motion" },
-                Choice { id: "on", label: "On" },
-                Choice { id: "off", label: "Off" },
-            ],
-            default: "follow",
-            show: Show::Dropdown,
-        },
-    },
-];
+/// Corners and Motion's section.
+static LOOK: Section = Section { key: "look", title: "Look", folds: false };
+
+/// Tone, then Look (Corners, Motion), then Colors: the bases, then every other color.
+static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
+    let mut settings = vec![
+        Setting::new(
+            TONE,
+            "Tone",
+            Kind::Choice {
+                choices: &[Choice { id: "light", label: "Light" }, Choice { id: "dark", label: "Dark" }],
+                default: "light",
+                show: Show::Segments,
+            },
+        ),
+        Setting::new(
+            CORNERS,
+            "Corners",
+            Kind::Choice {
+                choices: &[
+                    Choice { id: "square", label: "Square" },
+                    Choice { id: "small", label: "Small" },
+                    Choice { id: "round", label: "Round" },
+                ],
+                default: "small",
+                show: Show::Dropdown,
+            },
+        )
+        .in_section(&LOOK),
+        Setting::new(
+            MOTION,
+            "Motion",
+            Kind::Choice {
+                choices: &[
+                    Choice { id: "follow", label: "Follow Reduce Motion" },
+                    Choice { id: "on", label: "On" },
+                    Choice { id: "off", label: "Off" },
+                ],
+                default: "follow",
+                show: Show::Dropdown,
+            },
+        )
+        .in_section(&LOOK),
+    ];
+    settings.extend(palette::settings());
+    settings
+});
 
 /// The radius tokens `corners` (one of [`CORNERS`]' choices) gives: Small is the kit's own.
 fn radius(corners: Option<Value>) -> rune_kit::Radius {
@@ -102,6 +116,7 @@ impl Theme for Phantom {
         let dark = settings.get(TONE) == Some(Value::Choice("dark"));
         let mut tokens = Kit::neutral(dark);
         tokens.radius = radius(settings.get(CORNERS));
+        let resolved = palette::apply(&mut tokens, settings);
         Built {
             colors: Colors::of(&tokens),
             spacing: Spacing::phantom(),
@@ -110,6 +125,7 @@ impl Theme for Phantom {
             screens: Default::default(),
             app_icon: "phantom",
             motion: motion(settings.get(MOTION)),
+            resolved,
         }
     }
 }

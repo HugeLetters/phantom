@@ -5,6 +5,10 @@
 //! wrong kind is reset as it's read (to the value the reader starts from), each named, so nothing
 //! past here checks again ([ADR 0011]).
 //!
+//! A color setting holds `None` until it's set by hand: the theme works it out then, from its
+//! default or from the setting it follows ([`Kind::Color`]), and tells Settings what it came to and
+//! any warning about it ([`Resolved`]). Only a color set by hand is stored.
+//!
 //! [ADR 0011]: ../../../../docs/adr/0011-look-presets.md
 
 use serde_json::{Map, Value as Json};
@@ -17,6 +21,40 @@ pub struct Setting {
     /// What Settings calls it: "Tone".
     pub label: &'static str,
     pub kind: Kind,
+    /// The section Settings shows it in, under the section's title; none, above every section.
+    pub section: Option<&'static Section>,
+    /// The group of its section it's in, under the group's name ("Text"); none, ungrouped.
+    pub group: Option<&'static str>,
+}
+
+impl Setting {
+    /// A setting outside every section.
+    pub const fn new(key: &'static str, label: &'static str, kind: Kind) -> Setting {
+        Setting { key, label, kind, section: None, group: None }
+    }
+
+    /// In `section`.
+    pub const fn in_section(mut self, section: &'static Section) -> Setting {
+        self.section = Some(section);
+        self
+    }
+
+    /// In the group `group` of its section.
+    pub const fn in_group(mut self, group: &'static str) -> Setting {
+        self.group = Some(group);
+        self
+    }
+}
+
+/// A run of a theme's settings that Settings shows under one title: "Colors", or "Every color",
+/// which opens and closes.
+#[derive(Debug, PartialEq)]
+pub struct Section {
+    /// What its header is keyed by: `<key>-section`.
+    pub key: &'static str,
+    pub title: &'static str,
+    /// Whether it starts closed, its header opening it.
+    pub folds: bool,
 }
 
 /// What a setting holds, from a small closed set, with its default. A new kind is added when a
@@ -34,8 +72,10 @@ pub enum Kind {
         /// How Settings draws it.
         show: Show,
     },
+    /// A color, `None` until set by hand: then the theme's own, worked out from the setting keyed
+    /// `follows` (a base color), or, with none, its default (which may differ by its Tone).
     Color {
-        default: Rgb,
+        follows: Option<&'static str>,
     },
 }
 
@@ -83,7 +123,8 @@ pub enum Value {
     Toggle(bool),
     /// The id of one of the setting's choices.
     Choice(&'static str),
-    Color(Rgb),
+    /// Set by hand, or `None`: what the theme works out ([`Resolved::color`]).
+    Color(Option<Rgb>),
 }
 
 impl Kind {
@@ -91,7 +132,7 @@ impl Kind {
         match *self {
             Kind::Toggle { default } => Value::Toggle(default),
             Kind::Choice { default, .. } => Value::Choice(default),
-            Kind::Color { default } => Value::Color(default),
+            Kind::Color { .. } => Value::Color(None),
         }
     }
 
@@ -100,7 +141,7 @@ impl Kind {
         match self {
             Kind::Toggle { .. } => json.as_bool().map(Value::Toggle),
             Kind::Choice { choices, .. } => json.as_str().and_then(|id| choices.iter().find(|c| c.id == id)).map(|c| Value::Choice(c.id)),
-            Kind::Color { .. } => json.as_str().and_then(Rgb::parse).map(Value::Color),
+            Kind::Color { .. } => json.as_str().and_then(Rgb::parse).map(|rgb| Value::Color(Some(rgb))),
         }
     }
 
@@ -115,12 +156,76 @@ impl Kind {
 }
 
 impl Value {
-    fn json(self) -> Json {
+    /// As `gui.json` keeps it; nothing for a color that isn't set by hand.
+    fn json(self) -> Option<Json> {
         match self {
-            Value::Toggle(on) => Json::Bool(on),
-            Value::Choice(id) => Json::String(id.to_owned()),
-            Value::Color(rgb) => Json::String(rgb.hex()),
+            Value::Toggle(on) => Some(Json::Bool(on)),
+            Value::Choice(id) => Some(Json::String(id.to_owned())),
+            Value::Color(rgb) => rgb.map(|rgb| Json::String(rgb.hex())),
         }
+    }
+
+    /// What Settings compares and copies of it (a Join, the split rows): a color as it resolves
+    /// (`resolved`, the setting `key` is in a look whose theme worked it out), else itself.
+    pub fn shown(self, key: &str, resolved: &Resolved) -> Value {
+        match self {
+            Value::Color(_) => Value::Color(resolved.color(key).or(self.color())),
+            Value::Toggle(_) | Value::Choice(_) => self,
+        }
+    }
+
+    fn color(self) -> Option<Rgb> {
+        match self {
+            Value::Color(rgb) => rgb,
+            Value::Toggle(_) | Value::Choice(_) => None,
+        }
+    }
+}
+
+/// What a theme works out of its settings for Settings to show: the color each color setting
+/// comes to, and the warnings about a setting's value ("Hard to read on Surface: 3.8:1 (needs
+/// 4.5:1)."), and the most warnings a setting could have, each as long as it could be.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Resolved {
+    colors: Vec<(&'static str, Rgb)>,
+    warnings: Vec<(&'static str, String)>,
+    room: Vec<(&'static str, String)>,
+}
+
+impl Resolved {
+    /// The color setting `key` comes to.
+    pub fn color(&self, key: &str) -> Option<Rgb> {
+        self.colors.iter().find(|(k, _)| *k == key).map(|(_, rgb)| *rgb)
+    }
+
+    /// The warnings about setting `key`, one line each.
+    pub fn warnings(&self, key: &str) -> Vec<&str> {
+        self.warnings.iter().filter(|(k, _)| *k == key).map(|(_, w)| w.as_str()).collect()
+    }
+
+    pub fn set_color(&mut self, key: &'static str, rgb: Rgb) {
+        self.colors.retain(|(k, _)| *k != key);
+        self.colors.push((key, rgb));
+    }
+
+    /// Every warning, by the setting it's about.
+    #[cfg(test)]
+    pub fn every_warning(&self) -> &[(&'static str, String)] {
+        &self.warnings
+    }
+
+    pub fn warn(&mut self, key: &'static str, warning: String) {
+        self.warnings.push((key, warning));
+    }
+
+    /// The warnings setting `key` could have at most, each as long as it could be, whatever it's
+    /// set to: what its picker is placed for, so it never moves while a drag goes.
+    pub fn room(&self, key: &str) -> Vec<&str> {
+        self.room.iter().filter(|(k, _)| *k == key).map(|(_, w)| w.as_str()).collect()
+    }
+
+    pub fn make_room(&mut self, key: &'static str, line: String) {
+        self.room.push((key, line));
     }
 }
 
@@ -156,9 +261,9 @@ impl Values {
         (values, reset)
     }
 
-    /// As `gui.json` keeps them: every setting, by key.
+    /// As `gui.json` keeps them: every setting, by key, but a color not set by hand.
     pub fn json(&self) -> Map<String, Json> {
-        self.iter().map(|(setting, value)| (setting.key.to_owned(), value.json())).collect()
+        self.iter().filter_map(|(setting, value)| Some((setting.key.to_owned(), value.json()?))).collect()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&'static Setting, Value)> + '_ {
@@ -195,11 +300,11 @@ pub(crate) mod tests {
 
     /// One setting of every kind.
     pub static SAMPLE: [Setting; 3] = [
-        Setting { key: "pulse", label: "Pulse", kind: Kind::Toggle { default: true } },
-        Setting {
-            key: "shape",
-            label: "Shape",
-            kind: Kind::Choice {
+        Setting::new("pulse", "Pulse", Kind::Toggle { default: true }),
+        Setting::new(
+            "shape",
+            "Shape",
+            Kind::Choice {
                 choices: &[
                     Choice { id: "round", label: "Round" },
                     Choice { id: "square", label: "Square" },
@@ -208,8 +313,8 @@ pub(crate) mod tests {
                 default: "square",
                 show: Show::Dropdown,
             },
-        },
-        Setting { key: "accent", label: "Accent", kind: Kind::Color { default: Rgb([0x33, 0x66, 0xff]) } },
+        ),
+        Setting::new("accent", "Accent", Kind::Color { follows: None }),
     ];
 
     /// Any value of `setting`'s kind.
@@ -219,8 +324,19 @@ pub(crate) mod tests {
             Kind::Choice { choices, .. } => {
                 proptest::sample::select(choices.iter().map(|c| c.id).collect::<Vec<_>>()).prop_map(Value::Choice).boxed()
             }
-            Kind::Color { .. } => any::<[u8; 3]>().prop_map(|c| Value::Color(Rgb(c))).boxed(),
+            Kind::Color { .. } => any::<Option<[u8; 3]>>().prop_map(|c| Value::Color(c.map(Rgb))).boxed(),
         }
+    }
+
+    /// `values` with every color following: what a fresh install's half has, the only base
+    /// settings are read over (a color not set by hand isn't stored, so it reads as the base's).
+    fn following(mut values: Values) -> Values {
+        for v in &mut values.values {
+            if let Value::Color(_) = v {
+                *v = Value::Color(None);
+            }
+        }
+        values
     }
 
     /// Values for `of`, each any of its kind.
@@ -242,7 +358,7 @@ pub(crate) mod tests {
 
     proptest! {
         #[test]
-        fn values_round_trip_through_json(values in values_of(&SAMPLE), base in values_of(&SAMPLE)) {
+        fn values_round_trip_through_json(values in values_of(&SAMPLE), base in values_of(&SAMPLE).prop_map(following)) {
             let (read, reset) = Values::read(&base, &values.json());
             prop_assert_eq!(read, values);
             prop_assert!(reset.is_empty());
@@ -253,7 +369,7 @@ pub(crate) mod tests {
         #[test]
         fn an_unknown_key_or_a_wrong_kind_is_reset_to_the_base_and_named(
             values in values_of(&SAMPLE),
-            base in values_of(&SAMPLE),
+            base in values_of(&SAMPLE).prop_map(following),
             wrong in proptest::collection::btree_set(0..SAMPLE.len(), 0..=3),
             missing in proptest::collection::btree_set(0..SAMPLE.len(), 0..=3),
             unknown in proptest::collection::btree_set("[a-z]{1,4}_x", 0..3),
@@ -266,6 +382,12 @@ pub(crate) mod tests {
             for i in &missing {
                 json.remove(SAMPLE[*i].key);
                 expected.values[*i] = base.values[*i];
+            }
+            // A color not set by hand isn't stored: it reads as the base's, which follows too.
+            for (i, v) in values.values.iter().enumerate() {
+                if *v == Value::Color(None) {
+                    expected.values[i] = base.values[i];
+                }
             }
             for i in wrong.difference(&missing) {
                 json.insert(SAMPLE[*i].key.into(), junk[*i].clone());
@@ -288,7 +410,7 @@ pub(crate) mod tests {
         fn set_takes_only_a_value_of_the_settings_kind(values in values_of(&SAMPLE), i in 0..SAMPLE.len(), value in prop_oneof![
             any::<bool>().prop_map(Value::Toggle),
             prop_oneof![Just("round"), Just("square"), Just("cut"), Just("oval")].prop_map(Value::Choice),
-            any::<[u8; 3]>().prop_map(|c| Value::Color(Rgb(c))),
+            any::<Option<[u8; 3]>>().prop_map(|c| Value::Color(c.map(Rgb))),
         ]) {
             let mut set = values.clone();
             let took = set.set(SAMPLE[i].key, value);

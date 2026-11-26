@@ -31,11 +31,13 @@ use crate::notice::{Notice, NoticeAction};
 use crate::platform::app_icon::loader::Loader;
 use crate::platform::app_icon::{FILE, FOLLOW, Icons, Manifest};
 use crate::service::Done;
+use crate::theme::oklab::Okhsl;
 use crate::theme::preset::Appearance;
 use crate::theme::preset::LookPreset;
 use crate::theme::preset::Looks;
 use crate::theme::saved::{Name, Saved, SavedPreset};
-use crate::theme::setting::{Rgb, Value};
+use crate::theme::setting::{Kind, Rgb, Value};
+use crate::ui::Pick;
 use crate::windows::{Inbox, Link, Shared, Window};
 
 /// The Settings window's state: the sheet while it's open, the App icon, and the way to the main
@@ -139,6 +141,24 @@ pub struct Editor {
     /// Each color setting's field, by which side it sets and its key, or what's typed over it
     /// until it's applied (Return, or the field losing focus).
     pub colors: Vec<ColorField>,
+    /// The sections that fold ("Every color") opened, by key.
+    pub open: BTreeSet<&'static str>,
+    /// An undo closed the picker: the control it shows takes the focus by its key, or Rune would
+    /// hand it back to the picker's swatch.
+    pub refocus: bool,
+    /// A color's picker, open beside its swatch.
+    pub picker: Option<Picker>,
+}
+
+/// A color's picker, open beside the swatch of the setting `key` on `side`, its hex field that
+/// setting's [`ColorField`].
+pub struct Picker {
+    pub side: Side,
+    pub key: &'static str,
+    /// Where its markers are: kept, so a hue stays where it was while the color is gray.
+    pub at: Okhsl,
+    /// The Look Presets as a drag began: the drag is one step of Undo, from these.
+    drag: Option<Presets>,
 }
 
 /// The sheet over Settings that edits a Look Preset, the Active look or a saved one: its editor.
@@ -414,10 +434,7 @@ impl SettingsSheet {
     fn stored_text(&self, row: Row, looks: &Looks, saved: &Saved) -> Option<String> {
         if let Row::Color(side, key) = row {
             let presets = Presets::of(looks, saved);
-            return match presets.get(self.target()?)?.get(side.appearances()[0]).settings.get(key) {
-                Some(Value::Color(rgb)) => Some(rgb.hex()),
-                Some(Value::Toggle(_) | Value::Choice(_)) | None => None,
-            };
+            return shown_color(presets.get(self.target()?)?, side, key).map(Rgb::hex);
         }
         let settings = self.service.as_ref()?;
         match row {
@@ -1086,11 +1103,16 @@ fn apply(s: &mut SettingsWindow, row: Row, change: Change) {
         (Change::Color(rgb), Row::Color(side, key)) => {
             if let Some(sheet) = &mut s.sheet {
                 sheet.refused.retain(|r| r.row != row);
-                if let Some(field) = sheet.editor_mut().and_then(|e| e.color_mut(side, key)) {
-                    field.text = TextEdit::new(rgb.hex());
+                if let Some(editor) = sheet.editor_mut() {
+                    if let Some(field) = editor.color_mut(side, key) {
+                        field.text = TextEdit::new(rgb.hex());
+                    }
+                    if let Some(picker) = editor.picker.as_mut().filter(|p| p.side == side && p.key == key) {
+                        picker.at = Okhsl::of(rgb.color());
+                    }
                 }
             }
-            set_theme(s, side, key, Value::Color(rgb));
+            set_theme(s, side, key, Value::Color(Some(rgb)));
         }
         (Change::Color(_), _) => {}
     }
@@ -1197,6 +1219,11 @@ pub fn escape(s: &mut SettingsWindow) -> bool {
         field.focused = true;
         *sheet.field_mut(row).expect("a text row has a field") = field;
         sheet.refused.retain(|r| r.row != row);
+        return true;
+    }
+    // An open picker closes first.
+    if sheet.editor().is_some_and(|e| e.picker.is_some()) {
+        close_picker(s);
         return true;
     }
     // A Look Preset's sheet is cancelled; the App icon's closes.
@@ -1387,6 +1414,7 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
     if let Some(sheet) = &mut s.sheet {
         if let Some(edit) = &mut sheet.edit {
             edit.editor.colors.clear();
+            edit.editor.refocus |= edit.editor.picker.take().is_some();
         }
         sheet.refused.retain(|r| !matches!(r.row, Row::Color(..)));
         // A saved preset that's gone has its sheet closed.
@@ -1448,7 +1476,7 @@ pub fn theme_value(preset: &LookPreset, side: Side, key: &str) -> String {
             choices.iter().find(|c| c.id == id).map_or(id, |c| c.label).to_owned()
         }
         (_, Value::Toggle(on)) => if on { "on" } else { "off" }.to_owned(),
-        (_, Value::Color(rgb)) => rgb.hex(),
+        (_, Value::Color(_)) => shown_color(preset, side, key).map(Rgb::hex).unwrap_or_default(),
         (_, Value::Choice(id)) => id.to_owned(),
     }
 }
@@ -1560,8 +1588,9 @@ pub fn join_row(s: &mut SettingsWindow, key: &'static str) {
         (_, false) => return,
         (THEME, true) => {}
         (_, true) => {
-            let Some(value) = preset.light.settings.get(key) else { return };
-            if preset.dark.settings.get(key) != Some(value) {
+            // A color as it shows: one following its base in Light is copied as the color it is.
+            let Some(value) = preset.light.settings.get(key).map(|v| v.shown(key, &preset.light.resolved())) else { return };
+            if preset.dark.settings.get(key).map(|v| v.shown(key, &preset.dark.resolved())) != Some(value) {
                 set_theme(s, Side::Only(Appearance::Dark), key, value);
             }
         }
@@ -1584,6 +1613,186 @@ pub fn toggle_menu(s: &mut SettingsWindow, key: &'static str, side: Side) {
 pub fn close_menu(s: &mut SettingsWindow) {
     if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
         editor.menu = None;
+    }
+}
+
+/// What the color setting `key` on `side` of `preset` shows: set by hand, that; else what its
+/// theme works it out to be.
+pub fn shown_color(preset: &LookPreset, side: Side, key: &str) -> Option<Rgb> {
+    let look = preset.get(side.appearances()[0]);
+    match look.settings.get(key)? {
+        Value::Color(Some(rgb)) => Some(rgb),
+        Value::Color(None) => look.resolved().color(key),
+        Value::Toggle(_) | Value::Choice(_) => None,
+    }
+}
+
+/// A section that folds, opened or closed.
+pub fn toggle_section(s: &mut SettingsWindow, key: &'static str) {
+    follow_focus(s);
+    if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
+        if !editor.open.remove(key) {
+            editor.open.insert(key);
+        }
+    }
+}
+
+/// A color's swatch pressed: its picker opens beside it, its hex field focused (any other closes).
+pub fn open_picker(s: &mut SettingsWindow, side: Side, key: &'static str) {
+    close_picker(s);
+    let Some(sheet) = &mut s.sheet else { return };
+    let Some(preset) = sheet.target().and_then(|t| Presets::of(&s.looks.borrow(), &s.saved).get(t).cloned()) else { return };
+    let Some(rgb) = shown_color(&preset, side, key) else { return };
+    let Some(editor) = sheet.editor_mut() else { return };
+    editor.menu = None;
+    editor.picker = Some(Picker { side, key, at: Okhsl::of(rgb.color()), drag: None });
+    if let Some(field) = editor.color_mut(side, key) {
+        field.text.focused = true;
+    }
+}
+
+/// The picker closes (Escape, a press outside): its hex field is left, so what's typed in it is
+/// applied as a field losing the focus applies it.
+pub fn close_picker(s: &mut SettingsWindow) {
+    let Some(picker) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()).and_then(|e| e.picker.take()) else { return };
+    let row = Row::Color(picker.side, picker.key);
+    if let Some(sheet) = &mut s.sheet {
+        let focused = sheet.had_focus.contains(&row) || sheet.field(row).is_some_and(|f| f.focused);
+        sheet.had_focus.retain(|r| *r != row);
+        if let Some(field) = sheet.field_mut(row) {
+            field.focused = false;
+        }
+        if focused {
+            leave(s, row);
+        }
+    }
+}
+
+/// Escape in the open picker: a hex being typed goes, what's stored showing again; else the picker
+/// closes. Rune hands a modal Escape before its field sees it.
+pub fn escape_picker(s: &mut SettingsWindow) {
+    let Some(sheet) = &mut s.sheet else { return };
+    let Some(row) = sheet.editor().and_then(|e| e.picker.as_ref()).map(|p| Row::Color(p.side, p.key)) else { return };
+    let stored = sheet.stored_text(row, &s.looks.borrow(), &s.saved);
+    // Rune may have taken the focus from the field already: what's typed is what's checked.
+    if let (Some(stored), Some(field)) = (stored, sheet.field_mut(row))
+        && field.text != stored
+    {
+        let mut back = TextEdit::new(stored);
+        back.focused = true;
+        *field = back;
+        sheet.refused.retain(|r| r.row != row);
+        return;
+    }
+    close_picker(s);
+}
+
+/// A pick in the open picker: the color, set by hand as the pointer goes down and moves, shown at
+/// once; the drag one step of Undo as it comes up; one called off puts back what was there.
+pub fn pick(s: &mut SettingsWindow, pick: Pick) {
+    let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
+    let Some(picker) = s.sheet.as_ref().and_then(|sheet| sheet.editor()).and_then(|e| e.picker.as_ref()) else { return };
+    let (side, key) = (picker.side, picker.key);
+    let now = Presets::of(&s.looks.borrow(), &s.saved);
+    match pick {
+        Pick::Down(at) => {
+            if let Some(d) = picker_drag(s) {
+                *d = Some(now);
+            }
+            pick_live(s, &target, side, key, at);
+        }
+        Pick::Move(at) => pick_live(s, &target, side, key, at),
+        Pick::Up(at) => {
+            pick_live(s, &target, side, key, at);
+            let was = picker_drag(s).and_then(Option::take);
+            let label = setting_label(&now, &target, side, key);
+            if let (Some(was), Some(label)) = (was, label) {
+                edited(s, was, target, side, key, label);
+            }
+        }
+        Pick::Cancelled => {
+            if let Some(was) = picker_drag(s).and_then(Option::take)
+                && let Some(preset) = was.get(&target).cloned()
+            {
+                keep_edited(s, &target, preset);
+                refresh_field(s, side, key);
+                looks_changed(s);
+            }
+        }
+    }
+}
+
+/// The drag the open picker is in the middle of.
+fn picker_drag(s: &mut SettingsWindow) -> Option<&mut Option<Presets>> {
+    Some(&mut s.sheet.as_mut()?.editor_mut()?.picker.as_mut()?.drag)
+}
+
+/// The label of the theme setting `key` on `side` of what `presets` hold for `target`.
+fn setting_label(presets: &Presets, target: &Target, side: Side, key: &str) -> Option<&'static str> {
+    let preset = presets.get(target)?;
+    side.appearances().iter().find_map(|a| preset.get(*a).settings.iter().find(|(st, _)| st.key == key)).map(|(st, _)| st.label)
+}
+
+/// `at` set by hand as the color of `key` on `side`, shown at once, its field showing its hex; no
+/// step of Undo of its own (the drag's is taken as it ends).
+fn pick_live(s: &mut SettingsWindow, target: &Target, side: Side, key: &'static str, at: Okhsl) {
+    let Some(mut preset) = Presets::of(&s.looks.borrow(), &s.saved).get(target).cloned() else { return };
+    let rgb = Rgb::of(at.color());
+    for &appearance in side.appearances() {
+        preset.get_mut(appearance).settings.set(key, Value::Color(Some(rgb)));
+    }
+    keep_edited(s, target, preset);
+    if let Some(sheet) = &mut s.sheet {
+        sheet.refused.retain(|r| r.row != Row::Color(side, key));
+        if let Some(editor) = sheet.editor_mut() {
+            if let Side::Only(_) = side {
+                editor.split.insert(key);
+            }
+            if let Some(picker) = editor.picker.as_mut() {
+                picker.at = at;
+            }
+            if let Some(field) = editor.color_mut(side, key) {
+                let focused = field.text.focused;
+                field.text = TextEdit::new(rgb.hex());
+                field.text.focused = focused;
+            }
+        }
+    }
+    looks_changed(s);
+}
+
+/// The field of `key` on `side` shows what's stored again, and the picker's markers with it.
+fn refresh_field(s: &mut SettingsWindow, side: Side, key: &'static str) {
+    let Some(sheet) = &mut s.sheet else { return };
+    let Some(preset) = sheet.target().and_then(|t| Presets::of(&s.looks.borrow(), &s.saved).get(t).cloned()) else { return };
+    let Some(rgb) = shown_color(&preset, side, key) else { return };
+    sheet.refused.retain(|r| r.row != Row::Color(side, key));
+    let Some(editor) = sheet.editor_mut() else { return };
+    if let Some(field) = editor.color_mut(side, key) {
+        let focused = field.text.focused;
+        field.text = TextEdit::new(rgb.hex());
+        field.text.focused = focused;
+    }
+    if let Some(picker) = editor.picker.as_mut().filter(|p| p.side == side && p.key == key) {
+        picker.at = Okhsl::of(rgb.color());
+    }
+}
+
+/// Follow <Base> on a color set by hand, or Reset on a base: it follows again, a change ⌘Z takes
+/// back.
+pub fn follow_color(s: &mut SettingsWindow, side: Side, key: &'static str) {
+    set_theme(s, side, key, Value::Color(None));
+    refresh_field(s, side, key);
+}
+
+/// What a color setting's button says: "Follow <Base>" for one that follows a base, "Reset" for
+/// one that's the theme's own.
+pub fn follow_label(setting: &crate::theme::setting::Setting, of: &[crate::theme::setting::Setting]) -> String {
+    match setting.kind {
+        Kind::Color { follows: Some(base) } => {
+            format!("Follow {}", of.iter().find(|s| s.key == base).map_or(base, |s| s.label))
+        }
+        Kind::Color { follows: None } | Kind::Toggle { .. } | Kind::Choice { .. } => "Reset".to_owned(),
     }
 }
 
@@ -1634,10 +1843,13 @@ impl Editor {
     pub fn show_colors(&mut self, preset: &LookPreset) {
         let mut fields = Vec::new();
         for (side, setting, value) in theme_rows(preset, self).controls() {
-            let Value::Color(rgb) = value else { continue };
+            let Value::Color(_) = value else { continue };
             let field = match self.colors.iter().position(|f| f.side == side && f.key == setting.key) {
                 Some(i) => self.colors.swap_remove(i),
-                None => ColorField { side, key: setting.key, text: TextEdit::new(rgb.hex()) },
+                None => {
+                    let hex = shown_color(preset, side, setting.key).map(Rgb::hex).unwrap_or_default();
+                    ColorField { side, key: setting.key, text: TextEdit::new(hex) }
+                }
             };
             fields.push(field);
         }
@@ -1704,11 +1916,13 @@ pub fn theme_rows(preset: &LookPreset, editor: &Editor) -> ThemeRows {
     if light.theme.id() != dark.theme.id() {
         return ThemeRows::Apart { light: light.settings.iter().collect(), dark: dark.settings.iter().collect() };
     }
+    // A color compares as it shows: two following their bases are apart if they come to two colors.
+    let (lr, dr) = (light.resolved(), dark.resolved());
     let rows = light.settings.iter().zip(dark.settings.iter()).map(|((setting, l), (_, d))| ThemeRow {
         setting,
         light: l,
         dark: d,
-        joined: l == d && !editor.split.contains(setting.key),
+        joined: l.shown(setting.key, &lr) == d.shown(setting.key, &dr) && !editor.split.contains(setting.key),
     });
     ThemeRows::Same { theme_joined: !editor.split.contains(THEME), rows: rows.collect() }
 }
