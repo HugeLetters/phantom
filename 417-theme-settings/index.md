@@ -1,4 +1,22 @@
-# #417 prototype: Phantom theme settings, v2 (stills)
+# #417 prototype: Phantom theme settings, v3 (stills)
+
+Headless renders (`--at 0.5`, 2x unless noted) of a throwaway build (branch `417-theme-settings`). v3 stills are prefixed `v3-`; v2 and v1 lines stay below. Each still is in Light and Dark (the system's Appearance; the sheet shows both halves either way).
+
+## v3: Settings sheet
+- [v3-sheet-look-colors-light.png](v3-sheet-look-colors-light.png), [-dark](v3-sheet-look-colors-dark.png): Look (Corners, Density, Motion as a dropdown "Follow Reduce Motion") and Colors ("The rest follow these."). No rule above or below a section header; rows keep theirs.
+- [v3-sheet-every-color-light.png](v3-sheet-every-color-light.png), [-dark](v3-sheet-every-color-dark.png): "Every color" open (1x, tall window). Faint text is set by hand: a dot on its swatch. "Accent text" is gone (Phantom draws none).
+- [v3-popup-faint-light.png](v3-popup-faint-light.png), [-dark](v3-popup-faint-dark.png): the popup next to Faint text's swatch (Light, then Dark): saturation/brightness square, hue strip, hex field, "Follow Text", and the warnings under them: "Hard to read on Surface: 3.8:1 (needs 4.5:1)." (Dark's hand-set faint reads 2.5:1.)
+- [v3-popup-accent-light.png](v3-popup-accent-light.png), [-dark](v3-popup-accent-dark.png): the popup on a hand-set Accent: "Reset" instead of Follow; no warning, it passes 3:1.
+- [v3-tooltip-light.png](v3-tooltip-light.png), [-dark](v3-tooltip-dark.png): the swatch tooltip, "#4392f7 · theme default" (derived colors say "· follows Text").
+
+## v3: Smallest window (640 wide)
+Before = the v2 build (segmented controls cut: "Sq…", "Ro…", "Comfor…", Motion radios cut). After = segmented controls whose labels don't fit become dropdowns; nothing is cut.
+- 640x400: [before light](v3-narrow-640x400-before-light.png), [after light](v3-narrow-640x400-after-light.png), [before dark](v3-narrow-640x400-before-dark.png), [after dark](v3-narrow-640x400-after-dark.png)
+- 640x600: [before light](v3-narrow-640x600-before-light.png), [after light](v3-narrow-640x600-after-light.png), [before dark](v3-narrow-640x600-before-dark.png), [after dark](v3-narrow-640x600-after-dark.png)
+
+Faked: the square and hue strip are drawn with real gradient fills and markers placed from the colour's real hue/saturation/brightness, but they don't drag yet; the hex field is a static view. The popup opens from a still's setting, not a click (a click on a swatch does open it).
+
+---
 
 Headless renders of a throwaway build (branch `417-theme-settings`). v2 stills are prefixed `v2-`; the v1 stills and their notes stay below, unchanged.
 
