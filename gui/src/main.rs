@@ -1260,16 +1260,19 @@ fn proto_sheet(s: &mut SettingsWindow, every: bool) {
     settings_scene(s, Tab::Appearance, demo_settings(false));
     for (appearance, dark) in [(preset::Appearance::Light, false), (preset::Appearance::Dark, true)] {
         let mut look = theme::phantom::theme_look(dark);
-        for (i, (key, _)) in proto::BASES.iter().enumerate() {
-            look.settings.set(key, Value::Colour(proto::set("today", dark).0[i]));
-        }
         look.settings.set(theme::phantom::EVERY, Value::Toggle(every));
         if !dark {
+            // Faint text set by hand in Light, as today's look has it: reads 3.8:1.
             look.settings.set("d_text_faint", Value::Colour(Rgb([0x80, 0x82, 0x87])));
         }
         s.looks.borrow_mut().set(appearance, look);
     }
+    let _ = proto::FOLLOW;
     model::settings::presets::edit_active(s);
+    // The eight bases apart per Tone, each following Phantom's own.
+    for (key, _) in proto::BASES {
+        model::settings::split_row(s, key);
+    }
 }
 
 /// The Active look's Dark half the stand-in theme, in a debug build; unchanged in a release one,

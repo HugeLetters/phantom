@@ -71,7 +71,18 @@ static SETTINGS: [Setting; 35] = {
                 default: "comfortable",
             },
         },
-        Setting { key: MOTION, label: "Motion", kind: Kind::Toggle { default: true } },
+        Setting {
+            key: MOTION,
+            label: "Motion",
+            kind: Kind::Choice {
+                choices: &[
+                    Choice { id: "off", label: "Off" },
+                    Choice { id: "on", label: "On" },
+                    Choice { id: "follow", label: "Follow Reduced Motion" },
+                ],
+                default: "follow",
+            },
+        },
         colour!("c_background", "Background", 0),
         colour!("c_surface", "Surface", 0),
         colour!("c_text", "Text", 0),
@@ -147,7 +158,10 @@ impl Theme for Phantom {
         let corners = proto::env("corners").unwrap_or_else(|| choice(CORNERS));
         tokens.radius = proto::radius(&corners);
         proto::set_compact(proto::env("density").unwrap_or_else(|| choice(DENSITY)) == "compact");
-        let motion = proto::env("motion").map_or(settings.get(MOTION) != Some(Value::Toggle(false)), |m| m != "off");
+        let motion = !proto::motion_is_off(&proto::env("motion").unwrap_or_else(|| match choice(MOTION).as_str() {
+            "" => "follow".into(),
+            c => c.to_owned(),
+        }));
         proto::set_motion_off(!motion);
         if !motion {
             let none = rune::Spring::NONE;

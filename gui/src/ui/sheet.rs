@@ -327,7 +327,7 @@ impl Ui {
             .w_full()
             .shrink()
             .min_h(0.0)
-            .max_w(600.0)
+            .max_w(860.0)
             .radius(k.radius.md)
             .fill(k.c.layer_01)
             .box_shadow(rune::Shadow { spread: 0.5, color: k.c.border_base, ..Default::default() })
@@ -386,7 +386,22 @@ impl Ui {
     /// line up. The row is keyed `key`, its halves `<key>-left` and `<key>-right`, its controls'
     /// cells `<key>-both-cell` while joined, else `<key>-light-cell` and `<key>-dark-cell`.
     pub fn halves_row(&self, key: &str, label: &str, cells: Halves, looks: [&Ui; 2], toggle: Option<El>, notes: Vec<(String, Tone)>) -> El {
+        self.halves_row_ext(key, label, cells, looks, toggle, notes, [Vec::new(), Vec::new()])
+    }
+
+    /// PROTOTYPE (#417): [`Ui::halves_row`] with `below`: what goes under the line of each half.
+    pub fn halves_row_ext(
+        &self,
+        key: &str,
+        label: &str,
+        cells: Halves,
+        looks: [&Ui; 2],
+        toggle: Option<El>,
+        notes: Vec<(String, Tone)>,
+        below: [Vec<El>; 2],
+    ) -> El {
         let [light, dark] = looks;
+        let [below_left, below_right] = below;
         let cell = |content: Option<El>, key: String| row().key(key).grow(1.0).min_w(0.0).min_h(44.0).center_y().children(content);
         let (left_cell, right_cell) = match cells {
             Halves::Joined(control) => (cell(Some(control), format!("{key}-both-cell")), cell(None, format!("{key}-dark-cell"))),
@@ -403,7 +418,9 @@ impl Ui {
             let ink = if tone == Tone::Error { light.tokens().c.danger.fg } else { light.tone_color(tone) };
             left = left.child(text(note).key(format!("{key}-refused")).font(light.tokens().ty.text_small).color(ink).wrap().pb(4.0));
         }
-        let right = row().w_full().gap(12.0).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
+        let left = left.children(below_left);
+        let line = row().w_full().gap(12.0).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
+        let right = col().w_full().gap(2.0).child(line).children(below_right);
         self.halves_line(key, left, right, [light.tokens().c.bg_base, dark.tokens().c.bg_base])
     }
 
@@ -470,6 +487,58 @@ impl Ui {
         let left = row().w_full().gap(12.0).child(el().w(HALF_LABEL)).child(light.grow(1.0).min_w(0.0));
         let right = row().w_full().gap(12.0).child(dark.grow(1.0).min_w(0.0)).child(el().w(HALF_TOGGLE));
         self.halves_line("halves-header", left, right, looks.map(|l| l.tokens().c.bg_base))
+    }
+
+    /// PROTOTYPE (#417): a section's header across both halves, on each half's window colour:
+    /// `title` (with a chevron when it opens), and under it `hint`. `on_press` makes it open or close.
+    pub fn section_header<S: 'static>(
+        &self,
+        key: &str,
+        title: &str,
+        hint: Option<&str>,
+        open: Option<bool>,
+        looks: [&Ui; 2],
+        on_press: Option<Box<dyn Fn(&mut S)>>,
+    ) -> El {
+        let [light, dark] = looks;
+        let k = &light.k;
+        let mut head = row().gap(6.0).center_y();
+        if let Some(open) = open {
+            head = head.child(text(if open { "▾" } else { "▸" }.to_owned()).font(k.ty.ui).color(k.c.text_muted).w(10.0).a11y_hidden());
+        }
+        head = head.child(text(title.to_owned()).font(k.ty.ui_medium).color(k.c.text_base));
+        let mut left = col().w_full().py(8.0).gap(2.0).child(head);
+        if let Some(hint) = hint {
+            left = left.child(text(hint.to_owned()).font(k.ty.text_small).color(k.c.text_muted).wrap());
+        }
+        let left = match on_press {
+            Some(f) => left.key(format!("{key}-press")).role("button").label(title.to_owned()).on_press(move |s: &mut S| f(s)),
+            None => left,
+        };
+        self.halves_line(key, left, col().w_full().min_h(36.0), [light.k.c.page, dark.k.c.page])
+    }
+
+    /// PROTOTYPE (#417): a warning under a row, in its half's look: at most two lines.
+    pub fn warning_line(&self, key: &str, message: String) -> El {
+        let ink = self.tone_color(Tone::Warning);
+        text(message).key(key.to_owned()).font(self.k.ty.text_small).color(ink).wrap().max_lines(2).pb(6.0)
+    }
+
+    /// PROTOTYPE (#417): a swatch you press to edit; a hand-set one carries a small dot.
+    pub fn swatch_button(&self, key: String, color: rune::Color, hand_set: bool, label: &str) -> El {
+        let k = &self.k;
+        let mut s = el()
+            .key(key)
+            .role("button")
+            .label(label.to_owned())
+            .size(24.0, 24.0)
+            .radius(k.radius.sm)
+            .fill(color)
+            .border(1.0, k.c.border_strong);
+        if hand_set {
+            s = s.child(el().absolute(15.0, 15.0).size(8.0, 8.0).radius(4.0).fill(k.c.text_base).border(1.5, k.c.bg_base).a11y_hidden());
+        }
+        s
     }
 
     /// A row's Join or Split: a small button that joins or splits it.
@@ -738,8 +807,8 @@ pub enum Halves {
 const PREVIEW: f32 = 24.0;
 
 /// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
-const HALF_LABEL: f32 = 64.0;
-const HALF_TOGGLE: f32 = 46.0;
+const HALF_LABEL: f32 = 112.0;
+const HALF_TOGGLE: f32 = 56.0;
 
 /// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's
 /// (and "+ Add image…") as tall as its drawing, name and chips need; a designed pair's, with no

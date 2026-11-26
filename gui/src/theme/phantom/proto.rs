@@ -250,29 +250,66 @@ pub fn hex(c: Color) -> String {
     format!("#{:02x}{:02x}{:02x}", b(c.r), b(c.g), b(c.b))
 }
 
-/// What the sheet says under the row of `key` when its pair reads under 4.5:1 (3:1 for edges).
+/// What the sheet says under the row of `key` when its pair reads under 4.5:1 (3:1 for edges):
+/// "Accent text is hard to read on Surface: 4.0:1 (needs 4.5:1)."
 pub fn warnings(key: &str, k: &Kit) -> Vec<String> {
     let p = &k.c;
     let page = p.page;
-    let pairs: Vec<(&str, Color, Color, f32)> = match key {
-        "c_text" => vec![("Text on Surface", p.text_base, p.bg_base, 4.5)],
-        "c_background" => vec![("Muted text on Window", p.text_muted, page, 4.5)],
-        "c_surface" => vec![("Muted text on Surface", p.text_muted, p.bg_base, 4.5)],
-        "c_accent" => vec![("Text on Accent", p.submit_fg, p.bg_accent, 4.5), ("Accent text on Surface", p.text_accent, p.bg_base, 4.5)],
-        "c_danger" => vec![("Danger on its fill", p.danger.fg, p.danger.bg, 4.5)],
-        "c_warning" => vec![("Warning on its fill", p.warning.fg, p.warning.bg, 4.5)],
-        "c_success" => vec![("Success on its fill", p.success.fg, p.success.bg, 4.5)],
-        "d_text_faint" => vec![("Faint text on Surface", p.text_faint, p.bg_base, 4.5), ("Faint text on Window", p.text_faint, page, 4.5)],
-        "d_text_muted" => vec![("Muted text on Surface", p.text_muted, p.bg_base, 4.5)],
-        "d_focus" => vec![("Focus ring on Surface", p.border_focus, p.bg_base, 3.0)],
+    let pairs: Vec<(&str, &str, Color, Color, f32)> = match key {
+        "c_text" => vec![("Text", "Surface", p.text_base, p.bg_base, 4.5)],
+        "c_background" => vec![("Muted text", "Background", p.text_muted, page, 4.5)],
+        "c_surface" => vec![("Muted text", "Surface", p.text_muted, p.bg_base, 4.5)],
+        "c_accent" => {
+            vec![("Text on Accent", "Accent", p.submit_fg, p.bg_accent, 4.5), ("Accent text", "Surface", p.text_accent, p.bg_base, 4.5)]
+        }
+        "c_danger" => vec![("Danger", "its fill", p.danger.fg, p.danger.bg, 4.5)],
+        "c_warning" => vec![("Warning", "its fill", p.warning.fg, p.warning.bg, 4.5)],
+        "c_success" => vec![("Success", "its fill", p.success.fg, p.success.bg, 4.5)],
+        "d_text_faint" => {
+            vec![("Faint text", "Surface", p.text_faint, p.bg_base, 4.5), ("Faint text", "Background", p.text_faint, page, 4.5)]
+        }
+        "d_text_muted" => vec![("Muted text", "Surface", p.text_muted, p.bg_base, 4.5)],
+        "d_text_accent" => vec![("Accent text", "Surface", p.text_accent, p.bg_base, 4.5)],
+        "d_focus" => vec![("Focus ring", "Surface", p.border_focus, p.bg_base, 3.0)],
         _ => vec![],
     };
     pairs
         .into_iter()
-        .map(|(what, a, b, need)| (what, contrast(a, b), need))
-        .filter(|(_, r, need)| r < need)
-        .map(|(what, r, need)| format!("{what} reads {r:.1}:1, under {need}:1"))
+        .map(|(what, on, a, b, need)| (what, on, contrast(a, b), need))
+        .filter(|(_, _, r, need)| r < need)
+        .map(|(what, on, r, need)| format!("{what} is hard to read on {on}: {r:.1}:1 (needs {need}:1)."))
         .collect()
+}
+
+/// The swatch whose editor is open (`key|side`) and the one whose tooltip shows, both set by a
+/// press or a rest, or at the start by `open=` and `tip=` of `PHANTOM_PROTO`.
+static OPEN: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+static TIP: std::sync::Mutex<Option<Option<String>>> = std::sync::Mutex::new(None);
+
+fn cell(m: &'static std::sync::Mutex<Option<Option<String>>>, name: &str) -> std::sync::MutexGuard<'static, Option<Option<String>>> {
+    let mut g = m.lock().unwrap();
+    if g.is_none() {
+        *g = Some(env(name));
+    }
+    g
+}
+
+pub fn open() -> Option<String> {
+    cell(&OPEN, "open").clone().flatten()
+}
+
+pub fn toggle_open(id: &str) {
+    let mut g = cell(&OPEN, "open");
+    let now = g.clone().flatten();
+    *g = Some(if now.as_deref() == Some(id) { None } else { Some(id.to_owned()) });
+}
+
+pub fn tip() -> Option<String> {
+    cell(&TIP, "tip").clone().flatten()
+}
+
+pub fn set_tip(id: &str, on: bool) {
+    *cell(&TIP, "tip") = Some(on.then(|| id.to_owned()));
 }
 
 pub fn radius(corners: &str) -> Radius {
@@ -298,6 +335,16 @@ pub fn compact() -> bool {
 /// `comfortable` as is, or `compact` while Density is Compact.
 pub fn dens(comfortable: f32, compact_: f32) -> f32 {
     if compact() { compact_ } else { comfortable }
+}
+
+/// Motion's three choices: "off", "on", "follow" (the system's Reduce Motion; `reduced=1` of
+/// `PHANTOM_PROTO` stands in for it, off by default).
+pub fn motion_is_off(choice: &str) -> bool {
+    match choice {
+        "off" => true,
+        "on" => false,
+        _ => env("reduced").is_some_and(|v| v == "1"),
+    }
 }
 
 static MOTION_OFF: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
