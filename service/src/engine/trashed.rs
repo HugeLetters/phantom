@@ -35,7 +35,7 @@ use librqbit::{ManagedTorrentShared, TorrentMetadata};
 use tracing::warn;
 
 use super::parts::Parts;
-use super::slots::{Handle, Opened, Refused, Slots, Want};
+use super::slots::{Granting, Handle, Opened, Refused, Slots};
 use super::trash::{self, Carried, Plan, Trash, identity};
 use super::undo::{Back, machine};
 
@@ -293,7 +293,7 @@ impl Trashed {
     /// name left anywhere. Looks at each of them open (`fstat`), and waits
     /// for nothing: one being opened or closed is looked at next time. A torrent no move took a file
     /// of pays nothing.
-    pub fn gone(&self, info_hash: &str) -> BTreeSet<usize> {
+    fn gone(&self, info_hash: &str) -> BTreeSet<usize> {
         let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
         if !torrent.any.load(Ordering::SeqCst) {
             return BTreeSet::new();
@@ -351,10 +351,21 @@ impl Trashed {
         open
     }
 
-    /// Opens file `index` of torrent `info_hash` for writing, as `want` says it may be
-    /// ([`Slots::grant`]): as the actor lets it run. On a blocking task, never the actor's.
-    pub fn grant(&self, info_hash: &str, index: usize, want: &Want) -> Result<(), Refused> {
-        self.torrent(info_hash).slots.grant(index, want)
+    /// Opens the files `files` (by index) of torrent `info_hash` for writing, each as `granting` says it
+    /// may be ([`Slots::grant`]): as the actor lets the torrent run. Why each that wasn't. On a
+    /// blocking task, never the actor's.
+    pub fn grant(&self, info_hash: &str, granting: &Granting, files: &BTreeSet<usize>) -> Vec<Refused> {
+        granting.grant(&self.torrent(info_hash).slots, files)
+    }
+
+    /// A look at torrent `info_hash` off the actor: first closes the files `closable` that were deleted
+    /// by hand ([`Trashed::close_deleted`], if any), then finds those a Move to Trash took that are
+    /// gone from the Trash ([`Trashed::gone`]).
+    pub fn look(&self, info_hash: &str, closable: &BTreeSet<usize>) -> BTreeSet<usize> {
+        if !closable.is_empty() {
+            self.close_deleted(info_hash, closable);
+        }
+        self.gone(info_hash)
     }
 
     /// The files of torrent `info_hash` open for writing, by index: those granted, or made since. Only
@@ -412,7 +423,7 @@ impl Trashed {
     /// reading or opening now is left for the next look. Which of them it closed. One set Off is let
     /// go of, as one gone from the Trash is, so librqbit offers none of its pieces (the actor writes
     /// that ahead as it's set Off).
-    pub fn close_deleted(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
+    fn close_deleted(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
         let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
         let taken = torrent.lock().taken.clone();
         let mut closed = BTreeSet::new();

@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use anyhow::{Context, Result, bail};
 
 use super::parts::Parts;
+use super::store::Info;
 
 /// A torrent's open files, outliving the storages librqbit gets of it.
 #[derive(Default)]
@@ -165,6 +166,44 @@ pub(super) struct Want {
     pub complete: bool,
     /// The torrent's destination: a file made is made with its folders from there down, never it.
     pub destination: PathBuf,
+}
+
+/// What the actor knows of a torrent as it asks for its files to be granted ([`Trashed::grant`]):
+/// the gate decides from it, per file, what a [`Want`] says, so the rule of when a file is complete
+/// is the gate's. Owned, to go to a blocking task.
+///
+/// [`Trashed::grant`]: super::trashed::Trashed::grant
+pub(super) struct Granting {
+    /// Each file's length, and whether it's padding (never granted).
+    files: Vec<(u64, bool)>,
+    /// Each file's bytes in pieces it shares with other files, by index.
+    shared: Vec<u64>,
+    /// The bytes librqbit says it has of each file, by index.
+    progress: Vec<u64>,
+    destination: PathBuf,
+}
+
+impl Granting {
+    pub fn of(info: &Info, progress: Vec<u64>, destination: PathBuf) -> Self {
+        Self { files: info.files.iter().map(|f| (f.len, f.padding)).collect(), shared: info.shared_bytes(), progress, destination }
+    }
+
+    /// File `index`'s [`Want`]; none for padding or a file the torrent hasn't. A file is complete if
+    /// librqbit has all of it but what its pieces share with other files (a hard link to a file
+    /// that's complete but for them still seeds).
+    fn want(&self, index: usize) -> Option<Want> {
+        let &(size, padding) = self.files.get(index)?;
+        (!padding).then(|| Want {
+            size,
+            complete: self.progress.get(index).is_some_and(|had| had + self.shared[index] >= size),
+            destination: self.destination.clone(),
+        })
+    }
+
+    /// Grants each of `files` on `slots`, one after another: why each that isn't.
+    pub fn grant(&self, slots: &Slots, files: &std::collections::BTreeSet<usize>) -> Vec<Refused> {
+        files.iter().filter_map(|&i| slots.grant(i, &self.want(i)?).err()).collect()
+    }
 }
 
 /// Why a file isn't [granted](Slots::grant).
