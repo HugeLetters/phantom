@@ -274,6 +274,12 @@ pub fn warnings(key: &str, k: &Kit) -> Vec<String> {
         .collect()
 }
 
+/// The 8-bit sRGB bytes of `c`, opaque.
+pub fn rgba8(c: Color) -> [u8; 4] {
+    let b = |x: f32| (enc(x.clamp(0.0, 1.0)) * 255.0 + 0.5) as u8;
+    [b(c.r), b(c.g), b(c.b), 255]
+}
+
 /// A colour from sRGB components in 0..=1.
 pub fn srgb(r: f32, g: f32, b: f32) -> Color {
     Color { r: dec(r), g: dec(g), b: dec(b), a: 1.0 }

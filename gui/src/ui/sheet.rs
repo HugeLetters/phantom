@@ -539,7 +539,10 @@ impl Ui {
     pub fn picker_body(&self, key: &str, now: rune::Color, below: Vec<El>) -> El {
         use crate::theme::phantom::proto;
         let k = &self.k;
-        let hsl = proto::env("picker").as_deref() == Some("hsl");
+        let variant = proto::env("picker");
+        let hsl = variant.as_deref() == Some("hsl");
+        // `oklch-l`: the square is hue × chroma, the bar lightness.
+        let light_bar = variant.as_deref() == Some("oklch-l");
         let (w, ht, strip) = (312.0_f32, 140.0_f32, 16.0_f32);
         let (h, c0, l0, bar_at) = if hsl {
             let (h, s, l) = proto::hsl(now);
@@ -549,54 +552,55 @@ impl Ui {
             (h, c, l, c / proto::max_chroma(l, h).max(1e-4))
         };
         // The colour of a cell: hue `x`, lightness `l`, at the picked colour's chroma/saturation.
-        let at = |x: f32, l: f32| if hsl { proto::at_hsl(x, c0, l) } else { proto::at_oklch(l, c0, x) };
-        let rows = 35;
-        let rh = ht / rows as f32;
-        let mut square = col()
+        // In `oklch-l` the row's `l` is the chroma fraction (1 = full for that hue) at the picked lightness.
+        let at = |x: f32, l: f32| {
+            if hsl {
+                proto::at_hsl(x, c0, l)
+            } else if light_bar {
+                proto::at_oklch(l0, l * proto::max_chroma(l0, x), x)
+            } else {
+                proto::at_oklch(l, c0, x)
+            }
+        };
+        let (mark_y, bar_at) = if light_bar { (c0 / proto::max_chroma(l0, h).max(1e-4), l0) } else { (l0, bar_at) };
+        // The square and bar are generated images at 2x their size, computed per pixel, and kept
+        // until their inputs change (a per-row gradient showed stripes).
+        const SCALE: u32 = 2;
+        let tag = format!("{variant:?}-{:x}-{:x}-{:x}", c0.to_bits(), l0.to_bits(), h.to_bits());
+        let square_px = picker_image(&format!("sq-{tag}"), (w as u32 * SCALE, ht as u32 * SCALE), |fx, fy| at(fx, 1.0 - fy));
+        let top = if hsl { 1.0 } else { proto::max_chroma(l0, h) };
+        let bar_px = picker_image(&format!("bar-{tag}"), (strip as u32 * SCALE, ht as u32 * SCALE), |_, fy| {
+            let t = 1.0 - fy;
+            if hsl {
+                proto::at_hsl(h, t * top, l0)
+            } else if light_bar {
+                proto::at_oklch(t, c0, h)
+            } else {
+                proto::at_oklch(l0, t * top, h)
+            }
+        });
+        let square = el()
             .key(format!("{key}-square"))
             .size(w, ht)
             .radius(k.radius.sm)
             .clip_rounded(k.radius.sm)
+            .pixels(&square_px)
             .role("slider")
-            .label("Hue and lightness".to_owned());
-        // Three segments a row: a gradient carries at most 16 stops.
-        let parts = 3;
-        for r in 0..rows {
-            let l = 1.0 - (r as f32 + 0.5) / rows as f32;
-            let mut line = row().size(w, rh + 0.5).a11y_hidden();
-            for p in 0..parts {
-                let stops: Vec<(f32, rune::Color)> = (0..=12)
-                    .map(|i| {
-                        let t = i as f32 / 12.0;
-                        (t, at((p as f32 + t) / parts as f32, l))
-                    })
-                    .collect();
-                line = line.child(el().size(w / parts as f32, rh + 0.5).linear_gradient(std::f32::consts::FRAC_PI_2, stops).a11y_hidden());
-            }
-            square = square.child(line);
-        }
+            .label(if light_bar { "Hue and saturation" } else { "Hue and lightness" }.to_owned());
         let ring = |e: El| {
             e.border(2.0, rune::Color::WHITE)
                 .box_shadow(rune::Shadow { spread: 1.0, color: rune::Color::BLACK.alpha(0.5), ..Default::default() })
                 .a11y_hidden()
         };
-        let square = square.child(ring(el().absolute(h * w - 6.0, (1.0 - l0) * ht - 6.0).size(12.0, 12.0).radius(6.0)));
-        // The bar: full chroma (or saturation) at the top, grey at the bottom, for the picked hue and lightness.
-        let top = if hsl { 1.0 } else { proto::max_chroma(l0, h) };
-        let stops: Vec<(f32, rune::Color)> = (0..=12)
-            .map(|i| {
-                let t = 1.0 - i as f32 / 12.0;
-                (i as f32 / 12.0, if hsl { proto::at_hsl(h, t * top, l0) } else { proto::at_oklch(l0, t * top, h) })
-            })
-            .collect();
+        let square = square.child(ring(el().absolute(h * w - 6.0, (1.0 - mark_y.clamp(0.0, 1.0)) * ht - 6.0).size(12.0, 12.0).radius(6.0)));
         let bar = el()
             .key(format!("{key}-saturation"))
             .size(strip, ht)
             .radius(k.radius.sm)
             .clip_rounded(k.radius.sm)
-            .linear_gradient(std::f32::consts::PI, stops)
+            .pixels(&bar_px)
             .role("slider")
-            .label("Saturation".to_owned())
+            .label(if light_bar { "Lightness" } else { "Saturation" }.to_owned())
             .child(ring(el().absolute(2.0, (1.0 - bar_at.clamp(0.0, 1.0)) * ht - 3.0).size(strip - 4.0, 6.0).radius(3.0)));
         let mut body = col().w(w + strip + 8.0 + 24.0).gap(10.0).px(12.0).py(12.0).child(row().gap(8.0).child(square).child(bar));
         for b in below {
@@ -624,7 +628,7 @@ impl Ui {
             .border(1.0, k.c.border_strong);
         if hand_set {
             // A ring in the accent colour, a 2 pt gap off the swatch.
-            s = s.child(el().absolute(-5.0, -5.0).size(32.0, 32.0).radius(k.radius.sm + 3.0).border(1.5, k.c.border_focus).a11y_hidden());
+            s = s.child(el().absolute(-3.5, -3.5).size(31.0, 31.0).radius(k.radius.sm + 3.5).border(1.5, k.c.border_focus).a11y_hidden());
         }
         s
     }
@@ -926,4 +930,26 @@ fn pressed_over(hover: rune::Color, pressed: rune::Color) -> rune::Color {
         return pressed;
     }
     pressed.alpha(((pressed.a - hover.a) / (1.0 - hover.a)).clamp(0.0, 1.0))
+}
+
+/// PROTOTYPE (#417): an image of `size` pixels whose pixel at fraction (x, y) from the top left is
+/// `color(x, y)`, computed once per `key` and kept.
+fn picker_image(key: &str, size: (u32, u32), color: impl Fn(f32, f32) -> rune::Color) -> rune::Pixels {
+    thread_local! {
+        static KEPT: std::cell::RefCell<std::collections::HashMap<String, rune::Pixels>> = Default::default();
+    }
+    if let Some(p) = KEPT.with(|k| k.borrow().get(key).cloned()) {
+        return p;
+    }
+    let (w, h) = size;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            rgba.extend_from_slice(&crate::theme::phantom::proto::rgba8(color((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32)));
+        }
+    }
+    let p = rune::Pixels::new();
+    p.set(w, h, rgba);
+    KEPT.with(|k| k.borrow_mut().insert(key.to_owned(), p.clone()));
+    p
 }
