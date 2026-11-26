@@ -5,7 +5,7 @@
 
 use rune_kit::Kit;
 
-use super::setting::{Choice, Kind, Rgb, Setting, Value, Values};
+use super::setting::{Choice, Kind, Rgb, Setting, Show, Value, Values};
 use super::{Built, Colours, Spacing, Theme, phantom};
 
 pub struct StandIn;
@@ -16,7 +16,11 @@ static SETTINGS: [Setting; 3] = [
     Setting {
         key: "shade",
         label: "Shade",
-        kind: Kind::Choice { choices: &[Choice { id: "dusk", label: "Dusk" }, Choice { id: "night", label: "Night" }], default: "night" },
+        kind: Kind::Choice {
+            choices: &[Choice { id: "dusk", label: "Dusk" }, Choice { id: "night", label: "Night" }],
+            default: "night",
+            show: Show::Dropdown,
+        },
     },
     Setting { key: "accent", label: "Accent", kind: Kind::Colour { default: Rgb([0xd9, 0x4f, 0x8a]) } },
     Setting { key: "animations", label: "Animations", kind: Kind::Toggle { default: true } },
@@ -52,6 +56,7 @@ impl Theme for StandIn {
             blocks: Default::default(),
             screens: Default::default(),
             app_icon: "dark-hour",
+            motion: Default::default(),
         }
     }
 }

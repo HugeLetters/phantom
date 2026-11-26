@@ -2,6 +2,7 @@
 //! switch, and an icon to pick.
 //! `ui.window_page("settings", "Settings", tabs, Some(body), close)`.
 
+use super::menu::{At, Entry};
 use rune::{El, ScrollSpec, col, el, icon, row, text};
 use rune_kit::{ControlSize, SegmentedControl, Select, Switch};
 
@@ -203,6 +204,59 @@ impl Ui {
             .build(&self.k, layer);
         let select = if first_focus { select.tab_index(1) } else { select };
         el().key(key).child(select)
+    }
+
+    /// [`Ui::popup_button`] for options too long for the kit's pop-up list, which is never wider
+    /// than 160 pt and cuts them: the same button, its list a [`Ui::menu`] as wide as its longest
+    /// option, a check at the chosen one. Keyed as `popup_button` is, but its options
+    /// `<key>-menu-content/…`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dropdown<S: 'static>(
+        &self,
+        key: String,
+        label: &str,
+        options: &[&str],
+        current: usize,
+        open: bool,
+        first_focus: bool,
+        on_toggle: impl Fn(&mut S) + Clone + 'static,
+        on_close: impl Fn(&mut S) + 'static,
+        on_choose: impl Fn(&mut S, usize) + Clone + 'static,
+        layer: &mut Vec<El>,
+    ) -> El {
+        let button = Select::new(key.clone(), options)
+            .label(label)
+            .current(options.get(current).copied())
+            .open(open)
+            .on_toggle(on_toggle.clone())
+            .trigger(&self.k)
+            // Space opens it as a press does; Return does too, as it does a button.
+            .on_key(move |s: &mut S, ev: &rune::KeyEvent, _: &mut rune::Tx| {
+                let enter = ev.key == rune::Key::Enter && ev.mods == rune::Mods::default();
+                if enter {
+                    on_toggle(s);
+                }
+                enter
+            });
+        let button = if first_focus { button.tab_index(1) } else { button };
+        let entries = options
+            .iter()
+            .enumerate()
+            .map(|(i, name)| Entry::Choice {
+                id: i.to_string().into(),
+                label: (*name).to_owned(),
+                hint: None,
+                icon: (i == current).then_some(Icon::Check),
+                checked: Some(i == current),
+            })
+            .collect();
+        let pick = move |s: &mut S, id: &str, _: &mut rune::Tx| {
+            if let Ok(i) = id.parse() {
+                on_choose(s, i)
+            }
+        };
+        let menu = self.menu(format!("{key}-menu"), button, open.then_some(At::Below), entries, pick, on_close, layer);
+        el().key(key).child(menu)
     }
 
     /// A chip of a Look Preset's half (or both): its glyph over its look, 22 pt square, keyed `key`.

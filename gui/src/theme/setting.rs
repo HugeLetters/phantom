@@ -31,10 +31,20 @@ pub enum Kind {
     Choice {
         choices: &'static [Choice],
         default: &'static str,
+        /// How Settings draws it.
+        show: Show,
     },
     Colour {
         default: Rgb,
     },
+}
+
+/// How Settings draws a [`Kind::Choice`]: a dropdown, which suits any labels, or the options side
+/// by side, which suits a couple of short ones (Light | Dark).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Show {
+    Dropdown,
+    Segments,
 }
 
 #[derive(Debug, PartialEq)]
@@ -185,7 +195,7 @@ pub(crate) mod tests {
 
     /// One setting of every kind.
     pub static SAMPLE: [Setting; 3] = [
-        Setting { key: "motion", label: "Motion", kind: Kind::Toggle { default: true } },
+        Setting { key: "pulse", label: "Pulse", kind: Kind::Toggle { default: true } },
         Setting {
             key: "shape",
             label: "Shape",
@@ -196,6 +206,7 @@ pub(crate) mod tests {
                     Choice { id: "cut", label: "Cut" },
                 ],
                 default: "square",
+                show: Show::Dropdown,
             },
         },
         Setting { key: "accent", label: "Accent", kind: Kind::Colour { default: Rgb([0x33, 0x66, 0xff]) } },

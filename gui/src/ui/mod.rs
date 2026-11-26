@@ -28,7 +28,7 @@ mod text_field;
 use rune::{El, col, el, row};
 use rune_kit::Kit;
 
-use crate::theme::{Colours, Spacing};
+use crate::theme::{Colours, Motion, Spacing};
 
 pub use blocks::{BlockOverrides, Blocks};
 #[cfg(test)]
@@ -54,17 +54,26 @@ pub struct Ui {
     /// The room between and around things, and the fixed heights, as the look sets them.
     spacing: Spacing,
     blocks: Blocks,
+    motion: Motion,
 }
 
 impl Ui {
-    /// The look of `tokens` and `blocks`, as a theme resolved them.
-    pub fn new(tokens: Kit, colours: Colours, spacing: Spacing, blocks: Blocks) -> Self {
-        Self { k: tokens, colours, spacing, blocks }
+    /// The look of `tokens` and `blocks`, as a theme resolved them, moving as `motion` says.
+    pub fn new(tokens: Kit, colours: Colours, spacing: Spacing, blocks: Blocks, motion: Motion) -> Self {
+        Self { k: tokens, colours, spacing, blocks, motion }
     }
 
     /// The look's spacing, which screens lay out with.
     pub fn spacing(&self) -> &Spacing {
         &self.spacing
+    }
+
+    /// Tells Rune, once a view, whether this look's window reduces motion
+    /// (`ui.motion(cx)`): Follow leaves Rune's reading of the Mac's Reduce Motion alone.
+    pub fn motion<S>(&self, cx: &mut rune::Cx<S>) {
+        if self.motion != Motion::Follow {
+            cx.reduced_motion(self.motion.reduced(cx.system_reduced_motion()));
+        }
     }
 
     #[cfg(test)]

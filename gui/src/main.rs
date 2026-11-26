@@ -1184,7 +1184,13 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 stand_in_dark(s);
                 model::settings::presets::edit_active(s);
-                model::settings::toggle_theme_menu(s, model::settings::Side::Only(preset::Appearance::Dark));
+                model::settings::toggle_menu(s, model::settings::THEME, model::settings::Side::Only(preset::Appearance::Dark));
+            }),
+            // The Active look's sheet with Motion's dropdown open.
+            ("settings-motion-menu", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                model::settings::presets::edit_active(s);
+                model::settings::toggle_menu(s, theme::phantom::MOTION, model::settings::Side::Both);
             }),
             // The App icon's sheet: a designed pair chosen; an image added and used in Dark.
             ("settings-icons", |s| {
