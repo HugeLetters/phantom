@@ -43,7 +43,7 @@ impl Theme for Sample {
         &SAMPLE_SETTINGS
     }
     fn build(&self, settings: &Values) -> Built {
-        let motion = settings.get("motion") == Some(Value::Toggle(true));
+        let motion = settings.get("pulse") == Some(Value::Toggle(true));
         let tokens = Kit::neutral(false);
         Built {
             colours: crate::theme::Colours::of(&tokens),
@@ -57,6 +57,7 @@ impl Theme for Sample {
             },
             screens: Default::default(),
             app_icon: if settings.get("shape") == Some(Value::Choice("round")) { "full-moon" } else { "dark-hour" },
+            motion: Default::default(),
         }
     }
 }
@@ -93,6 +94,7 @@ impl Theme for Link {
             blocks: self.blocks.clone(),
             screens: self.screens.clone(),
             app_icon: "phantom",
+            motion: Default::default(),
         }
     }
 }
@@ -188,7 +190,7 @@ proptest! {
     /// A block draws with its Theme Look's settings: Sample's progress bar follows its Motion.
     #[test]
     fn a_block_follows_its_theme_looks_settings(settings in values_of(&SAMPLE_SETTINGS)) {
-        let motion = settings.get("motion") == Some(Value::Toggle(true));
+        let motion = settings.get("pulse") == Some(Value::Toggle(true));
         let look = Rc::new(Look::build(&ThemeLook { theme: &SAMPLE, settings }));
         let view = |look: &Rc<Look>, _: &mut rune::Cx<Rc<Look>>| (look.ui.blocks().progress_bar)(&look.ui, 0.5);
         let mut rt = rune::Runtime::new(look, view, (200.0, 100.0), rune::Env { system_dark: false, scale: 1.0 });
@@ -254,7 +256,7 @@ fn every_theme_is_well_formed() {
         let keys: Vec<_> = theme.settings().iter().map(|s| s.key).collect();
         for (j, setting) in theme.settings().iter().enumerate() {
             assert!(!keys[..j].contains(&setting.key), "{}.{} twice", theme.id(), setting.key);
-            if let Kind::Choice { choices, default } = setting.kind {
+            if let Kind::Choice { choices, default, .. } = setting.kind {
                 assert!(choices.iter().any(|c| c.id == default), "{}.{}'s default", theme.id(), setting.key);
             }
         }

@@ -58,6 +58,8 @@ const GAP: f32 = 8.0;
 pub enum At {
     /// A context menu's corner, in window points.
     Point(f32, f32),
+    /// A dropdown's list, under its trigger.
+    Below,
 }
 
 impl Ui {
@@ -66,7 +68,7 @@ impl Ui {
     #[allow(clippy::too_many_arguments)]
     pub fn menu<S: 'static>(
         &self,
-        key: &'static str,
+        key: impl Into<String>,
         trigger: El,
         open: Option<At>,
         entries: Vec<Entry>,
@@ -80,7 +82,7 @@ impl Ui {
         let mut menu = rune_kit::Menu::new(key).trigger(trigger).open(open.is_some()).min_width(width);
         menu = match open {
             Some(At::Point(x, y)) => menu.at(x, y),
-            None => menu.placement(Placement::BottomStart).gutter(4.0),
+            Some(At::Below) | None => menu.placement(Placement::BottomStart).gutter(4.0),
         };
         for entry in entries {
             menu = match entry {

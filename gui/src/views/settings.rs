@@ -15,13 +15,13 @@ use crate::changes::Target;
 use crate::model::settings::presets;
 use crate::model::settings::{
     AppIcon, Chip, Editor, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, add_image, chip_in_use, choose_chip, choose_folder,
-    choose_image, choose_pair, choose_theme, clear_folder, close, close_icons, close_theme_menu, edit_icons, escape, icon_full_name,
-    icon_name, pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_colour, submit_limit, submit_port,
-    submit_seeding, toggle, toggle_theme_menu,
+    choose_image, choose_pair, choose_theme, clear_folder, close, close_icons, close_menu, edit_icons, escape, icon_full_name, icon_name,
+    pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_colour, submit_limit, submit_port, submit_seeding,
+    toggle, toggle_menu,
 };
 use crate::model::settings::{Held, THEME, ThemeRow, ThemeRows, focused_side, join_row, split_row, theme_rows};
 use crate::theme::preset::{Appearance, LookPreset};
-use crate::theme::setting::{Kind, Value};
+use crate::theme::setting::{Kind, Show, Value};
 use crate::ui::{Halves, Icon, LookChip, Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
@@ -76,6 +76,7 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     let look = s.looks().shown(appearance).clone();
     let ui = &look.ui;
     cx.help_look(ui.help_look());
+    ui.motion(cx);
     let Some(sheet) = &s.sheet else {
         return ui.root(ui.window_page("settings", "Settings", el(), None, |_: &mut SettingsWindow| {}), Vec::new());
     };
@@ -272,10 +273,10 @@ fn editor(
             "Theme",
             &names,
             current,
-            editor.menu == Some(side),
+            editor.menu == Some((THEME, side)),
             (first && side != Side::Only(Appearance::Dark)) || wants(THEME, side, theme_sides),
-            move |s: &mut SettingsWindow| toggle_theme_menu(s, side),
-            close_theme_menu,
+            move |s: &mut SettingsWindow| toggle_menu(s, THEME, side),
+            close_menu,
             move |s: &mut SettingsWindow, i| choose_theme(s, side, crate::theme::themes()[i].id()),
             layer,
         )
@@ -298,7 +299,7 @@ fn editor(
             lines.extend(rows.iter().map(|row| {
                 let sides: &[Side] =
                     if row.joined { &[Side::Both] } else { &[Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] };
-                same_row(row, editor, sheet, ui, looks, |side| wants(row.setting.key, side, sides))
+                same_row(row, editor, sheet, ui, looks, layer, |side| wants(row.setting.key, side, sides))
             }));
             page.child(ui.halves_card(lines, looks))
         }
@@ -308,7 +309,7 @@ fn editor(
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
                 let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
                 let lines = held.iter().map(|(setting, value)| {
-                    let control = theme_control(setting, side, *value, editor, ui, wants(setting.key, side, &[side]));
+                    let control = theme_control(setting, side, *value, editor, ui, wants(setting.key, side, &[side]), layer);
                     let notes =
                         sheet.refused(Row::Colour(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
                     ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes)
@@ -338,18 +339,27 @@ fn join_control(ui: &Ui, key: &'static str, label: &str, joined: bool) -> El {
 /// A setting's row, one theme in both halves: one control across both columns, drawn in both
 /// looks, or one in each, in its half's; its Split or Join; and why a colour typed there was
 /// refused.
-fn same_row(row: &ThemeRow, editor: &Editor, sheet: &SettingsSheet, ui: &Ui, looks: [&Ui; 2], focus: impl Fn(Side) -> bool) -> El {
+#[allow(clippy::too_many_arguments)]
+fn same_row(
+    row: &ThemeRow,
+    editor: &Editor,
+    sheet: &SettingsSheet,
+    ui: &Ui,
+    looks: [&Ui; 2],
+    layer: &mut Vec<El>,
+    focus: impl Fn(Side) -> bool,
+) -> El {
     let (setting, key) = (row.setting, row.setting.key);
     let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
     let (cells, sides) = match row.joined {
         true => {
-            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, looks[0], focus(Side::Both)));
+            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, looks[0], focus(Side::Both), layer));
             (cells, vec![Side::Both])
         }
         false => {
             let cells = Halves::Split(
-                Some(theme_control(setting, light, row.light, editor, looks[0], focus(light))),
-                Some(theme_control(setting, dark, row.dark, editor, looks[1], focus(dark))),
+                Some(theme_control(setting, light, row.light, editor, looks[0], focus(light), layer)),
+                Some(theme_control(setting, dark, row.dark, editor, looks[1], focus(dark), layer)),
             );
             (cells, vec![light, dark])
         }
@@ -421,16 +431,41 @@ fn save_as(sheet: &SettingsSheet, ui: &Ui) -> Option<El> {
 /// The control that sets `setting` to a value of its kind on `side`, showing `value`, keyed
 /// `edit-<key>-<side>`. `focus` makes a toggle or a choice first in the Tab order; a colour's
 /// field takes focus through its text.
-fn theme_control(setting: &'static crate::theme::setting::Setting, side: Side, value: Value, editor: &Editor, ui: &Ui, focus: bool) -> El {
+fn theme_control(
+    setting: &'static crate::theme::setting::Setting,
+    side: Side,
+    value: Value,
+    editor: &Editor,
+    ui: &Ui,
+    focus: bool,
+    layer: &mut Vec<El>,
+) -> El {
     let key = setting.key;
     let control_key = format!("{EDIT}-{key}-{}", side.key());
     match (&setting.kind, value) {
-        (Kind::Choice { choices, .. }, Value::Choice(id)) => {
+        (Kind::Choice { choices, show, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
-            ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut SettingsWindow, i| {
-                set_theme(s, side, key, Value::Choice(choices[i].id))
-            })
+            if *show == Show::Segments {
+                return ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut SettingsWindow, i| {
+                    set_theme(s, side, key, Value::Choice(choices[i].id))
+                });
+            }
+            ui.dropdown(
+                control_key,
+                setting.label,
+                &labels,
+                selected,
+                editor.menu == Some((key, side)),
+                focus,
+                move |s: &mut SettingsWindow| toggle_menu(s, key, side),
+                close_menu,
+                move |s: &mut SettingsWindow, i| {
+                    close_menu(s);
+                    set_theme(s, side, key, Value::Choice(choices[i].id))
+                },
+                layer,
+            )
         }
         (Kind::Toggle { .. }, Value::Toggle(on)) => {
             ui.switch(control_key, setting.label, on, focus, move |s: &mut SettingsWindow| set_theme(s, side, key, Value::Toggle(!on)))

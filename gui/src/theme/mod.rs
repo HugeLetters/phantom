@@ -65,6 +65,31 @@ pub struct Built {
     pub screens: ScreenOverrides,
     /// The id of its App icon in the icons' manifest, which "Follow theme" shows.
     pub app_icon: &'static str,
+    /// Whether the theme moves, or follows the Mac's Reduce Motion.
+    pub motion: Motion,
+}
+
+/// Whether a theme's motion plays: always, never, or as the Mac's Reduce Motion says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Motion {
+    /// Moves unless the Mac reduces motion: Rune's own behaviour.
+    #[default]
+    Follow,
+    /// Moves even when the Mac reduces motion.
+    On,
+    /// Everything lands at once, whatever the Mac says.
+    Off,
+}
+
+impl Motion {
+    /// The reduced motion state a window draws with, given the Mac's own.
+    pub fn reduced(self, system: bool) -> bool {
+        match self {
+            Motion::Follow => system,
+            Motion::On => false,
+            Motion::Off => true,
+        }
+    }
 }
 
 /// The details pane of the torrent shown. It takes the app: its files' table reaches its state
@@ -152,7 +177,7 @@ impl Look {
         }
         let base = (Blocks::phantom(phantom::icon), Screens::phantom());
         let (blocks, screens) = chain.iter().rev().fold(base, |(blocks, screens), (b, s)| (blocks.over(b), screens.over(s)));
-        Look { ui: Ui::new(built.tokens, built.colours, built.spacing, blocks), screens, app_icon: built.app_icon }
+        Look { ui: Ui::new(built.tokens, built.colours, built.spacing, blocks, built.motion), screens, app_icon: built.app_icon }
     }
 }
 

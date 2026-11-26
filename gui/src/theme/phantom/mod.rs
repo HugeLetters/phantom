@@ -8,8 +8,8 @@ use rune_kit::Kit;
 
 #[cfg(test)]
 use super::Look;
-use super::setting::{Choice, Kind, Setting, Value, Values};
-use super::{Built, Colours, Spacing, Theme, ThemeLook};
+use super::setting::{Choice, Kind, Setting, Show, Value, Values};
+use super::{Built, Colours, Motion, Spacing, Theme, ThemeLook};
 use crate::ui::Icon;
 
 pub struct Phantom;
@@ -22,11 +22,18 @@ pub const TONE: &str = "tone";
 /// How round the corners are: Square, Small or Round.
 pub const CORNERS: &str = "corners";
 
-static SETTINGS: [Setting; 2] = [
+/// Whether things move: On, Off, or as the Mac's Reduce Motion says.
+pub const MOTION: &str = "motion";
+
+static SETTINGS: [Setting; 3] = [
     Setting {
         key: TONE,
         label: "Tone",
-        kind: Kind::Choice { choices: &[Choice { id: "light", label: "Light" }, Choice { id: "dark", label: "Dark" }], default: "light" },
+        kind: Kind::Choice {
+            choices: &[Choice { id: "light", label: "Light" }, Choice { id: "dark", label: "Dark" }],
+            default: "light",
+            show: Show::Segments,
+        },
     },
     Setting {
         key: CORNERS,
@@ -38,6 +45,20 @@ static SETTINGS: [Setting; 2] = [
                 Choice { id: "round", label: "Round" },
             ],
             default: "small",
+            show: Show::Dropdown,
+        },
+    },
+    Setting {
+        key: MOTION,
+        label: "Motion",
+        kind: Kind::Choice {
+            choices: &[
+                Choice { id: "follow", label: "Follow Reduce Motion" },
+                Choice { id: "on", label: "On" },
+                Choice { id: "off", label: "Off" },
+            ],
+            default: "follow",
+            show: Show::Dropdown,
         },
     },
 ];
@@ -48,6 +69,15 @@ fn radius(corners: Option<Value>) -> rune_kit::Radius {
         Some(Value::Choice("square")) => rune_kit::Radius { xs: 0.0, sm: 0.0, md: 0.0, lg: 0.0, xl: 0.0 },
         Some(Value::Choice("round")) => rune_kit::Radius { xs: 4.0, sm: 7.0, md: 10.0, lg: 14.0, xl: 18.0 },
         _ => Kit::neutral(false).radius,
+    }
+}
+
+/// What [`MOTION`] says; Follow, the default, is what an unset or unknown value means.
+fn motion(value: Option<Value>) -> Motion {
+    match value {
+        Some(Value::Choice("on")) => Motion::On,
+        Some(Value::Choice("off")) => Motion::Off,
+        _ => Motion::Follow,
     }
 }
 
@@ -79,6 +109,7 @@ impl Theme for Phantom {
             blocks: Default::default(),
             screens: Default::default(),
             app_icon: "phantom",
+            motion: motion(settings.get(MOTION)),
         }
     }
 }
@@ -103,6 +134,9 @@ pub fn look(dark: bool) -> Look {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use super::*;
 
     fn radii(corners: &str, dark: bool) -> [f32; 5] {
@@ -134,6 +168,66 @@ mod tests {
         for dark in [false, true] {
             assert_eq!(radii("square", dark), [0.0; 5]);
             assert_eq!(radii("round", dark), [4.0, 7.0, 10.0, 14.0, 18.0]);
+        }
+    }
+
+    /// Whether a window drawn in `motion`'s look reduces motion, when the Mac does or doesn't.
+    fn reduced(motion: &str, system: bool) -> bool {
+        let mut look = theme_look(false);
+        assert!(look.settings.set(
+            MOTION,
+            Value::Choice(match motion {
+                "on" => "on",
+                "off" => "off",
+                _ => "follow",
+            })
+        ));
+        let seen = Rc::new(Cell::new(None));
+        let state = (Rc::new(Look::build(&look)), seen.clone());
+        let view = |s: &(Rc<Look>, Rc<Cell<Option<bool>>>), cx: &mut rune::Cx<(Rc<Look>, Rc<Cell<Option<bool>>>)>| {
+            s.0.ui.motion(cx);
+            s.1.set(Some(cx.is_reduced_motion()));
+            rune::el()
+        };
+        let mut rt = rune::Runtime::new(state, view, (100.0, 100.0), rune::Env { system_dark: false, scale: 1.0 });
+        rt.set_system_reduced_motion(system);
+        rt.frame(0.0);
+        seen.get().expect("the view ran")
+    }
+
+    #[test]
+    fn each_value_gives_its_rune_motion_state() {
+        for system in [false, true] {
+            assert!(!reduced("on", system), "On moves even when the Mac reduces motion (system {system})");
+            assert!(reduced("off", system), "Off lands at once (system {system})");
+        }
+    }
+
+    #[test]
+    fn follow_is_the_macs_reduce_motion() {
+        assert!(reduced("follow", true), "Follow with Reduce Motion on: no motion");
+        assert!(!reduced("follow", false));
+    }
+
+    /// The default is Follow, and the look it builds touches nothing of Rune's state: as before.
+    #[test]
+    fn the_default_is_follow_and_the_same_as_before() {
+        assert_eq!(motion(Values::defaults(&SETTINGS).get(MOTION)), Motion::Follow);
+        assert_eq!(Motion::default(), Motion::Follow);
+        for system in [false, true] {
+            assert_eq!(Motion::Follow.reduced(system), system);
+            let look = theme_look(false);
+            let seen = Rc::new(Cell::new(None));
+            let state = (Rc::new(Look::build(&look)), seen.clone());
+            let view = |s: &(Rc<Look>, Rc<Cell<Option<bool>>>), cx: &mut rune::Cx<(Rc<Look>, Rc<Cell<Option<bool>>>)>| {
+                s.0.ui.motion(cx);
+                s.1.set(Some(cx.is_reduced_motion()));
+                rune::el()
+            };
+            let mut rt = rune::Runtime::new(state, view, (100.0, 100.0), rune::Env { system_dark: false, scale: 1.0 });
+            rt.set_system_reduced_motion(system);
+            rt.frame(0.0);
+            assert_eq!(seen.get(), Some(system));
         }
     }
 }

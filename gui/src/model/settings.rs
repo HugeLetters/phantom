@@ -134,8 +134,8 @@ pub struct Editor {
     /// ([`THEME`] for the Theme row): split by hand, or set in one column since it opened. A row
     /// whose values differ (themes, for the Theme row) shows split anyway.
     pub split: BTreeSet<&'static str>,
-    /// The Theme pop-up open, and of which side.
-    pub menu: Option<Side>,
+    /// The pop-up open: its row's key ([`THEME`] for the Theme row, else a setting's) and side.
+    pub menu: Option<(&'static str, Side)>,
     /// Each colour setting's field, by which side it sets and its key, or what's typed over it
     /// until it's applied (Return, or the field losing focus).
     pub colours: Vec<ColourField>,
@@ -1572,15 +1572,16 @@ pub fn join_row(s: &mut SettingsWindow, key: &'static str) {
     looks_changed(s);
 }
 
-/// The Theme pop-up of `side`, opened or closed.
-pub fn toggle_theme_menu(s: &mut SettingsWindow, side: Side) {
+/// The pop-up of row `key` on `side` (the Theme row's, or a setting shown as a dropdown),
+/// opened or closed; one is open at a time.
+pub fn toggle_menu(s: &mut SettingsWindow, key: &'static str, side: Side) {
     follow_focus(s);
     if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
-        editor.menu = if editor.menu == Some(side) { None } else { Some(side) };
+        editor.menu = if editor.menu == Some((key, side)) { None } else { Some((key, side)) };
     }
 }
 
-pub fn close_theme_menu(s: &mut SettingsWindow) {
+pub fn close_menu(s: &mut SettingsWindow) {
     if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
         editor.menu = None;
     }
@@ -1592,7 +1593,7 @@ pub fn close_theme_menu(s: &mut SettingsWindow) {
 /// alone, the Theme row stays split.
 pub fn choose_theme(s: &mut SettingsWindow, side: Side, id: &str) {
     follow_focus(s);
-    close_theme_menu(s);
+    close_menu(s);
     let Some(theme) = crate::theme::find(id) else { return };
     let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
     let was = Presets::of(&s.looks.borrow(), &s.saved);

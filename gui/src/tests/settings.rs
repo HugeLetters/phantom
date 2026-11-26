@@ -29,9 +29,9 @@
 //! - the sheet shows each row joined or split as the model says (with a theme in each half, each
 //!   column its own theme's settings, and no setting row joining), each control with its value,
 //!   Join or Split where it applies, each Theme pop-up its half's theme, and a colour's field what's typed in it and its
-//!   refusal until its text changes; a choice is a radio group named for its setting, its segments
-//!   radios; Tab reaches it and an arrow key picks the next or previous choice
-//!   (#247), and ⌘Z focuses it like any other control;
+//!   refusal until its text changes; a choice is a dropdown (a combobox named for its setting, showing
+//!   the chosen label whole), Tone's two a radio group, its segments radios (Tab reaches it and an
+//!   arrow key picks the next or previous, #247); and ⌘Z focuses it like any other control;
 //! - the windows that show and the one in front are the model's: ⌘W closes the one in front, the
 //!   other staying; the Dock brings the main window back;
 //! - Settings losing the front (a click on the main window, the Dock, ⌘Z there) leaves the field
@@ -82,7 +82,7 @@ use crate::shortcuts;
 use crate::theme::Look;
 use crate::theme::preset::{Appearance, LookPreset, Looks};
 use crate::theme::saved::{Name, Saved, SavedPreset};
-use crate::theme::setting::{Kind, Rgb, Value};
+use crate::theme::setting::{Kind, Rgb, Show, Value};
 use crate::views::settings::{SETTINGS, tab_of};
 use crate::windows::Which;
 
@@ -221,9 +221,10 @@ enum Step {
     AddImage(Option<usize>),
     DropImage(usize),
     RemoveImage(usize),
-    /// In the sheet, a choice theme setting's segment, by index, on a side.
+    /// In the sheet, a choice theme setting's option, by index, on a side: a segment pressed, or
+    /// its dropdown opened and the option pressed.
     Choose(Side, &'static str, usize),
-    /// In the sheet, Tab to a choice theme setting's control on a side and press the arrow key
+    /// In the sheet, Tab to a segmented choice's control on a side and press the arrow key
     /// toward the next segment (`true`: right), wrapping at the ends.
     Arrow(Side, &'static str, bool),
     /// A toggle theme setting's switch, on a side.
@@ -1038,11 +1039,12 @@ impl ReferenceStateMachine for Sheet {
             for shown in m.shown() {
                 let (key, side) = (shown.key, shown.side);
                 steps.push(match shown.kind {
-                    Kind::Choice { choices, .. } => prop_oneof![
+                    Kind::Choice { choices, show: Show::Segments, .. } => prop_oneof![
                         3 => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)),
                         2 => any::<bool>().prop_map(move |right| Step::Arrow(side, key, right)),
                     ]
                     .boxed(),
+                    Kind::Choice { choices, .. } => (0..choices.len()).prop_map(move |i| Step::Choose(side, key, i)).boxed(),
                     Kind::Toggle { .. } => Just(Step::Flip(side, key)).boxed(),
                     Kind::Colour { .. } => prop_oneof![
                         proptest::sample::select(colour_texts()).prop_map(move |text| Step::TypeColour(side, key, text)),
@@ -2029,7 +2031,7 @@ impl StateMachineTest for Sheet {
                 scroll_to_hovering(&mut d.settings, &format!("icon-image-{i}"));
                 press(d, &format!("icon-image-{i}-remove"));
             }
-            Step::Choose(side, key, i) => press(d, &format!("edit-{key}-{}/#0/segment{i}", side.key())),
+            Step::Choose(side, key, i) => choose(d, &format!("edit-{key}-{}", side.key()), *i),
             Step::Arrow(side, key, right) => {
                 d.front(Which::Settings);
                 d.settings.update(|_, tx| tx.blur());
@@ -2363,7 +2365,7 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
             let shown = m.shown().into_iter().find(|s| s.key == key && s.side == *side).unwrap();
             let control = format!("{prefix}-{key}-{}", side.key());
             match (shown.kind, m.value(*side, key)) {
-                (Kind::Choice { choices, .. }, Value::Choice(id)) => {
+                (Kind::Choice { choices, show: Show::Segments, .. }, Value::Choice(id)) => {
                     let i = choices.iter().position(|c| c.id == id).unwrap();
                     let x = |path: String| rt.elements().into_iter().find(|e| e.path.ends_with(&path) && !e.exiting).map(|e| e.rect[0]);
                     let indicator = x(format!("{control}/#0/indicator"));
@@ -2388,6 +2390,23 @@ fn check_theme_tab(rt: &Runtime<SettingsWindow>, m: &Model) {
                             "{control}'s {j}th choice"
                         );
                     }
+                }
+                (Kind::Choice { choices, .. }, Value::Choice(id)) => {
+                    let label = choices.iter().find(|c| c.id == id).unwrap().label;
+                    // A combobox named for the setting, showing the chosen label.
+                    let trigger = rt
+                        .elements()
+                        .into_iter()
+                        .find(|e| e.path.ends_with(&format!("{control}-trigger")) && !e.exiting)
+                        .expect("its dropdown");
+                    assert_eq!(
+                        (trigger.role, trigger.label.as_deref()),
+                        ("combobox", Some(shown_label(m, key))),
+                        "{control}'s role and name"
+                    );
+                    let value = format!("{control}-trigger/value");
+                    let shows = rt.elements().into_iter().find(|e| e.path.ends_with(&value) && !e.exiting).and_then(|e| e.text);
+                    assert_eq!(shows.as_deref(), Some(label), "{control} shows {id}");
                 }
                 (Kind::Colour { .. }, _) => {
                     let (typed, _) = &m.ed().colours[&(*side, key)];
@@ -2496,6 +2515,31 @@ fn press(d: &mut Desk, key: &str) {
     let (x, y) = rt.find(key).unwrap_or_else(|| panic!("no {key:?}"));
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
+    d.settle();
+}
+
+/// The centre of the `i`th option of the open dropdown `control`'s list.
+fn option_at(rt: &Runtime<SettingsWindow>, control: &str, i: usize) -> (f32, f32) {
+    let list = format!("{control}-menu-menu");
+    let item = rt
+        .elements()
+        .into_iter()
+        .filter(|e| e.path.contains(&list) && !e.exiting && e.role == "menuitemcheckbox")
+        .nth(i)
+        .unwrap_or_else(|| panic!("no option {i} in {control}'s list"));
+    (item.rect[0] + item.rect[2] / 2.0, item.rect[1] + item.rect[3] / 2.0)
+}
+
+/// Presses the `i`th segment of `control`, or opens its dropdown and presses its `i`th option.
+fn choose(d: &mut Desk, control: &str, i: usize) {
+    let segment = format!("{control}/#0/segment{i}");
+    if d.settings.find(&segment).is_some() {
+        return press(d, &segment);
+    }
+    press(d, &format!("{control}-trigger"));
+    let (x, y) = option_at(&d.settings, control, i);
+    d.settings.pointer_down(x, y);
+    d.settings.pointer_up(x, y);
     d.settle();
 }
 
@@ -3296,7 +3340,7 @@ fn a_rows_join_and_split() {
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Tone Change");
     press(&mut d, "edit-tone-split");
     assert!(d.settings.find("edit-tone-light").is_some() && d.settings.find("edit-tone-dark").is_some(), "split, one value in both");
-    press(&mut d, "edit-tone-dark/#0/segment1");
+    choose(&mut d, "edit-tone-dark", 1);
     assert_eq!(halves(&d, "tone"), [light, dark], "the Dark half alone");
 }
 
@@ -3373,7 +3417,7 @@ fn done_is_one_undo_step_and_cancel_puts_the_preset_back() {
         press(d, "preset-1-edit");
         assert_eq!(night_tone(d), [light, dark], "as it opens");
         press(d, "edit-tone-join");
-        press(d, "edit-tone-both/#0/segment1");
+        choose(d, "edit-tone-both", 1);
         assert_eq!(night_tone(d), [dark, dark], "two changes");
     };
     let mut d = appearance_tab();
@@ -3382,7 +3426,7 @@ fn done_is_one_undo_step_and_cancel_puts_the_preset_back() {
     d.key(cmd('z'));
     d.settle();
     assert_eq!(night_tone(&d), [light, light], "⌘Z in the sheet: one change back");
-    press(&mut d, "edit-tone-both/#0/segment1");
+    choose(&mut d, "edit-tone-both", 1);
     press(&mut d, "edit-done");
     assert!(d.settings.find("edit-sheet").is_none(), "Done closes it");
     assert_eq!(night_tone(&d), [dark, dark], "kept");
@@ -3428,7 +3472,7 @@ fn a_long_edit_keeps_the_older_changes() {
     press(&mut d, "preset-1-edit");
     press(&mut d, "edit-tone-join");
     for i in 0..22 {
-        press(&mut d, &format!("edit-tone-both/#0/segment{}", (i + 1) % 2));
+        choose(&mut d, "edit-tone-both", (i + 1) % 2);
     }
     press(&mut d, "edit-done");
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Edit of Night", "one step for the sheet");
@@ -3456,16 +3500,16 @@ fn a_theme_in_each_half_has_its_own_column() {
     let preset = d.main.state.looks.borrow().preset().clone();
     assert_eq!(preset.dark.theme.id(), "sample");
     assert!(d.settings.find("edit-tone-light").is_some() && d.settings.find("edit-tone-dark").is_none(), "Tone under ☀ only");
-    for key in ["motion", "shape", "accent"] {
+    for key in ["pulse", "shape", "accent"] {
         assert!(d.settings.find(&format!("edit-{key}-dark")).is_some(), "{key} under ☾");
         assert!(d.settings.find(&format!("edit-{key}-light")).is_none(), "and not under ☀");
     }
-    for key in ["theme", "tone", "motion", "shape", "accent"] {
+    for key in ["theme", "tone", "pulse", "shape", "accent"] {
         assert!(d.settings.find(&format!("edit-{key}-join")).is_none(), "no Join or Split on {key}'s row");
         assert!(d.settings.find(&format!("edit-{key}-split")).is_none(), "no Join or Split on {key}'s row");
     }
     let top = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).expect(key)[1];
-    assert_eq!(top(&d, "edit-motion-dark-row"), top(&d, "edit-tone-light-row"), "each list packed from the top");
+    assert_eq!(top(&d, "edit-pulse-dark-row"), top(&d, "edit-tone-light-row"), "each list packed from the top");
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Theme Change");
     // Phantom in the Dark half's pop-up: one theme, Tone split as its values differ.
     press(&mut d, "edit-theme-dark-trigger");
@@ -3564,7 +3608,7 @@ fn the_editor() -> SheetKind {
         open: |d| press(d, "preset-1-edit"),
         step: |d, i| match i {
             0 => press(d, "edit-tone-join"),
-            n => press(d, &format!("edit-tone-both/#0/segment{}", n % 2)),
+            n => choose(d, "edit-tone-both", n % 2),
         },
         done: |d| press(d, "edit-done"),
         value: |d| format!("{:?}", night_tone(d)),
@@ -3696,7 +3740,7 @@ fn cmd_z_then_close_at_once_folds_what_is_left_of_the_editors_visit() {
     let mut d = appearance_tab();
     press(&mut d, "preset-1-edit");
     press(&mut d, "edit-tone-join");
-    press(&mut d, "edit-tone-both/#0/segment1");
+    choose(&mut d, "edit-tone-both", 1);
     d.key(cmd('z'));
     d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
     d.settle();
@@ -4288,4 +4332,111 @@ fn the_app_icon_row_is_one_line() {
         assert!(caption[0] + caption[2] <= first + 0.5, "pair {pair}: the caption before the previews");
         assert!(last <= edit[0] + 0.5, "pair {pair}: the previews before Edit…");
     }
+}
+
+/// Corners and Motion are dropdowns: the button shows the whole chosen label and opening it lists
+/// every option whole, nothing cut; Tone's Light | Dark are segments, each label whole; at the
+/// sheet's widest and at the 640 pt minimum.
+#[test]
+fn the_look_sheets_choices_show_their_labels_whole() {
+    let font = Look::build(LookPreset::fresh().get(Appearance::Light)).ui.tokens().ty.ui;
+    let rows: [(&str, &str, &[&str]); 2] = [
+        ("edit-corners-both", "Small", &["Square", "Small", "Round"]),
+        ("edit-motion-both", "Follow Reduce Motion", &["Follow Reduce Motion", "On", "Off"]),
+    ];
+    for width in [960.0, 640.0] {
+        let mut d = appearance_tab();
+        d.settings.set_viewport((width, 900.0), 2.0);
+        d.settle();
+        press(&mut d, "active-edit");
+        for control in ["edit-tone-light", "edit-tone-dark"] {
+            let elements = d.settings.elements();
+            for (j, name) in ["Light", "Dark"].into_iter().enumerate() {
+                let segment = format!("{control}/#0/segment{j}/");
+                let text = elements.iter().find(|e| e.path.contains(&segment) && e.text.as_deref() == Some(name)).expect("its label");
+                let (needs, _) = rune::text::measure(name, &[], font, None);
+                assert!(needs <= text.rect[2] + 0.5, "at {width} pt {name:?} needs {needs} but is drawn {} wide", text.rect[2]);
+            }
+        }
+        for (control, shown, options) in rows {
+            let elements = d.settings.elements();
+            let value = elements.iter().find(|e| e.path.ends_with(&format!("{control}-trigger/value")) && !e.exiting);
+            let value = value.unwrap_or_else(|| panic!("no dropdown {control}"));
+            assert_eq!(value.text.as_deref(), Some(shown), "{control}");
+            let (needs, _) = rune::text::measure(shown, &[], font, None);
+            assert!(needs <= value.rect[2] + 0.5, "at {width} pt {shown:?} needs {needs} but its box is {} wide", value.rect[2]);
+            press(&mut d, &format!("{control}-trigger"));
+            let list = format!("{control}-menu-menu");
+            let elements = d.settings.elements();
+            let items: Vec<_> = elements.iter().filter(|e| e.path.contains(&list) && !e.exiting && e.role == "menuitemcheckbox").collect();
+            let labels: Vec<_> = items.iter().filter_map(|e| e.label.as_deref()).collect();
+            assert_eq!(labels, options, "at {width} pt {control}'s list, in order");
+            for (item, name) in items.iter().zip(options) {
+                let below = format!("{}/", item.path);
+                let text = elements.iter().find(|e| e.path.starts_with(&below) && e.text.as_deref() == Some(*name)).expect("its text");
+                let (needs, _) = rune::text::measure(name, &[], font, None);
+                assert!(needs <= text.rect[2] + 0.5, "at {width} pt {name:?} needs {needs} but is drawn {} wide", text.rect[2]);
+            }
+            d.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+            d.settle();
+        }
+    }
+}
+
+/// A choice's dropdown works from the keyboard: Tab focuses it, Space or Return opens its list,
+/// the arrow keys move in it, Return picks and Escape closes without changing the setting.
+#[test]
+fn a_choices_dropdown_works_from_the_keyboard() {
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    let key = |d: &mut Desk, key: Key| {
+        d.settings.key(KeyEvent { key, mods: Mods::default() });
+        d.settle();
+    };
+    let tab_to = |d: &mut Desk, control: &str| {
+        d.front(Which::Settings);
+        d.settings.update(|_, tx| tx.blur());
+        d.settle();
+        let mut tabs = 0;
+        while !super::focus_path(&d.settings).is_some_and(|p| p.contains(&format!("/{control}-trigger"))) {
+            assert!(tabs < 200, "Tab never reaches {control}");
+            key(d, Key::Tab);
+            tabs += 1;
+        }
+    };
+    let open =
+        |d: &Desk, control: &str| d.settings.elements().iter().any(|e| e.path.contains(&format!("{control}-menu-menu")) && !e.exiting);
+    let shown = |d: &Desk, control: &str| {
+        let trigger = format!("{control}-trigger/value");
+        d.settings.elements().into_iter().find(|e| e.path.ends_with(&trigger) && !e.exiting).and_then(|e| e.text)
+    };
+    let control = "edit-corners-both";
+    for opener in [Key::Text(" ".into()), Key::Enter] {
+        tab_to(&mut d, control);
+        assert!(!open(&d, control), "closed to start with");
+        key(&mut d, opener.clone());
+        assert!(open(&d, control), "{opener:?} opens the list");
+        key(&mut d, Key::Escape);
+        assert!(!open(&d, control), "Escape closes it");
+        assert_eq!(shown(&d, control).as_deref(), Some("Small"), "and changes nothing");
+    }
+    // Down moves to the next option, Return picks it.
+    tab_to(&mut d, control);
+    key(&mut d, Key::Enter);
+    key(&mut d, Key::Down);
+    key(&mut d, Key::Enter);
+    assert!(!open(&d, control), "a pick closes the list");
+    assert_eq!(shown(&d, control).as_deref(), Some("Round"), "Down then Return picks the next option");
+    // Up twice from the opened list goes past the start of it: Square.
+    key(&mut d, Key::Enter);
+    key(&mut d, Key::Up);
+    key(&mut d, Key::Up);
+    key(&mut d, Key::Enter);
+    assert_eq!(shown(&d, control).as_deref(), Some("Square"), "Up moves back");
+    // Moving, then Escape: closed, nothing picked.
+    key(&mut d, Key::Enter);
+    key(&mut d, Key::Down);
+    key(&mut d, Key::Escape);
+    assert!(!open(&d, control), "Escape closes it after moving");
+    assert_eq!(shown(&d, control).as_deref(), Some("Square"), "and picks nothing");
 }
