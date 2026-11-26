@@ -30,6 +30,16 @@ use crate::ui::Ui;
 /// The window, in the look of the system's Appearance: the toolbar in the titlebar band, then the
 /// list, the divider and the details pane, which share the room (#33), then the status bar.
 pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
+    // PROTOTYPE (#417): Motion off: what enters, leaves or moves lands at once.
+    let e = view_inner(s, cx);
+    if crate::theme::phantom::proto::motion_off() { e.instant_changes() } else { e }
+}
+
+fn view_inner(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
+    // PROTOTYPE (#417): Motion off is Reduce Motion, whatever the system says.
+    if crate::theme::phantom::proto::motion_off() {
+        cx.reduced_motion(true);
+    }
     // What the views built below offer, registered as they're built (#33).
     s.mounted.begin();
     let look = s.looks.borrow().shown(Appearance::of(cx.system_dark())).clone();
@@ -37,7 +47,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let mut overlays = Vec::new();
     // The room the list and the pane share, as last laid out; the window's default size before
     // the first layout.
-    let [width, room] = cx.layout_size("body").map_or([936.0, 420.0], |[w, h]| [w - 2.0 * MARGIN, h]);
+    let [width, room] = cx.layout_size("body").map_or([936.0, 420.0], |[w, h]| [w - 2.0 * margin(), h]);
     let fitted = table::fitted(s, ui, width);
     let shown: Vec<Column> = fitted.iter().map(|(c, _)| *c).collect();
     s.drawn_columns.borrow_mut().clone_from(&shown);
@@ -47,7 +57,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
         table::torrent_table(s, ui, &fitted, width)
     });
     let list = list.children((!s.torrents.is_empty()).then(|| ui.focus_goes_nowhere()));
-    let mut body = col().key("body").w_full().grow(1.0).min_h(0.0).px(MARGIN).child(list);
+    let mut body = col().key("body").w_full().grow(1.0).min_h(0.0).px(margin()).child(list);
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
         let files = torrent.content.map(|_| s.pane.details.as_ref().filter(|d| d.id == torrent.id).map_or(1, |d| d.files.len()));
         let pane = layout::pane(room, details::content(torrent, files), s.prefs.dragged(), s.torrents.len());
@@ -78,7 +88,14 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let under = |key: &str| cx.layout(key).map(|at| at[1] + at[3]);
     let top = under("toolbar").into_iter().chain(under("add-note-content")).fold(inset, f32::max) + 8.0;
     let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - 4.0);
-    page = page.child(row().w_full().px(MARGIN).pt(8.0).pb(10.0).child(status_bar::status_bar(s, ui, room, &mut overlays)));
+    page = page.child(
+        row()
+            .w_full()
+            .px(margin())
+            .pt(crate::theme::phantom::proto::dens(8.0, 5.0))
+            .pb(crate::theme::phantom::proto::dens(10.0, 6.0))
+            .child(status_bar::status_bar(s, ui, room, &mut overlays)),
+    );
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
     let window = cx.layout("app").map(|at| (at[2], at[3]));
     row_menu::overlay(s, ui, window, |key| cx.layout(key), &mut overlays);
@@ -97,7 +114,9 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
 }
 
 /// The window's margin, either side of the list, the pane and the status bar.
-const MARGIN: f32 = 12.0;
+fn margin() -> f32 {
+    crate::theme::phantom::proto::dens(12.0, 8.0)
+}
 
 /// The divider between the list and the pane, `height` tall now in `room`: a drag moves it, the
 /// pane never under a one-line header over one file nor into the list's header and three rows; let

@@ -17,7 +17,10 @@ const DISABLED: f32 = 0.5;
 impl Ui {
     /// The table, filling the height its parent gives it.
     pub fn table<S: 'static>(&self, s: &S, table: Table<S>) -> El {
-        table.build(s, &self.k)
+        let mut style = TableStyle::from_kit(&self.k);
+        let d = crate::theme::phantom::proto::dens;
+        (style.row_height, style.header_height, style.cell_pad) = (d(28.0, 22.0), d(30.0, 24.0), d(10.0, 8.0));
+        table.style(style).build(s, &self.k)
     }
 
     /// Text as a table draws it, in `tone`: for a cell that is an element, see [`Ui::menu_cell`].

@@ -938,6 +938,26 @@ fn spec() -> AppSpec<Phantom> {
             }),
             // 5 GiB free, and a 6 GiB torrent on top of the others: its own warning, and the disk's.
             ("free-space", |s| s.service = Box::new(short_of_space())),
+            // PROTOTYPE (#417): a selection, its details, and the notices' popover open.
+            ("proto-main", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.pane.files.select("1");
+                s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
+                s.bar.tell(Notice::new("Added the torrent").with_text("Big Buck Bunny (2008)"));
+                s.bar.press();
+            }),
+            ("proto-notices", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.bar.tell(model::settings::reset_notice(&["app_icon".into()], "gui.json").expect("a reset"));
+                s.bar.tell(Notice::new("Added the torrent").with_text("Big Buck Bunny (2008)"));
+            }),
+            ("proto-list", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.pane.files.select("1");
+            }),
             // Several notices at once: the settings reset, an add, and a disk short of space (which
             // comes with the first snapshot, so it's the newest).
             ("notices", |s| {
@@ -1175,6 +1195,9 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 s.looks.borrow_mut().set(preset::Appearance::Light, dark);
                 model::settings::presets::edit_active(s);
             }),
+            // PROTOTYPE (#417): Phantom's colours, every colour shown, Faint text set by hand in Light.
+            ("proto-sheet", |s| proto_sheet(s, true)),
+            ("proto-sheet-bases", |s| proto_sheet(s, false)),
             ("settings-sheet-split", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 model::settings::presets::edit_active(s);
@@ -1229,6 +1252,24 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
         families: FAMILIES,
         ..AppSpec::new("Settings", SETTINGS_SIZE, SettingsWindow::detached, views::settings::view)
     }
+}
+
+fn proto_sheet(s: &mut SettingsWindow, every: bool) {
+    use theme::phantom::proto;
+    use theme::setting::{Rgb, Value};
+    settings_scene(s, Tab::Appearance, demo_settings(false));
+    for (appearance, dark) in [(preset::Appearance::Light, false), (preset::Appearance::Dark, true)] {
+        let mut look = theme::phantom::theme_look(dark);
+        for (i, (key, _)) in proto::BASES.iter().enumerate() {
+            look.settings.set(key, Value::Colour(proto::set("today", dark).0[i]));
+        }
+        look.settings.set(theme::phantom::EVERY, Value::Toggle(every));
+        if !dark {
+            look.settings.set("d_text_faint", Value::Colour(Rgb([0x80, 0x82, 0x87])));
+        }
+        s.looks.borrow_mut().set(appearance, look);
+    }
+    model::settings::presets::edit_active(s);
 }
 
 /// The Active look's Dark half the stand-in theme, in a debug build; unchanged in a release one,

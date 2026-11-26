@@ -62,8 +62,8 @@ impl Rgb {
     }
 
     pub fn color(self) -> rune::Color {
-        let [r, g, b] = self.0.map(|c| f32::from(c) / 255.0);
-        rune::Color { r, g, b, a: 1.0 }
+        // PROTOTYPE (#417): rune's Color is linear; this read the sRGB bytes as linear.
+        rune::color::hex(&self.hex()).unwrap_or(rune::Color::BLACK)
     }
 }
 

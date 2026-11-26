@@ -62,7 +62,7 @@ impl Ui {
             .h(16.0)
             .min_w(26.0)
             .px(9.0)
-            .radius(8.0)
+            .radius(k.radius.lg)
             .center()
             .fill(k.alpha(ink, if tone == Tone::Normal { 0.12 } else { 0.18 }))
             .child(text(count).key("notice-count-text").font(k.ty.text_xsmall_medium.features("'tnum' 1")).color(ink))
@@ -219,9 +219,10 @@ impl Ui {
             // Keys while the focus is anywhere in it, on its head, its body or itself.
             .on_key(on_key);
         let panel = panel.modal(true, on_close.clone());
-        let surface = k.elevate(panel.radius(k.radius.lg).fill(fill).border(1.0, border), &k.elevation.overlay);
+        let surface =
+            k.elevate(panel.radius(k.radius.lg).fill(fill).border(1.0, border), &k.elevation.overlay).token_motion(k.motion.overlay);
         layer.push(scrim(format!("{key}-scrim"), on_close));
-        layer.push(popover::anchored(k, surface, &anchor, Placement::TopStart, TAIL_DEPTH + 4.0));
+        layer.push(popover::anchored(k, surface, &anchor, Placement::TopStart, TAIL_DEPTH + 4.0).token_motion(k.motion.overlay));
         trigger
     }
 

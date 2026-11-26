@@ -122,7 +122,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, band: Band, overlays: &mut Vec<El>) -> El {
     row()
         .key("toolbar")
         .w_full()
-        .h(BAND)
+        .h(crate::theme::phantom::proto::dens(BAND, 32.0))
         .pl(band.lead())
         .pr(EDGE)
         .gap(GAP)

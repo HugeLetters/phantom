@@ -63,8 +63,8 @@ impl Ui {
             .child(foot)
             .on_key(on_key);
         // Dark: a wash of the text's colour over the raised surface, lifting it off the window.
-        let panel = if k.dark { panel.radius(8.0).fill(k.alpha(c.text_base, 0.06)) } else { panel };
-        let surface = popover::raised(k, panel, 8.0);
+        let panel = if k.dark { panel.radius(k.radius.lg).fill(k.alpha(c.text_base, 0.06)) } else { panel };
+        let surface = popover::raised(k, panel, k.radius.lg);
         let behind = super::opaque_over(c.scrim, c.bg_base);
         let surface = if k.dark { surface } else { surface.fill(c.layer_01) };
         let edge = if k.dark { k.alpha(c.text_base, 0.18) } else { k.alpha(c.std_border, 0.5) };
@@ -86,10 +86,10 @@ impl Ui {
         text(path.to_owned())
             .font(k.ty.text_small)
             .color(k.c.text_muted)
-            .truncate_middle()
+            // PROTOTYPE (#417): wrapped, never cut.
+            .wrap()
             .shrink()
             .min_w(0.0)
-            .help_when_truncated(path.to_owned())
     }
 
     /// A line of a dialog's text, muted.
