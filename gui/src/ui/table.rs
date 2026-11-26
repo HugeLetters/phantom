@@ -110,7 +110,7 @@ impl Ui {
             .fill(c.bg_button_neutral)
             // Around the fill, not over it, so it takes in the row's own colour (selected, hovered).
             .box_shadow(rune::Shadow { spread: 1.0, color: c.border_muted, ..Default::default() })
-            .radius(self.k.radius.sm - 1.0)
+            .radius((self.k.radius.sm - 1.0).max(0.0))
             .child(icon(self.icon(icon_), 12.0).key("toggle-glyph").color(color));
         match off {
             None => button.cursor(rune::Cursor::Pointer).hover(c.hover).press(c.pressed).help(label),
