@@ -66,12 +66,14 @@ pub struct Found {
     pub taken: bool,
     /// Phantom has a file of it open for writing (it was let run): one that isn't at its path then went.
     pub open: bool,
+    /// Its bytes in pieces it shares with other files: librqbit can't have those without them.
+    pub shared: u64,
 }
 
 impl Found {
     /// What's at `file`'s path: a file with one name, or nothing.
     pub fn of(file: Expected, at: Option<Stamp>) -> Self {
-        Self { file, at, links: 1, taken: false, open: false }
+        Self { file, at, links: 1, taken: false, open: false, shared: 0 }
     }
 
     /// It isn't on disk as it must be: nothing is at its path though some of it was had or it was
@@ -86,10 +88,13 @@ impl Found {
     /// isn't the torrent's file as it was, whatever a check finds in it, and nothing writes into it.
     pub fn is_impossible(&self) -> bool {
         self.at.is_some_and(|at| {
-            at.len > self.file.size_bytes
-                || at.len < self.file.progress_bytes
-                || (self.links > 1 && self.file.progress_bytes < self.file.size_bytes)
+            at.len > self.file.size_bytes || at.len < self.file.progress_bytes || (self.links > 1 && !self.whole_but_shared())
         })
+    }
+
+    /// librqbit has every piece of it but those it shares with other files, which only they complete.
+    pub fn whole_but_shared(&self) -> bool {
+        self.file.progress_bytes + self.shared >= self.file.size_bytes
     }
 }
 
@@ -156,18 +161,30 @@ mod tests {
     /// the other), complete it can (only read).
     #[test]
     fn a_hard_link_is_impossible_until_complete() {
-        let linked =
-            |progress| Found { links: 2, open: true, file: Expected { progress_bytes: progress, ..found(SIZE).file }, ..found(SIZE) };
-        assert!(linked(PROGRESS).is_impossible());
-        assert!(!linked(SIZE).is_missing());
+        let linked = |progress, shared| Found {
+            links: 2,
+            open: true,
+            shared,
+            file: Expected { progress_bytes: progress, ..found(SIZE).file },
+            ..found(SIZE)
+        };
+        assert!(linked(PROGRESS, 0).is_impossible());
+        assert!(!linked(SIZE, 0).is_missing());
+        assert!(!linked(PROGRESS, SIZE - PROGRESS).is_missing(), "but for what it shares, which only the other files complete");
     }
 
     /// Nothing at its path: missing once some of it was had or it was made, or when something else is
     /// there.
     #[test]
     fn nothing_at_its_path_is_missing_only_once_some_of_it_was_had() {
-        let none =
-            |progress, taken, open| Found { at: None, taken, open, file: Expected { progress_bytes: progress, ..found(0).file }, links: 1 };
+        let none = |progress, taken, open| Found {
+            at: None,
+            taken,
+            open,
+            file: Expected { progress_bytes: progress, ..found(0).file },
+            links: 1,
+            shared: 0,
+        };
         assert!(!none(0, false, false).is_missing(), "never had nor made: made as it starts");
         assert!(none(1, false, false).is_missing());
         assert!(none(0, false, true).is_missing(), "made, and gone since");

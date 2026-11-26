@@ -56,9 +56,11 @@ pub use lifecycle::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
 pub use super::trashed::At;
 use super::trashed::{Layout, Trashed};
 
-/// Size-checks `files` now: each, and what's at its path; `open`, those Phantom has open for writing.
-pub fn disk_of(files: &[Expected], open: &BTreeSet<usize>) -> Disk {
-    Disk { files: files.iter().map(|f| (f.index, found(f, open.contains(&f.index)))).collect() }
+/// Size-checks `files` now: each, and what's at its path; `open`, those Phantom has open for writing;
+/// `shared`, each one's bytes in pieces it shares with other files, by index.
+pub fn disk_of(files: &[Expected], open: &BTreeSet<usize>, shared: &[u64]) -> Disk {
+    let found = |f: &Expected| Found { shared: shared.get(f.index).copied().unwrap_or(0), ..found(f, open.contains(&f.index)) };
+    Disk { files: files.iter().map(|f| (f.index, found(f))).collect() }
 }
 
 /// What's at `file`'s path: the file there, its names, or something else.
@@ -66,7 +68,7 @@ fn found(file: &Expected, open: bool) -> Found {
     let meta = std::fs::symlink_metadata(&file.path).ok();
     let at = meta.as_ref().filter(|m| m.is_file()).map(|m| Stamp { inode: m.ino(), len: m.len(), modified: m.modified().ok() });
     let links = meta.as_ref().map_or(1, |m| m.nlink());
-    Found { file: file.clone(), at, links, taken: meta.is_some_and(|m| !m.is_file()), open }
+    Found { file: file.clone(), at, links, taken: meta.is_some_and(|m| !m.is_file()), open, shared: 0 }
 }
 
 /// What `look` finds of the files, if the destination is still reachable after it: one that goes
@@ -656,7 +658,7 @@ mod tests {
     }
 
     fn found(path: PathBuf, size_bytes: u64, progress_bytes: u64) -> Found {
-        disk_of(&[expected(path, size_bytes, progress_bytes)], &BTreeSet::new()).files.remove(&0).unwrap()
+        disk_of(&[expected(path, size_bytes, progress_bytes)], &BTreeSet::new(), &[]).files.remove(&0).unwrap()
     }
 
     #[test]
@@ -703,12 +705,12 @@ mod tests {
         std::fs::write(&path, [0; 100]).unwrap();
         let (dest, files) = (abs(&destination), [expected(path, 100, 100)]);
 
-        let disk = seen(&dest, || disk_of(&files, &BTreeSet::new())).unwrap();
+        let disk = seen(&dest, || disk_of(&files, &BTreeSet::new(), &[])).unwrap();
         assert!(!disk.files[&0].is_missing(), "there all along");
 
         let away = dir.path().join("away");
         let gone = seen(&dest, || {
-            let disk = disk_of(&files, &BTreeSet::new());
+            let disk = disk_of(&files, &BTreeSet::new(), &[]);
             std::fs::rename(&destination, &away).unwrap();
             disk
         });

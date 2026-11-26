@@ -121,9 +121,11 @@ struct Class {
     /// The torrent had everything where it was put.
     whole: bool,
     missing: Missing,
-    /// Its file was set Off at some time since.
+    /// Its file was set Off at some time since: no entry is of it now (#374), but a failure shows it.
+    #[allow(dead_code)]
     off: bool,
-    /// Its folder or drive went while something was under way.
+    /// Its folder or drive went while something was under way: as `off`.
+    #[allow(dead_code)]
     gone_meanwhile: bool,
 }
 
@@ -146,23 +148,17 @@ enum Which {
     Part,
     /// Put where the torrent's was known missing.
     Missing,
-    /// As `Missing`, no more of it had than it may have.
-    PieceHad,
     /// As `Missing`, nothing of it had.
     NoneHad,
-    /// Set Off.
-    Off,
-    /// Its folder or drive gone meanwhile.
-    GoneMeanwhile,
 }
 
 use Kind::*;
-/// What passes today, so is in no entry: Longer (but at an Off file's path), OwnAndMore, Link, Equal.
-const OTHERS: &[Kind] = &[Same, Shorter, Empty, OnePiece, Cut, HardLink, Edit];
+/// What passes today, so is in no entry: Longer, OwnAndMore, Link, Equal, and HardLink (#374: an
+/// incomplete one is Missing files, a whole one only read).
+const OTHERS: &[Kind] = &[Same, Shorter, Empty, OnePiece, Cut, Edit];
 
-const SAME_SIZE: &[Kind] = &[Same, OnePiece, HardLink, Edit];
+const SAME_SIZE: &[Kind] = &[Same, OnePiece, Edit];
 const SHORT: &[Kind] = &[Shorter, Empty, Cut];
-const ANY_SIZE: &[Kind] = &[Same, Shorter, Empty, OnePiece, Cut, HardLink, Edit, Longer];
 
 const fn known(kinds: &'static [Kind], routes: &'static [Route], which: Which, why: &'static str) -> Open {
     Open { kinds, routes, which, why }
@@ -181,11 +177,8 @@ const KNOWN_OPEN: &[Open] = &[
     known(SAME_SIZE, &[Route::DriveBack], Which::There, "#373"),
     known(SAME_SIZE, &[Route::Restart, Route::Crash], Which::There, "file-trust A: replaced, same size, then a start"),
     known(SHORT, &[Route::DriveBack, Route::Restart, Route::Crash], Which::Part, "file-trust A: shorter, where less was had"),
-    known(ANY_SIZE, &[Route::Check, Route::Resume], Which::GoneMeanwhile, "found by this test: the folder or drive gone during a check"),
     known(OTHERS, &[Route::DriveBack], Which::Missing, "#373: what was known missing is forgotten"),
-    known(&[Shorter], &[Route::PutBack], Which::PieceHad, "file-trust A: missing known, then a shorter one: grown, then refused"),
     known(OTHERS, &[Route::Running], Which::NoneHad, "file-trust A: missing known, nothing had"),
-    known(ANY_SIZE, &[Route::Running], Which::Off, "file-trust A: Off, another file there"),
 ];
 
 impl Open {
@@ -195,10 +188,7 @@ impl Open {
             && match self.which {
                 Which::There => class.missing == Missing::No,
                 Which::Part => class.missing == Missing::No && !class.whole,
-                Which::Off => class.off,
-                Which::GoneMeanwhile => class.gone_meanwhile,
                 Which::Missing => class.missing != Missing::No,
-                Which::PieceHad => class.missing == Missing::PieceHad,
                 Which::NoneHad => class.missing == Missing::NoneHad,
                 Which::Any => true,
             }
@@ -906,7 +896,8 @@ impl World {
         let put = self.theirs.last_mut().unwrap();
         put.whole = complete;
         put.other = inode(&mine).map(|ino| (mine, ino));
-        if !kind.equal() {
+        // A hard link, even to its own bytes, is Missing files until a check finds it whole (#374).
+        if !kind.equal() || kind == Kind::EqualHardLink {
             self.disturb(kind);
         }
         if matches!(kind, Kind::OnePiece | Kind::Cut) && !complete && missing != Missing::Had {
@@ -1616,6 +1607,18 @@ macro_rules! open {
     )* };
 }
 
+/// What a gate PR closed of [`KNOWN_OPEN`], each class as `open!` had it: it passes now (#374).
+macro_rules! closed {
+    ($($name:ident: $why:literal, $start:ident, $peer:literal, [$($step:expr),*];)*) => { $(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $name() {
+            let _was_open = $why;
+            let steps = vec![$($step),*];
+            World::run(&Peers::start().await, &Case { start: Start::$start, peer: $peer, paused: false, before: None, steps }, true).await;
+        }
+    )* };
+}
+
 const B: usize = 1;
 
 fn put(kind: Kind) -> Step {
@@ -1626,24 +1629,15 @@ open! {
     open_another_torrents_file_is_downloaded_over_by_an_add: "#374, #380's review", Whole, true, [Step::AddOther];
     open_an_add_over_another_file: "file-trust A: first add", Nothing, true, [Step::Do(Do::Remove), put(Same), Step::Do(Do::Add)];
     open_an_add_grows_a_shorter_file: "file-trust A: first add", Nothing, true, [Step::Do(Do::Remove), put(Empty), Step::Do(Do::Add)];
-    open_an_add_over_a_hard_link: "file-trust A: hard link", Nothing, true, [Step::Do(Do::Remove), put(HardLink), Step::Do(Do::Add)];
     open_a_check_downloads_over_another_file: "file-trust 1, row 9", Whole, true, [put(Same), Step::Do(Do::Check)];
     open_a_check_grows_a_shorter_file: "file-trust A: shorter", Whole, true, [put(Shorter), Step::Do(Do::Check)];
     open_a_check_downloads_over_an_edited_file: "file-trust A: edited in place", Whole, true, [put(Edit), Step::Do(Do::Check)];
-    open_a_longer_file_is_written_as_its_folder_is_renamed_during_a_check: "#374: found by this test", Whole, true,
-        [put(Longer), Step::Settle, Step::During(Do::Check, By::RenameFolder), Step::Settle];
-    open_resume_over_a_hard_link: "#361: the hard-link rule", Whole, true,
-        [Step::By(By::TakeAway { file: B }), Step::Settle, put(HardLink), Step::Settle, Step::Do(Do::Resume)];
     open_a_move_takes_another_file_for_its_own: "file-trust B: Moving", Whole, true, [put(Same), Step::Do(Do::Move { replace: false })];
     open_a_rename_takes_another_file_for_its_own: "file-trust B: Moving", Whole, true, [put(Same), Step::Do(Do::Rename)];
     open_resume_grows_a_shorter_file_before_its_shown: "#361: Download over them is of the files a check read", Whole, true,
         [Step::By(By::TakeAway { file: B }), Step::Settle, put(Shorter), Step::Do(Do::Resume)];
     open_resume_after_a_start_of_files_not_checked_since: "#361: Download over them is of the files a check read", Whole, true,
         [put(Cut), Step::Settle, Step::Crash, Step::Do(Do::Resume)];
-    open_a_shared_piece_goes_into_a_longer_file_at_an_off_ones: "file-trust A: Off, another file there", Nothing, false,
-        [Step::Do(Do::Off { file: B }), put(Longer), Step::Restart];
-    open_a_shared_piece_goes_into_a_file_put_where_an_off_one_was_gone: "file-trust A: Off, another file there", Nothing, false,
-        [Step::Do(Do::Off { file: B }), Step::By(By::TakeAway { file: B }), Step::Restart, Step::Settle, put(Same)];
     open_an_undone_remove_downloads_over_another_file: "file-trust B: undo of Remove", Whole, true,
         [Step::Do(Do::Remove), put(Same), Step::Do(Do::Undo)];
     open_a_file_set_off_has_an_edited_one_checked_and_downloaded_over: "file-trust 1, rows 17 and 18", Whole, false,
@@ -1661,16 +1655,45 @@ open! {
     open_another_file_before_a_start: "file-trust A: replaced, same size", Nothing, false, [put(Same), Step::Restart];
     open_another_file_before_a_start_after_a_crash: "file-trust A: replaced, same size", Nothing, false, [put(Same), Step::Crash];
     open_a_shorter_file_where_less_was_had: "file-trust A: shorter", Nothing, false, [put(Empty), Step::Restart];
-    open_a_shorter_file_where_a_piece_was_had_grows: "file-trust A: missing known, then a shorter one", Nothing, true,
+    open_another_file_where_nothing_was_had: "file-trust A: missing known, nothing had", Half, false,
+        [Step::By(By::TakeAway { file: B }), Step::Settle, put(Same)];
+}
+
+closed! {
+    an_add_over_a_hard_link_writes_nothing: "file-trust A: hard link", Nothing, true, [Step::Do(Do::Remove), put(HardLink), Step::Do(Do::Add)];
+    a_longer_file_isnt_written_as_its_folder_is_renamed_during_a_check: "#374: found by this test", Whole, true,
+        [put(Longer), Step::Settle, Step::During(Do::Check, By::RenameFolder), Step::Settle];
+    resume_over_a_hard_link_writes_nothing: "#361: the hard-link rule", Whole, true,
+        [Step::By(By::TakeAway { file: B }), Step::Settle, put(HardLink), Step::Settle, Step::Do(Do::Resume)];
+    a_shared_piece_goes_aside_from_a_longer_file_at_an_off_ones: "file-trust A: Off, another file there", Nothing, false,
+        [Step::Do(Do::Off { file: B }), put(Longer), Step::Restart];
+    a_shared_piece_goes_aside_from_a_file_put_where_an_off_one_was_gone: "file-trust A: Off, another file there", Nothing, false,
+        [Step::Do(Do::Off { file: B }), Step::By(By::TakeAway { file: B }), Step::Restart, Step::Settle, put(Same)];
+    a_shorter_file_where_a_piece_was_had_isnt_grown: "file-trust A: missing known, then a shorter one", Nothing, true,
         [
             Step::Do(Do::Pause), Step::By(By::Put { file: 2, kind: OnePiece }), Step::By(By::Put { file: 0, kind: OnePiece }),
             Step::By(By::DriveGone), Step::Settle, Step::By(By::DriveBack), Step::Settle,
             Step::By(By::TakeAway { file: B }), Step::Settle, put(Shorter), Step::Settle
         ];
-    open_another_file_where_nothing_was_had: "file-trust A: missing known, nothing had", Half, false,
-        [Step::By(By::TakeAway { file: B }), Step::Settle, put(Same)];
-    open_a_shared_piece_goes_into_another_file_at_an_off_ones: "file-trust A: Off, another file there", Nothing, false,
+    a_shared_piece_goes_aside_from_another_file_at_an_off_ones: "file-trust A: Off, another file there", Nothing, false,
         [Step::Do(Do::Off { file: B }), put(Same), Step::Restart];
+}
+
+/// Found by this test at 256 cases (#374): a hard link to the torrent's own bytes, put while none of
+/// them was had, its neighbours not there, is Missing files until a check reads it; then it's whole but
+/// for the piece it shares with them, which only they complete, so it's read only, not Missing files,
+/// and the torrent completes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hard_link_to_its_own_bytes_completes_once_checked() {
+    let steps = vec![
+        Step::By(By::Put { file: 0, kind: EqualHardLink }),
+        Step::Do(Do::Remove),
+        Step::Do(Do::Undo),
+        Step::Settle,
+        Step::PeerOpens,
+        Step::Settle,
+    ];
+    World::run(&Peers::start().await, &Case { start: Start::Nothing, peer: false, paused: false, before: None, steps }, true).await;
 }
 
 /// #402: gone by hand, or to the Trash: it's downloaded again, not zeros shown as had.

@@ -1108,13 +1108,20 @@ impl Actor {
     async fn grant(&mut self, id: TorrentId, handle: &Held, files: &BTreeSet<usize>) -> Result<bool, Failure> {
         let Some(torrent) = self.torrents.get(&id) else { return Ok(false) };
         let Some(info) = &torrent.record.info else { return Ok(true) };
-        let progress = handle.stats().file_progress;
+        let (progress, shared) = (handle.stats().file_progress, info.shared_bytes());
         let destination = torrent.record.destination.to_path_buf();
         let wants: Vec<(usize, Want)> = files
             .iter()
             .filter_map(|&i| Some((i, info.files.get(i).filter(|f| !f.padding)?)))
             .map(|(i, f)| {
-                (i, Want { size: f.len, complete: progress.get(i).is_some_and(|had| *had >= f.len), destination: destination.clone() })
+                (
+                    i,
+                    Want {
+                        size: f.len,
+                        complete: progress.get(i).is_some_and(|had| had + shared[i] >= f.len),
+                        destination: destination.clone(),
+                    },
+                )
             })
             .collect();
         let (trashed, hash) = (self.guard.trashed().clone(), torrent.record.info_hash.clone());
@@ -1154,10 +1161,14 @@ impl Actor {
     pub(super) fn grant_now(&self, id: TorrentId) -> bool {
         let Some(torrent) = self.torrents.get(&id) else { return false };
         let (Some(info), Some(handle)) = (&torrent.record.info, torrent.lib.torrent()) else { return false };
-        let progress = handle.stats().file_progress;
+        let (progress, shared) = (handle.stats().file_progress, info.shared_bytes());
         let destination = torrent.record.destination.to_path_buf();
         torrent.record.normal().into_iter().filter_map(|i| Some((i, info.files.get(i).filter(|f| !f.padding)?))).all(|(i, f)| {
-            let want = Want { size: f.len, complete: progress.get(i).is_some_and(|had| *had >= f.len), destination: destination.clone() };
+            let want = Want {
+                size: f.len,
+                complete: progress.get(i).is_some_and(|had| had + shared[i] >= f.len),
+                destination: destination.clone(),
+            };
             self.guard.trashed().grant(&torrent.record.info_hash, i, &want).is_ok()
         })
     }
@@ -1412,7 +1423,8 @@ impl Actor {
             machine::letgo::State::Gone { pieces } | machine::letgo::State::Stashed { pieces, .. } => pieces.keys().copied().collect(),
         };
         let open: BTreeSet<usize> = self.guard.trashed().writable(&torrent.record.info_hash).difference(&letting_go).copied().collect();
-        Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent), &open)) {
+        let shared = torrent.record.info.as_ref().map(Info::shared_bytes).unwrap_or_default();
+        Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent), &open, &shared)) {
             Ok(disk) => Observation::Files(disk),
             Err(reason) => Observation::DestinationGone { reason },
         })
@@ -2348,7 +2360,7 @@ mod uncounted_tests {
     #[test]
     fn an_error_without_a_check_ending_keeps_the_files_uncounted() {
         let expected = files::Expected { index: 0, path: "/gone/b.bin".into(), size_bytes: 10, progress_bytes: 10 };
-        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected], &BTreeSet::new()).files[&0]))]);
+        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected], &BTreeSet::new(), &[]).files[&0]))]);
         let error = Phase::Error { failure: Broke::Librqbit { detail: "drive gone".into() } };
         let away =
             Phase::DestinationUnavailable { reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() } };
