@@ -1,6 +1,6 @@
 # #417 Colors (branch 417-colors)
 
-Headless renders (re-rendered after review round 1: no subtitle under Colors; after round 2: the picker placed for its tallest and drawn at its own height, the hex field short; the popup, two-theme and drag-after artifacts) (`--at 0.5`, 2x unless noted) of the real build, Light and Dark system Appearance (the sheet shows both halves either way). Data and downloads in temp dirs.
+Headless renders (re-rendered after review round 1: no subtitle under Colors; after round 2: the picker placed for its tallest and drawn at its own height, the hex field short; the popup, two-theme and drag-after artifacts); round 3: no hairline around a section's or group's header in the two-theme lists, and every popup, two-theme and Every color still rendered again from it (`--at 0.5`, 2x unless noted) of the real build, Light and Dark system Appearance (the sheet shows both halves either way). Data and downloads in temp dirs.
 
 - [sheet-light.png](sheet-light.png), [-dark](sheet-dark.png): the Active look's sheet: Look (Corners, Motion), Colors and the eight bases. 960x600.
 - [narrow-sheet-light.png](narrow-sheet-light.png), [-dark](narrow-sheet-dark.png): the same at 640x600.
