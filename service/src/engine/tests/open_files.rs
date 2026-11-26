@@ -111,10 +111,11 @@ async fn no_file_is_open_while_the_destination_is_away() {
     }
 }
 
-/// A file replaced by hand while the torrent is paused, by another of its size: the one open stays so,
-/// across a Resume; a Check opens, reads and judges the one there, and has none of its pieces.
+/// A file replaced by hand while the torrent is paused, by another of its size: the Resume finds it
+/// isn't the file it had open (#374), so it's checked, which opens, reads and judges the one there,
+/// has none of its pieces, and changes none of it.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_file_replaced_by_hand_while_paused_is_opened_at_the_next_check() {
+async fn a_file_replaced_by_hand_while_paused_is_checked_at_the_resume() {
     let dir = temp();
     let (engine, id) = seeding(dir.path()).await;
     engine.command(id, TorrentCommand::Pause).await.unwrap();
@@ -125,9 +126,6 @@ async fn a_file_replaced_by_hand_while_paused_is_opened_at_the_next_check() {
     std::fs::rename(dir.path().join("theirs"), file(dir.path(), "b.bin")).unwrap();
     let now = open_on(&file(dir.path(), "b.bin"));
     engine.command(id, TorrentCommand::Resume).await.unwrap();
-    wait_for(&engine, id, Status::Seeding).await;
-    assert_eq!((was(), now()), (1, 0), "resumed");
-    engine.command(id, TorrentCommand::Check).await.unwrap();
     wait_for(&engine, id, Status::Downloading).await;
     assert_eq!((was(), now()), (0, 1), "checked");
     let had: Vec<u64> = files_on(&engine, id).await.into_iter().map(|f| f.1).collect();

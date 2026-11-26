@@ -96,9 +96,6 @@ pub struct Phantom {
     pub service_reset: Vec<String>,
     /// Where the service kept the torrents' database aside, as last told, so it's told of once.
     pub service_records_set_aside: Option<std::path::PathBuf>,
-    /// The files whose parts the service couldn't keep, as last told, so each is told of once while
-    /// it stays in the list (#304).
-    pub service_parts_not_saved: Vec<std::path::PathBuf>,
     /// The disks torrents still need space on, as the latest snapshot has them.
     pub volumes: Vec<proto::Volume>,
     /// Why the default destination can't be reached, as the latest snapshot says (#209): Settings'
@@ -370,7 +367,6 @@ impl Phantom {
             latest: (0, 0),
             service_reset: Vec::new(),
             service_records_set_aside: None,
-            service_parts_not_saved: Vec::new(),
             volumes: Vec::new(),
             default_unavailable: None,
             undo: Vec::new(),
@@ -426,13 +422,6 @@ impl Phantom {
                         self.bar.tell(crate::notice::Notice::records_set_aside(kept));
                     }
                 }
-                // What it tells is what's failing now: a file that drops out and fails again is told again.
-                for not_saved in &snapshot.parts_not_saved {
-                    if !self.service_parts_not_saved.contains(&not_saved.file) {
-                        self.bar.tell(crate::notice::Notice::part_not_saved(not_saved));
-                    }
-                }
-                self.service_parts_not_saved = snapshot.parts_not_saved.iter().map(|p| p.file.clone()).collect();
                 self.torrents = snapshot.torrents;
                 self.volumes = snapshot.volumes;
                 let left = self.undos.observe(&snapshot.left);

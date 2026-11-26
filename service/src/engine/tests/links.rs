@@ -165,7 +165,7 @@ async fn an_off_file_with_a_link_at_its_path_is_never_written_through_it() {
     let was = as_it_is(&target);
 
     let engine = engine(dir.path()).await;
-    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), true).await.unwrap().id;
+    let id = add_made(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), true).await.unwrap().id;
     let b = index_of(&engine, id, "b.bin").await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     // Made empty at the add, as any file a torrent gets: a link in its place.

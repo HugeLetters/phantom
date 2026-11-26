@@ -2,7 +2,11 @@
 //! librqbit gets of the torrent has a [`Handle`] of them, and only the last one it got has the files:
 //!
 //! - [`Slots::open`] is a storage's `init`: the files as just opened, each anew, whatever was open
-//!   before. What an older storage had open is closed, and its handle is over.
+//!   before, every one [closed](Opened::Closed): read only, so a check changes nothing on disk. What an
+//!   older storage had open is closed, and its handle is over.
+//! - [`Slots::grant`] opens one for writing, as the torrent is let run: if it's still the file the
+//!   check read (or, not there then, it's made now, `O_EXCL`), no longer than the torrent's and, while
+//!   incomplete, no other file's too (a hard link). What was kept aside of it goes into it first.
 //! - [`Handle::hand_on`] is librqbit's `take` (as a check ends, at a pause): the files stay open, as
 //!   they are, for the new handle. It waits for each read and write under way; none begins after it
 //!   through the old handle, which finds every file [`HandedOn`](Opened::HandedOn).
@@ -21,11 +25,15 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use anyhow::{Context, Result, bail};
 
+use super::parts::Parts;
+
 /// A torrent's open files, outliving the storages librqbit gets of it.
 #[derive(Default)]
 pub(super) struct Slots {
     /// What's open now; `None` while librqbit has no storage of the torrent.
     now: Mutex<Option<Arc<Opening>>>,
+    /// What's kept aside of its files: outlives every storage, as it must a re-add.
+    parts: Parts,
 }
 
 /// What a storage's `init` opened.
@@ -41,14 +49,25 @@ struct Opening {
 type Paths = Arc<Vec<Option<PathBuf>>>;
 
 pub(super) enum Opened {
-    File(std::fs::File),
-    /// Not on disk at `init`, let go of since, or padding: made when written.
-    NotThere,
+    /// May be written.
+    Open(std::fs::File),
+    /// Read only: what's written into it is kept aside (`parts.rs`). `None`: not on disk at `init`,
+    /// let go of since, or padding.
+    Closed(Option<std::fs::File>),
     /// What a handle finds that no longer has the files; never in a slot.
     HandedOn,
 }
 
 impl Slots {
+    pub fn new(parts: Parts) -> Self {
+        Self { now: Mutex::default(), parts }
+    }
+
+    /// What's kept aside of its files.
+    pub fn parts(&self) -> &Parts {
+        &self.parts
+    }
+
     /// The files just opened, for the storage that opened them.
     pub fn open(self: &Arc<Self>, files: Vec<(Option<PathBuf>, Opened)>) -> Handle {
         let (paths, files): (Vec<_>, Vec<_>) = files.into_iter().map(|(path, file)| (path, RwLock::new(file))).unzip();
@@ -59,6 +78,61 @@ impl Slots {
         // Closed with `now` free.
         drop(before);
         handle
+    }
+
+    /// Opens file `index` for writing, as `want` says it may be ([`Opened::Closed`] to
+    /// [`Opened::Open`]); one open already is looked at again. Waits for the file's reads and writes
+    /// under way: on a blocking task, never the actor's.
+    pub fn grant(&self, index: usize, want: &Want) -> Result<(), Refused> {
+        use std::os::unix::fs::MetadataExt;
+        let Some(opening) = self.lock().clone() else { return Err(Refused::Changed) };
+        let (Some(Some(path)), Some(slot)) = (opening.paths.get(index), opening.files.get(index)) else { return Ok(()) };
+        // One open already is only looked at, beside the reads under way.
+        if let Opened::Open(file) = &*waiting(|| slot.try_read())? {
+            return if is_at(file, path) { Ok(()) } else { Err(there(path)) };
+        }
+        let mut slot = waiting(|| slot.try_write())?;
+        let file = match std::mem::replace(&mut *slot, Opened::Closed(None)) {
+            Opened::Closed(None) => match made(path, want) {
+                Ok(file) => file,
+                Err(e) if matches!(e.raw_os_error(), Some(libc::EEXIST | libc::ELOOP)) => return Err(there(path)),
+                Err(e) => return Err(Refused::Failed(format!("making {path:?}: {e}"))),
+            },
+            Opened::Open(file) => {
+                let at = is_at(&file, path);
+                *slot = Opened::Open(file);
+                return if at { Ok(()) } else { Err(there(path)) };
+            }
+            Opened::Closed(Some(file)) if !is_at(&file, path) => {
+                *slot = Opened::Closed(Some(file));
+                return Err(there(path));
+            }
+            Opened::Closed(Some(file)) => file,
+            Opened::HandedOn => unreachable!("never in a slot"),
+        };
+        let fail = |e: std::io::Error| Refused::Failed(format!("{path:?}: {e}"));
+        let meta = file.metadata().map_err(fail)?;
+        let shared = meta.nlink() > 1;
+        if meta.len() > want.size || (shared && !want.complete) {
+            *slot = Opened::Closed(Some(file));
+            return Err(Refused::NotItsOwn);
+        }
+        // Complete and another file's too: nothing is to be written, so it stays read only.
+        if shared {
+            *slot = Opened::Closed(Some(file));
+            return Ok(());
+        }
+        let opened = self.parts.write_into(index, &file).and_then(|_| super::trashed::grow(&file, want.size));
+        match opened {
+            Ok(()) => {
+                *slot = Opened::Open(file);
+                Ok(())
+            }
+            Err(e) => {
+                *slot = Opened::Closed(Some(file));
+                Err(fail(e))
+            }
+        }
     }
 
     /// `f` of each file, by index, with its path: one being read or written now is locked.
@@ -80,6 +154,76 @@ impl Slots {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<Opening>>> {
         self.now.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// What a file must be to be [granted](Slots::grant).
+pub(super) struct Want {
+    /// Its length in the torrent.
+    pub size: u64,
+    /// Whether librqbit has all of it.
+    pub complete: bool,
+    /// The torrent's destination: a file made is made with its folders from there down, never it.
+    pub destination: PathBuf,
+}
+
+/// Why a file isn't [granted](Slots::grant).
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum Refused {
+    /// Another file is at its path than the one the check read (or none, or one where none was): the
+    /// check is due again.
+    Changed,
+    /// What's at its path isn't the torrent's to write: longer than its, a hard link while incomplete,
+    /// or something other than a file. A size check finds it Missing files.
+    NotItsOwn,
+    /// It couldn't be opened, made or written into.
+    Failed(String),
+    /// It's being read or written, as on a disk that doesn't answer: asked again later.
+    Busy,
+}
+
+/// How long a grant waits for a file being read or written.
+const BUSY_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The lock `lock` takes, once it's free within [`BUSY_FOR`].
+fn waiting<G>(lock: impl Fn() -> std::sync::TryLockResult<G>) -> Result<G, Refused> {
+    let until = std::time::Instant::now() + BUSY_FOR;
+    loop {
+        match lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if std::time::Instant::now() < until => {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => return Err(Refused::Busy),
+        }
+    }
+}
+
+/// File `path`, not there when the check read the torrent, made now for writing: never over what's
+/// there since, nor through a link. Its folders too, from `want.destination` down.
+fn made(path: &Path, want: &Want) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    super::trashed::make_folders(&want.destination, path.parent().unwrap_or(path)).map_err(std::io::Error::other)?;
+    std::fs::OpenOptions::new().read(true).write(true).create_new(true).custom_flags(libc::O_NOFOLLOW).open(path)
+}
+
+/// Whether `file` is what's at `path` now: the same file, not a link to it.
+fn is_at(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(open), Ok(there)) => there.is_file() && (open.dev(), open.ino()) == (there.dev(), there.ino()),
+        _ => false,
+    }
+}
+
+/// Why a file that isn't the one at `path` is refused: another file there is checked; nothing, or
+/// something else, is the size check's.
+fn there(path: &Path) -> Refused {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_file() => Refused::Changed,
+        Ok(_) => Refused::NotItsOwn,
+        Err(_) => Refused::Changed,
     }
 }
 
@@ -191,7 +335,7 @@ mod tests {
 
         /// Opened as a storage's `init` does: files 0 and 1.
         fn open(&self, slots: &Arc<Slots>) -> Handle {
-            let opened = |path: &Path| Opened::File(std::fs::File::options().read(true).write(true).open(path).unwrap());
+            let opened = |path: &Path| Opened::Open(std::fs::File::options().read(true).write(true).open(path).unwrap());
             slots.open(["a", "b"].map(|name| (Some(self.path(name)), opened(&self.path(name)))).into())
         }
     }
@@ -199,13 +343,14 @@ mod tests {
     /// Writes `byte` at the start of file `index`: whether the handle has the file.
     fn write(handle: &Handle, index: usize, byte: u8) -> bool {
         let wrote = handle.read(index, |_, opened| match opened {
-            Opened::File(file) => Ok(file.write_all_at(&[byte], 0).map(|()| true)?),
-            Opened::NotThere | Opened::HandedOn => Ok(false),
+            Opened::Open(file) => Ok(Some(file.write_all_at(&[byte], 0).map(|()| true)?)),
+            Opened::Closed(_) => Ok(Some(false)),
+            Opened::HandedOn => Ok(None),
         });
         let changes = handle.change(index, |_, _| Ok(())).is_ok();
         let wrote = wrote.unwrap();
-        assert_eq!(wrote, changes, "had to change as it is to read");
-        wrote
+        assert_eq!(wrote.is_some(), changes, "had to change as it is to read");
+        wrote == Some(true)
     }
 
     /// librqbit's `take` as a check ends or at a pause: a write under way, in whichever file, ends
@@ -225,7 +370,7 @@ mod tests {
                     old.read(index, |_, opened| {
                         begun_tx.send(()).unwrap();
                         go_rx.recv().unwrap();
-                        let Opened::File(file) = opened else { panic!("handed on under a write") };
+                        let Opened::Open(file) = opened else { panic!("handed on under a write") };
                         Ok(file.write_all_at(&[7], 0)?)
                     })
                     .unwrap();
@@ -407,6 +552,66 @@ mod tests {
             drop(old.take());
         });
         assert!(write(&again.unwrap(), 0, 1), "still open");
+    }
+
+    /// Files 0 and 1 as `init` opens them now: closed, `a` there and `b` not (both of 8 bytes).
+    fn closed(dir: &Dir, slots: &Arc<Slots>) -> Handle {
+        std::fs::remove_file(dir.path("b")).unwrap();
+        let a = std::fs::File::options().read(true).write(true).open(dir.path("a")).unwrap();
+        slots.open(vec![(Some(dir.path("a")), Opened::Closed(Some(a))), (Some(dir.path("b")), Opened::Closed(None))])
+    }
+
+    fn want(dir: &Dir, size: u64, complete: bool) -> Want {
+        Want { size, complete, destination: dir.0.path().to_owned() }
+    }
+
+    /// Granted, the file the check read may be written, what was kept aside of it in it first; one not
+    /// there then is made now, of its full length. Nothing is written before.
+    #[test]
+    fn a_grant_opens_the_file_the_check_read_and_makes_one_that_was_not_there() {
+        let dir = Dir::new();
+        let slots = Arc::new(Slots::new(Parts::new(Some(dir.path("parts")))));
+        let handle = closed(&dir, &slots);
+        assert!(!write(&handle, 0, 1) && !write(&handle, 1, 1), "closed");
+        slots.parts().keep(0, 2, &[&[3; 2]], 100).unwrap();
+        for index in [0, 1] {
+            slots.grant(index, &want(&dir, 8, false)).unwrap();
+        }
+        assert!(write(&handle, 0, 1) && write(&handle, 1, 1));
+        assert_eq!(std::fs::read(dir.path("a")).unwrap(), [1, 0, 3, 3, 0, 0, 0, 0], "with what was kept");
+        assert_eq!(std::fs::read(dir.path("b")).unwrap(), [1, 0, 0, 0, 0, 0, 0, 0], "made, of its length");
+        assert!(!slots.parts().has(0));
+        slots.grant(0, &want(&dir, 8, false)).unwrap();
+    }
+
+    /// The grant refuses what isn't the file the check read, or isn't the torrent's to write.
+    #[test]
+    fn a_grant_refuses_another_file_a_longer_one_a_hard_link_and_a_link() {
+        let refused = |change: &dyn Fn(&Dir), index: usize, complete: bool| {
+            let dir = Dir::new();
+            let slots = Arc::new(Slots::new(Parts::new(Some(dir.path("parts")))));
+            let handle = closed(&dir, &slots);
+            change(&dir);
+            let granted = slots.grant(index, &want(&dir, 8, complete));
+            assert!(!write(&handle, index, 1) || granted.is_ok(), "written though refused");
+            (granted, std::fs::read(dir.path("a")).ok())
+        };
+        let replaced = |d: &Dir| {
+            std::fs::write(d.path("new"), [5; 8]).unwrap();
+            std::fs::rename(d.path("new"), d.path("a")).unwrap();
+        };
+        assert_eq!(refused(&replaced, 0, false), (Err(Refused::Changed), Some(vec![5; 8])), "another file at its path");
+        let gone = |d: &Dir| std::fs::rename(d.path("a"), d.path("moved")).unwrap();
+        assert_eq!(refused(&gone, 0, false).0, Err(Refused::Changed), "renamed away, a folder above it say");
+        let put = |d: &Dir| std::fs::write(d.path("b"), [5; 8]).unwrap();
+        assert_eq!(refused(&put, 1, false).0, Err(Refused::Changed), "one put where none was");
+        let longer = |d: &Dir| std::fs::OpenOptions::new().append(true).open(d.path("a")).unwrap().write_all_at(&[9], 8).unwrap();
+        assert_eq!(refused(&longer, 0, false).0, Err(Refused::NotItsOwn), "longer");
+        let linked = |d: &Dir| std::fs::hard_link(d.path("a"), d.path("other")).unwrap();
+        assert_eq!(refused(&linked, 0, false), (Err(Refused::NotItsOwn), Some(vec![0; 8])), "a hard link, incomplete");
+        assert_eq!(refused(&linked, 0, true), (Ok(()), Some(vec![0; 8])), "complete: read only, not refused");
+        let link = |d: &Dir| std::os::unix::fs::symlink(d.path("a"), d.path("b")).unwrap();
+        assert_eq!(refused(&link, 1, false).0, Err(Refused::NotItsOwn), "a link where none was");
     }
 
     #[test]

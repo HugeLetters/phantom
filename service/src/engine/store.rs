@@ -282,6 +282,24 @@ pub struct FileOf {
 }
 
 impl Info {
+    /// Each file's bytes in pieces it shares with other files, by index: those not wholly its own,
+    /// which librqbit can't have without the others (a hard link complete but for them still seeds).
+    pub fn shared_bytes(&self) -> Vec<u64> {
+        let (piece, total) = (u64::from(self.piece_length.max(1)), self.files.iter().map(|f| f.len).sum::<u64>());
+        let mut offset = 0;
+        self.files
+            .iter()
+            .map(|f| {
+                let (start, end) = (offset, offset + f.len);
+                offset = end;
+                // Its own pieces: from the first that starts in it to the last that ends in it (the
+                // torrent's last ends with it).
+                let own_end = if end == total { end } else { end / piece * piece };
+                f.len - own_end.saturating_sub(start.div_ceil(piece) * piece).min(f.len)
+            })
+            .collect()
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let torrent = librqbit::torrent_from_bytes(bytes)?;
         let name = torrent.info.data.name.as_ref().map(|n| String::from_utf8_lossy(n.as_ref()).into_owned()).filter(|n| !n.is_empty());

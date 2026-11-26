@@ -3,7 +3,7 @@
 //! more than before: it gets it again once resumed, and what's kept for the undo is what that write
 //! of the storage it has now brought.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::super::files::{At, Gate};
 use super::*;
@@ -31,13 +31,13 @@ async fn a_late_write_into_a_file_in_the_trash_leaves_its_piece_to_be_got_again(
     }
 
     let gate = Arc::new(Gate::default());
-    let (armed, kept) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+    let armed = Arc::new(AtomicBool::new(false));
     let guard = super::super::files::Guard::default().with_hook(Arc::new({
-        let (gate, armed, kept) = (gate.clone(), armed.clone(), kept.clone());
-        move |at| match at {
-            At::Change if armed.swap(false, Ordering::SeqCst) => gate.wait(),
-            At::Keep => drop(kept.fetch_add(1, Ordering::SeqCst)),
-            _ => {}
+        let (gate, armed) = (gate.clone(), armed.clone());
+        move |at| {
+            if at == At::Change && armed.swap(false, Ordering::SeqCst) {
+                gate.wait();
+            }
         }
     }));
     let _opens = Opens(gate.clone());
@@ -49,7 +49,7 @@ async fn a_late_write_into_a_file_in_the_trash_leaves_its_piece_to_be_got_again(
     let [first, second] = [0, 1].map(|n| (downloads.join("pack").join(&names[n]), std::fs::read(pack.join(&names[n])).unwrap()));
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
     assert!(!first.0.exists(), "in the Trash");
-    let parts = || super::moving::bytes_in(&dir.path().join("data/undo-parts"));
+    let parts = || super::moving::bytes_in(&super::super::parts::dir(&dir.path().join("data")));
     let had = async || engine.details(id).await.unwrap().files[1].progress_bytes;
 
     // The first chunk, the first file's, is the first write.
@@ -62,8 +62,7 @@ async fn a_late_write_into_a_file_in_the_trash_leaves_its_piece_to_be_got_again(
     gate.hold(false);
     wait_for_that("the write goes on", || !gate.waiting()).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(kept.load(Ordering::SeqCst), 0, "nothing kept through the storage taken");
-    assert!(parts().is_empty(), "{:?}", parts().keys());
+    assert!(parts().is_empty(), "nothing kept through the storage taken: {:?}", parts().keys());
     assert_eq!(had().await, 0, "the piece isn't had");
 
     engine.command(id, TorrentCommand::Resume).await.unwrap();
@@ -72,9 +71,10 @@ async fn a_late_write_into_a_file_in_the_trash_leaves_its_piece_to_be_got_again(
     assert_eq!(had().await, HALF as u64);
     let content = find(&engine, id).await.content.unwrap();
     assert_eq!((content.progress_bytes, content.size_bytes), (HALF as u64, HALF as u64));
-    // File 0's, at 0.
-    let kept_now: Vec<_> = parts().into_iter().map(|(path, bytes)| (path.ends_with("0/0"), bytes)).collect();
-    assert!(kept_now == [(true, first.1.clone())], "kept for the undo: the first file's part, as got");
+    // File 0's log: its magic, then one record of the first file's part at 0, as got.
+    let kept_now: Vec<_> = parts().into_iter().map(|(path, bytes)| (path.ends_with("0"), bytes)).collect();
+    let log = [b"PHPARTS1".as_slice(), &0u64.to_le_bytes(), &(HALF as u32).to_le_bytes(), &first.1].concat();
+    assert!(kept_now == [(true, log)], "kept for the undo: the first file's part, as got");
 
     engine.undo().await.unwrap();
     wait_for(&engine, id, Status::Seeding).await;

@@ -60,19 +60,41 @@ pub struct Disk {
 pub struct Found {
     pub file: Expected,
     pub at: Option<Stamp>,
+    /// How many names the file there has: more than one, it's another file's too (a hard link).
+    pub links: u64,
+    /// Something other than a file is at its path (a folder, a symbolic link).
+    pub taken: bool,
+    /// Phantom has a file of it open for writing (it was let run): one that isn't at its path then went.
+    pub open: bool,
+    /// Its bytes in pieces it shares with other files: librqbit can't have those without them.
+    pub shared: u64,
 }
 
 impl Found {
-    /// It isn't on disk as it must be: nothing is at its path, something other than a file is, or
-    /// a file of a size it can't have.
-    pub fn is_missing(&self) -> bool {
-        self.at.is_none() || self.is_impossible()
+    /// What's at `file`'s path: a file with one name, or nothing.
+    pub fn of(file: Expected, at: Option<Stamp>) -> Self {
+        Self { file, at, links: 1, taken: false, open: false, shared: 0 }
     }
 
-    /// A file is there, of a size it can't have: longer than the torrent's, or shorter than what was
-    /// had of it. It isn't the torrent's file as it was, whatever a check finds in it.
+    /// It isn't on disk as it must be: nothing is at its path though some of it was had or it was
+    /// open (one never got nor made is made as the torrent starts, #374), something other than a file
+    /// is, or a file it can't be.
+    pub fn is_missing(&self) -> bool {
+        self.taken || (self.at.is_none() && (self.file.progress_bytes > 0 || self.open)) || self.is_impossible()
+    }
+
+    /// A file is there that can't be the torrent's: longer than the torrent's, shorter than what was
+    /// had of it, or another file's too while it's incomplete (written, the other would change). It
+    /// isn't the torrent's file as it was, whatever a check finds in it, and nothing writes into it.
     pub fn is_impossible(&self) -> bool {
-        self.at.is_some_and(|at| at.len > self.file.size_bytes || at.len < self.file.progress_bytes)
+        self.at.is_some_and(|at| {
+            at.len > self.file.size_bytes || at.len < self.file.progress_bytes || (self.links > 1 && !self.whole_but_shared())
+        })
+    }
+
+    /// librqbit has every piece of it but those it shares with other files, which only they complete.
+    pub fn whole_but_shared(&self) -> bool {
+        self.file.progress_bytes + self.shared >= self.file.size_bytes
     }
 }
 
@@ -114,7 +136,7 @@ mod tests {
 
     fn found(len: u64) -> Found {
         let file = Expected { index: 0, path: "a".into(), size_bytes: SIZE, progress_bytes: PROGRESS };
-        Found { file, at: Some(stamp(NOW, len)) }
+        Found::of(file, Some(stamp(NOW, len)))
     }
 
     fn gone() -> Gone {
@@ -133,6 +155,40 @@ mod tests {
     fn a_file_as_long_as_its_torrent_is_on_disk_and_one_byte_longer_is_missing() {
         assert!(!found(SIZE).is_missing());
         assert!(found(SIZE + 1).is_missing());
+    }
+
+    /// A hard link to another file: while incomplete it can't be the torrent's (writing it would write
+    /// the other), complete it can (only read).
+    #[test]
+    fn a_hard_link_is_impossible_until_complete() {
+        let linked = |progress, shared| Found {
+            links: 2,
+            open: true,
+            shared,
+            file: Expected { progress_bytes: progress, ..found(SIZE).file },
+            ..found(SIZE)
+        };
+        assert!(linked(PROGRESS, 0).is_impossible());
+        assert!(!linked(SIZE, 0).is_missing());
+        assert!(!linked(PROGRESS, SIZE - PROGRESS).is_missing(), "but for what it shares, which only the other files complete");
+    }
+
+    /// Nothing at its path: missing once some of it was had or it was made, or when something else is
+    /// there.
+    #[test]
+    fn nothing_at_its_path_is_missing_only_once_some_of_it_was_had() {
+        let none = |progress, taken, open| Found {
+            at: None,
+            taken,
+            open,
+            file: Expected { progress_bytes: progress, ..found(0).file },
+            links: 1,
+            shared: 0,
+        };
+        assert!(!none(0, false, false).is_missing(), "never had nor made: made as it starts");
+        assert!(none(1, false, false).is_missing());
+        assert!(none(0, false, true).is_missing(), "made, and gone since");
+        assert!(none(0, true, false).is_missing(), "a folder or a link there");
     }
 
     #[test]

@@ -810,34 +810,6 @@ fn a_torrent_list_set_aside_is_told_in_a_warning_with_its_path_in_the_list() {
 
 const PART: &str = "/Users/me/Downloads/Pack/b.bin";
 
-/// A part of a file in the Trash the service couldn't keep on disk (#304): a warning that stays
-/// until dismissed, the line in Phantom's own words, the list with the file, the reason and that
-/// its Undo may need a re-download; told once while the service keeps saying it, and not at all
-/// when it says nothing (a retry that kept it before it told).
-#[test]
-fn a_part_not_saved_is_told_in_a_warning_with_its_file_and_reason_in_the_list() {
-    let mut rt = app(MemoryService::new().with_part_not_saved(PART, "No space left on device (os error 28)"));
-    settle(&mut rt);
-    settle(&mut rt);
-    assert_eq!(rt.state.bar.entries().len(), 1, "told once");
-    let notice = rt.state.bar.newest().cloned().expect("a notice");
-    assert_eq!(notice.short, "Couldn't save part of a file in the Trash");
-    assert_eq!(notice.severity, crate::notice::Severity::Warning);
-    assert_eq!(notice.lasts, crate::notice::Lasts::UntilDismissed);
-    let id = rt.state.bar.entries()[0].id;
-    super::generated::show_notice(&mut rt, id);
-    let list = super::generated::texts_under(&rt, &format!("notice/{id}")).join("\n");
-    assert_eq!(
-        list.lines().skip(1).collect::<Vec<_>>(),
-        [PART, "No space left on device", "Reveal in Finder"],
-        "the file, why, and a button: {list}"
-    );
-
-    let mut rt = app(MemoryService::new());
-    settle(&mut rt);
-    assert!(rt.state.bar.newest().is_none(), "nothing failing, nothing told");
-}
-
 /// A Move of a selection (#270) tells how many moved in its few words and, in its list, each
 /// torrent that didn't, by name, with why: one skipped because it can't move, one cancelled in its
 /// clash dialog.
@@ -1022,7 +994,6 @@ fn a_path_is_a_line_of_its_own_and_a_reasons_words_hold_none() {
             vec![path("/d/Big Buck Bunny")],
         )),
         Notice::records_set_aside(std::path::Path::new("/Users/me/Library/Application Support/Phantom/records.invalid.db")),
-        Notice::part_not_saved(&proto::PartNotSaved { file: PART.into(), reason: "No space left on device (os error 28)".into() }),
         Notice::error("Can't open the file")
             .with_listing(client::display::show_failed_listing(std::path::Path::new(PART), "it isn't on disk")),
         Notice::error("Couldn't rename the torrent").with_listing(crate::notice::Listing::of_entries([(
@@ -1089,8 +1060,8 @@ fn a_remove_lists_no_note_and_a_delete_keeps_its_files_note() {
     }
 }
 
-/// Rule 4: a notice whose path is on disk offers Reveal in Finder (the torrent list kept aside, a part
-/// not saved, files a refused Delete's undo left); one whose path isn't, doesn't. A failed Open of a
+/// Rule 4: a notice whose path is on disk offers Reveal in Finder (the torrent list kept aside, files
+/// a refused Delete's undo left); one whose path isn't, doesn't. A failed Open of a
 /// file that isn't there offers its folder.
 #[test]
 fn a_notice_whose_path_is_on_disk_offers_reveal_in_finder() {
@@ -1106,7 +1077,6 @@ fn a_notice_whose_path_is_on_disk_offers_reveal_in_finder() {
         rt.update(|s, _| {
             s.bar.tell(crate::model::not_back_notice(&not));
             s.bar.tell(Notice::records_set_aside(std::path::Path::new(KEPT)));
-            s.bar.tell(Notice::part_not_saved(&proto::PartNotSaved { file: PART.into(), reason: "No space left on device".into() }));
         });
         settle(rt);
         rt.state.bar.entries().iter().map(|e| e.id).collect::<Vec<_>>()
@@ -1124,7 +1094,7 @@ fn a_notice_whose_path_is_on_disk_offers_reveal_in_finder() {
     assert_eq!(shown.all(), vec![(stranded.clone(), crate::platform::Show::Reveal)]);
     // Gone from the disk: no button.
     let disk = Disk::default();
-    for path in [stranded.as_path(), std::path::Path::new(KEPT), std::path::Path::new(PART)] {
+    for path in [stranded.as_path(), std::path::Path::new(KEPT)] {
         disk.lose(path);
     }
     rt.update(|s, _| s.finder = Box::new(disk));

@@ -840,7 +840,13 @@ impl Actor {
             warn!(error = %e, "failed to save the undo stack");
         }
         undo::tidy(&self.data_dir, self.steps.machine(), self.torrents.values().map(|t| &t.record));
-        self.guard.trashed().follow(self.steps.machine());
+        self.follow_trash();
+    }
+
+    /// Has the files in the Trash, and what's kept aside of every torrent, follow the stack and the list.
+    pub(super) fn follow_trash(&self) {
+        let listed = self.torrents.values().map(|t| t.record.info_hash.clone()).collect();
+        self.guard.trashed().follow(self.steps.machine(), &listed);
     }
 }
 

@@ -356,7 +356,7 @@ async fn a_move_that_takes_the_file_put_at_the_new_path_saves_nothing_missing_as
     let dir = dir.path();
     let gate = Arc::new(super::super::files::Gate::default());
     let _held = Opens(gate.clone());
-    let engine = engine_gated_at(dir, super::super::files::At::Length, &gate).await;
+    let engine = engine_gated_at(dir, super::super::files::At::Read, &gate).await;
     let (id, _) = missing_b(&engine, dir).await;
     let elsewhere = dir.join("elsewhere");
     std::fs::create_dir_all(elsewhere.join("pack")).unwrap();
@@ -443,7 +443,7 @@ async fn moved_missing(then: MovedThen) {
     let dir = dir.path();
     let gate = Arc::new(super::super::files::Gate::default());
     let _held = Opens(gate.clone());
-    let mut engine = engine_gated_at(dir, super::super::files::At::Length, &gate).await;
+    let mut engine = engine_gated_at(dir, super::super::files::At::Read, &gate).await;
     let id = add(&engine, &dir.join("downloads"), complete_torrent(dir).await, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
     let (b, own) = (file(dir, "b.bin"), dir.join("own"));

@@ -50,7 +50,7 @@ async fn run(case: Case) {
     let gate = Arc::new(super::super::files::Gate::default());
     let mut engine = engine_gated(dir, &gate).await;
     let _opens = Opens(gate.clone());
-    let id = add(&engine, &downloads, AddSource::TorrentFile(torrent), true).await.unwrap().id;
+    let id = add_made(&engine, &downloads, AddSource::TorrentFile(torrent), true).await.unwrap().id;
     wait_for(&engine, id, Status::Paused).await;
     let (first, file) = (index_of(&engine, id, "a.bin").await, index_of(&engine, id, "b.bin").await);
     let files = vec![file];
@@ -98,7 +98,7 @@ async fn run(case: Case) {
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     until(&engine, id, |s| *s == Status::Seeding).await;
     for _ in 0..200 {
-        if std::fs::read(&path).unwrap() == b {
+        if std::fs::read(&path).ok().as_ref() == Some(&b) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -148,7 +148,7 @@ async fn stopped_pack(dir: &Path) -> (std::sync::Arc<librqbit::Session>, Engine,
     let engine = engine(dir).await;
     let downloads = dir.join("downloads");
     std::fs::create_dir_all(&downloads).unwrap();
-    let id = add(&engine, &downloads, AddSource::TorrentFile(torrent), true).await.unwrap().id;
+    let id = add_made(&engine, &downloads, AddSource::TorrentFile(torrent), true).await.unwrap().id;
     wait_for(&engine, id, Status::Paused).await;
     let file = index_of(&engine, id, "b.bin").await;
     (seeder, engine, id, file, b)
@@ -212,7 +212,7 @@ async fn moved_by_hand_in_use_as_its_set_normal_while_running() {
     assert!(std::fs::read(&theirs).unwrap() == before, "downloaded into the file that was moved away");
     engine.inspect(|a| a.letting_go_held = false).await;
     for _ in 0..1000 {
-        if std::fs::read(&path).unwrap() == b {
+        if std::fs::read(&path).ok().as_ref() == Some(&b) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -240,7 +240,7 @@ async fn gone_before_a_start_set_normal_isnt_taken_out() {
     tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     for _ in 0..1000 {
-        if std::fs::read(&path).unwrap() == b {
+        if std::fs::read(&path).ok().as_ref() == Some(&b) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
