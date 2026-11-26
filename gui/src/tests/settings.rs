@@ -2594,7 +2594,11 @@ fn close_other_picker(d: &mut Desk, step: &Step) {
             let stored = preset.and_then(|p| crate::model::settings::shown_color(&p, side, key)).map(|rgb| rgb.hex());
             text != stored
         }
-        Step::Front(_)
+        // Steps that don't press in Settings: what happens to the picker is the app's.
+        Step::Open
+        | Step::CmdW
+        | Step::Close { escape: false }
+        | Step::Front(_)
         | Step::Reopen
         | Step::Remove(_)
         | Step::Undo(Which::Main)
@@ -2608,8 +2612,13 @@ fn close_other_picker(d: &mut Desk, step: &Step) {
         | Step::Appearance(_) => true,
         _ => false,
     };
-    if !keeps {
+    // A press in Settings, while it's in front: one behind would come to the front first. Escape
+    // and ⌘Z in Settings bring it to the front themselves; the model's Escape is the sheet's, and
+    // its ⌘Z comes after a press on the sheet's background.
+    if !keeps && matches!(step, Step::Close { escape: true } | Step::Undo(Which::Settings)) {
         d.front(Which::Settings);
+    }
+    if !keeps && d.shown().front == Some(Which::Settings) {
         press_outside_picker(d);
     }
 }
@@ -4693,4 +4702,22 @@ fn reset_and_escape() {
     d.settle();
     let sheet = d.settings.state.sheet.as_ref().unwrap();
     assert!(sheet.editor().is_some_and(|e| e.picker.is_none()), "the picker closed, the sheet stays");
+}
+
+/// An undo from the main window, a color's picker open with text that's no color: the text goes
+/// back, the picker closes, and the control the undo shows has the focus, not the picker's swatch.
+#[test]
+fn an_undo_that_closes_the_picker_focuses_what_it_shows() {
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    choose(&mut d, "edit-corners-both", 0);
+    type_into(&mut d, "edit-faint_text-light", "#123");
+    d.front(Which::Main);
+    d.settle();
+    d.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
+    d.settle();
+    let sheet = d.settings.state.sheet.as_ref().unwrap();
+    assert!(sheet.editor().is_some_and(|e| e.picker.is_none()), "the picker closed");
+    let focused = super::focus_path(&d.settings);
+    assert!(focused.as_deref().is_some_and(|p| p.contains("edit-corners-both")), "Corners is focused, not {focused:?}");
 }

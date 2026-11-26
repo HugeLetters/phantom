@@ -143,6 +143,9 @@ pub struct Editor {
     pub colors: Vec<ColorField>,
     /// The sections that fold ("Every color") opened, by key.
     pub open: BTreeSet<&'static str>,
+    /// An undo closed the picker: the control it shows takes the focus by its key, or Rune would
+    /// hand it back to the picker's swatch.
+    pub refocus: bool,
     /// A color's picker, open beside its swatch.
     pub picker: Option<Picker>,
 }
@@ -1411,7 +1414,7 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
     if let Some(sheet) = &mut s.sheet {
         if let Some(edit) = &mut sheet.edit {
             edit.editor.colors.clear();
-            edit.editor.picker = None;
+            edit.editor.refocus |= edit.editor.picker.take().is_some();
         }
         sheet.refused.retain(|r| !matches!(r.row, Row::Color(..)));
         // A saved preset that's gone has its sheet closed.
