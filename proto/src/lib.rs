@@ -1017,12 +1017,6 @@ pub struct Snapshot {
     /// after the first (a restart of the engine after a setting).
     #[serde(default)]
     pub records_set_aside: Option<PathBuf>,
-    /// The files in the Trash a part of which couldn't be kept on disk even after a retry, as of
-    /// now: it drops out once a retry keeps it, or its file is no longer in the Trash for an undo.
-    /// Unlike `records_set_aside` this can start and end during a run, so it's the whole list in
-    /// every snapshot, not an event.
-    #[serde(default)]
-    pub parts_not_saved: Vec<PartNotSaved>,
     /// Each disk torrents download to that still need space on it: what they need and what's
     /// free. Warnings follow from it ([`Volume::short`], [`Volume::too_big`]); none ever blocks
     /// an add.
@@ -1152,16 +1146,6 @@ impl Setting {
             Setting::StopSeeding { at: SeedingLimit::Time, .. } => SettingName::SeedTime,
         }
     }
-}
-
-/// What librqbit wrote into a file in the Trash (a piece it shares with a file the torrent gets)
-/// that Phantom couldn't keep on disk, so a restart loses it: its undo may need a re-download.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PartNotSaved {
-    /// The file's path where it was, before it went to the Trash.
-    pub file: PathBuf,
-    /// Why the disk write failed, as the system says it.
-    pub reason: String,
 }
 
 /// An entry that left the undo stack, and why.

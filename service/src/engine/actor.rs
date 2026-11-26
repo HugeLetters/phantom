@@ -625,7 +625,7 @@ impl Actor {
                     self.size_check_all().await;
                     self.keep_rounds();
                     // A file emptied from the Trash since is in it no more, and what's kept of it goes.
-                    self.guard.trashed().follow(self.steps.machine());
+                    self.follow_trash();
                     // One gone from the Trash is let go of once its torrent can be taken out (#234).
                     self.let_go().await;
                     #[cfg(test)]
@@ -709,7 +709,6 @@ impl Actor {
             undo: undo::stacked(self.steps.machine()),
             left: self.steps.machine().left.iter().cloned().collect(),
             default_unavailable: self.default_unavailable.clone(),
-            parts_not_saved: self.guard.trashed().parts_not_saved(),
         }
     }
 

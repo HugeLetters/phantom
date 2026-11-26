@@ -21,11 +21,15 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use anyhow::{Context, Result, bail};
 
+use super::parts::Parts;
+
 /// A torrent's open files, outliving the storages librqbit gets of it.
 #[derive(Default)]
 pub(super) struct Slots {
     /// What's open now; `None` while librqbit has no storage of the torrent.
     now: Mutex<Option<Arc<Opening>>>,
+    /// What's kept aside of its files: outlives every storage, as it must a re-add.
+    parts: Parts,
 }
 
 /// What a storage's `init` opened.
@@ -49,6 +53,15 @@ pub(super) enum Opened {
 }
 
 impl Slots {
+    pub fn new(parts: Parts) -> Self {
+        Self { now: Mutex::default(), parts }
+    }
+
+    /// What's kept aside of its files.
+    pub fn parts(&self) -> &Parts {
+        &self.parts
+    }
+
     /// The files just opened, for the storage that opened them.
     pub fn open(self: &Arc<Self>, files: Vec<(Option<PathBuf>, Opened)>) -> Handle {
         let (paths, files): (Vec<_>, Vec<_>) = files.into_iter().map(|(path, file)| (path, RwLock::new(file))).unzip();

@@ -26,6 +26,7 @@ mod machine;
 #[cfg(test)]
 mod model_tests;
 mod moving;
+mod parts;
 mod places;
 #[cfg(test)]
 mod race_tests;
@@ -174,10 +175,22 @@ impl Engine {
             store.ids_above(id);
         }
         forget_librqbits_list(&session_folder);
-        let guard = guard.keeping_parts_in(undo::parts_dir(&data_dir));
+        // An older build's, which nothing reads: an undo that needed it checks its torrent.
+        let _ = std::fs::remove_dir_all(data_dir.join(undo::OLD_PARTS));
+        // A log of kept parts that can't be read: its pieces have nothing behind them.
+        for (hash, index) in parts::damaged(&parts::dir(&data_dir)) {
+            let range =
+                records.iter().filter(|r| r.info_hash == hash).find_map(|r| Some(r.info.as_ref()?.files.get(index)?.pieces.clone()));
+            if let Some(range) = range
+                && let Err(e) = bitv::clear(&bitv::path(&session_folder, &hash), [(range.start, range.end)])
+            {
+                tracing::warn!(hash, error = %e, "couldn't clear the pieces of a damaged log of kept parts");
+            }
+        }
+        let guard = guard.keeping_parts_in(parts::dir(&data_dir));
         // What Moves to Trash took that their undos may put back: librqbit reads it where it went,
         // and never makes it again.
-        guard.trashed().follow(&undo);
+        guard.trashed().follow(&undo, &records.iter().map(|r| r.info_hash.clone()).collect());
         // A let-go of a file gone from the Trash a crash cut short: its pieces cleared in what
         // librqbit saved, before the torrent is added again with them (#234); so is a file set Off that
         // was deleted or moved away while the service was stopped (#276).

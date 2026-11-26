@@ -996,18 +996,6 @@ pub fn records_set_aside_listing(kept: &std::path::Path) -> Listing {
         .then(vec![Line::Muted("Phantom started with an empty list.".into())])
 }
 
-/// What the bar says when a part of a file in the Trash couldn't be kept on disk, even at a retry;
-/// the list has the file and why ([`part_not_saved_listing`]).
-pub fn part_not_saved() -> &'static str {
-    "Couldn't save part of a file in the Trash"
-}
-
-/// What the list behind [`part_not_saved`] says: the file on a line of its own, then why the disk
-/// write failed.
-pub fn part_not_saved_listing(file: &std::path::Path, reason: &str) -> Listing {
-    Listing { groups: vec![vec![Line::Path(file.display().to_string()), Line::Muted(sentence(without_os_code(reason)))]] }
-}
-
 /// What the bar says of an undo that failed, whatever the reason and whatever it was of (torrents
 /// or a setting): one failure, one wording. The list has what it was of, and why.
 pub fn undo_failed() -> &'static str {

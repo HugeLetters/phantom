@@ -452,8 +452,8 @@ async fn what_is_kept_of_a_neighbour_in_the_trash_outlasts_letting_go_of_another
     engine.command(id, TorrentCommand::TrashFiles { files: vec![0, 1] }).await.unwrap();
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     wait_for(&engine, id, Status::Seeding).await;
-    let kept = super::super::undo::parts_dir(&dir.path().join("data")).join(&hash).join("1");
-    assert!(std::fs::read_dir(&kept).is_ok_and(|mut d| d.next().is_some()), "the middle file's part of piece 2 is kept");
+    let kept = super::super::parts::dir(&dir.path().join("data")).join(&hash).join("1");
+    assert!(kept.is_file(), "the middle file's part of piece 2 is kept");
     reads.store(0, Ordering::SeqCst);
     std::fs::remove_file(in_trash(dir.path(), &first)).unwrap();
     for _ in 0..1000 {
@@ -472,7 +472,7 @@ async fn what_is_kept_of_a_neighbour_in_the_trash_outlasts_letting_go_of_another
         assert_eq!(find(&engine, id).await.status, Status::Seeding);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(std::fs::read_dir(&kept).is_ok_and(|mut d| d.next().is_some()), "still kept");
+    assert!(kept.is_file(), "still kept");
     engine.undo().await.unwrap();
     // Piece 1 comes again from the seeder; the middle file is whole.
     for _ in 0..1000 {

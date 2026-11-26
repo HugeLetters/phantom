@@ -843,12 +843,6 @@ fn spec() -> AppSpec<Phantom> {
                 s.service =
                     Box::new(demo_service().with_records_set_aside("/Users/me/Library/Application Support/Phantom/records.invalid.db"));
             }),
-            ("part-not-saved", |s| {
-                s.service = Box::new(demo_service().with_part_not_saved(
-                    "/Users/me/Downloads/Big Buck Bunny (2008)/bbb_sunflower_2160p_60fps_normal.mp4",
-                    "No space left on device (os error 28)",
-                ));
-            }),
             ("rejecting", |s| s.service = Box::new(MemoryService::new().rejecting_links())),
             // An undo refused: what Delete moved left the Trash.
             // Deletes that take 3 s to move their files and undos that take 1.5 s to put them back

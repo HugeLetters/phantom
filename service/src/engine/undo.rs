@@ -34,14 +34,9 @@ use super::trash::{Identity, Trashed, identity};
 
 const FILE: &str = "undo.json";
 const STASHES: &str = "undo";
-/// What librqbit wrote into the files Moves to Trash took, while there (`trashed.rs`).
-const PARTS: &str = "undo-parts";
-
-/// Where what librqbit writes into a file a Move to Trash took is kept: by info hash, file index
-/// and offset.
-pub fn parts_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join(PARTS)
-}
+/// Where an older build kept what librqbit wrote into the files Moves to Trash took: deleted at a
+/// start (`parts.rs` keeps it now).
+pub const OLD_PARTS: &str = "undo-parts";
 
 /// What it takes to reverse one Remove, Delete or Move to Trash.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
