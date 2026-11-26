@@ -56,6 +56,11 @@ pub fn reveal_in_finder() -> &'static str {
     "Reveal in Finder"
 }
 
+/// What the Reveal in Finder icon button beside `name` is called to assistive technology.
+pub fn reveal_file_in_finder(name: &str) -> String {
+    format!("Reveal {name} in Finder")
+}
+
 /// The status bar's pill after the newest notice's line: how many notices there are, a count, not
 /// a place among them.
 pub fn notices_count(total: usize) -> String {

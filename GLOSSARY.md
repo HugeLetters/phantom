@@ -212,8 +212,8 @@ files go into the new folder, renamed on the same drive or copied to another, th
 go; it keeps what it had, without a full check, its id and its row. It's **Moving** meanwhile,
 with how much is copied. Where files of the torrent's are already, it asks first: **Use existing**
 (they're kept and checked; the torrent's own copies of them go to the Trash), **Replace** (those go
-to the Trash and the torrent's take their place; other files there stay), **Cancel**, or **Reveal
-in Finder**. A folder is the folder on disk, however it's spelled: into the one it's in already,
+to the Trash and the torrent's take their place; other files there stay), **Cancel**; each
+path it shows also has a **Reveal in Finder** icon button for that file. A folder is the folder on disk, however it's spelled: into the one it's in already,
 nothing moves, and it says so. One that fails (the disk is full, a drive goes, something put where
 a file goes while it copied) is back where it was, always, with nothing left of what was copied,
 and says why; a file of it deleted by hand meanwhile stays deleted (what was copied of it goes to

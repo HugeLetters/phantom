@@ -1,7 +1,8 @@
 //! The clash dialog (#24, #270): a Move whose torrent has files in the new folder already asks what
 //! to do with them, for each torrent of a selection that does, one after another. Its title is the
-//! question, with where it is among several ("· 1 of 3"); under it up to three of the paths, cut in
-//! the middle, then "and 2 more", Reveal in Finder small at the end of the first; with more to
+//! question, with where it is among several ("· 1 of 3"); under it up to three of the paths, wrapped
+//! whole when long, then "and 2 more"; a small Reveal in Finder icon button ends each path (tooltip
+//! "Reveal in Finder", accessible label "Reveal <file name> in Finder"; "and N more" has none); with more to
 //! ask, "Apply to the remaining N"; then one row of buttons at the bottom right: Cancel, which skips
 //! only this torrent, as Escape does, Rename…, Replace and Use existing (the default, Return), each
 //! saying what it does only in its tooltip. Return presses the button with the focus, and the
@@ -19,16 +20,17 @@ use rune::{El, Key, KeyEvent, Tx, col, el, row};
 
 use crate::model::Phantom;
 use crate::model::moving::{Clash, apply_to_rest, choose, close_name, explain, rename, reveal, show_in_list, submit_name};
-use crate::ui::Ui;
+use crate::ui::{Icon, Ui};
 
 /// The most paths it shows, and the most at a window shorter than [`ROOMY`].
 const PATHS: usize = 3;
 const ROOMY: f32 = 420.0;
+const REVEAL_KEYS: [&str; PATHS] = ["clash-reveal-0", "clash-reveal-1", "clash-reveal-2"];
 
 /// The open clash dialog, in `layer`. `window` is the window's size, when known.
 pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec<El>) {
     let Some(clash) = &s.clash else { return };
-    let [use_existing, replace, cancel, show, rename_to, move_in] = display::clash_choices();
+    let [use_existing, replace, cancel, _, rename_to, move_in] = display::clash_choices();
     let [use_help, replace_help, rename_help] = display::clash_choice_help();
     // A button with the focus takes Return itself and presses, rather than the dialog's first
     // choice, which sends this torrent's own files to the Trash.
@@ -68,7 +70,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         explained("clash-rename", presses(button.build(), |s, _| rename(s)), rename_help)
     };
     let room = window.is_none_or(|(_, h)| h >= ROOMY);
-    let paths = paths(clash, ui, show, if room { PATHS } else { 1 });
+    let paths = paths(clash, ui, if room { PATHS } else { 1 });
     // The buttons along the bottom, at the right, the default last, as macOS orders them.
     let buttons =
         |choices: Vec<El>| row().key("clash-choices").w_full().gap(ui.spacing().s4).center_y().child(el().grow(1.0)).children(choices);
@@ -101,6 +103,11 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
             ui.dialog("clash", &title, body, foot, close, on_key, layer);
         }
     }
+    for key in REVEAL_KEYS {
+        if clash.explained == Some(key) {
+            ui.tooltip_below("clash-tip", key, display::reveal_in_finder(), layer);
+        }
+    }
     // Over the dialog, under the choice the pointer rests on.
     let help = [("clash-use-existing", use_help), ("clash-replace", replace_help), ("clash-rename", rename_help)];
     if let Some((key, message)) = help.into_iter().find(|(key, _)| clash.explained == Some(*key)) {
@@ -117,10 +124,10 @@ fn return_does(ev: &KeyEvent, act: impl FnOnce()) -> bool {
     false
 }
 
-/// Up to `most` of the clashing paths, one a line, cut in the middle; "and N more" for the rest;
-/// Reveal in Finder, small, at the end of the first. Another torrent's place with no file there yet
-/// is where this one would go.
-fn paths(clash: &Clash, ui: &Ui, show: &str, most: usize) -> El {
+/// Up to `most` of the clashing paths, one a line, wrapped when long; "and N more" for the rest;
+/// a Reveal in Finder icon button at the end of each line (none for the "and N more"). Another
+/// torrent's place with no file there yet is where this one would go.
+fn paths(clash: &Clash, ui: &Ui, most: usize) -> El {
     let place = clash.to.join(&clash.name);
     let files: Vec<&std::path::Path> = match clash.files.is_empty() {
         true => vec![place.as_path()],
@@ -128,15 +135,15 @@ fn paths(clash: &Clash, ui: &Ui, show: &str, most: usize) -> El {
     };
     let lines = files.iter().take(most).enumerate().map(|(i, f)| {
         let path = ui.dialog_path(&f.display().to_string());
-        let line = row().w_full().gap(ui.spacing().s4).center_y().child(path);
-        if i == 0 {
-            let button = ui.button("clash-reveal", show).small().on_press(reveal).build();
-            // With the focus, Return presses it, as on any button of the dialog.
-            let button = button.on_key(|s: &mut Phantom, ev: &KeyEvent, _: &mut Tx| return_does(ev, || reveal(s)));
-            line.child(el().grow(1.0)).child(button)
-        } else {
-            line
-        }
+        let name = f.file_name().map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let key = REVEAL_KEYS[i];
+        let button = ui.glyph_button(Icon::Reveal, &display::reveal_file_in_finder(&name)).on_press(move |s: &mut Phantom| reveal(s, i));
+        // With the focus, Return presses it, as on any button of the dialog; the tooltip is
+        // anchored to the keyed element around it.
+        let button = ui.glyph_el(button).on_key(move |s: &mut Phantom, ev: &KeyEvent, _: &mut Tx| return_does(ev, || reveal(s, i)));
+        let button = ui.explained(button, display::reveal_in_finder(), move |s: &mut Phantom, resting| explain(s, key, resting));
+        let button = el().key(key).child(button);
+        row().w_full().gap(ui.spacing().s4).items_start().child(path).child(el().grow(1.0)).child(button)
     });
     let first: Vec<El> = lines.collect();
     let more = files.len().saturating_sub(most);

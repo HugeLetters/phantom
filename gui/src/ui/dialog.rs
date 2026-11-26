@@ -84,17 +84,10 @@ impl Ui {
         rune_kit::Checkbox::new(on).label(label).on_toggle(on_toggle).build(&self.k).key(key.to_owned())
     }
 
-    /// A path in a dialog, muted, on one line: cut in the middle when it's too long, where a path
-    /// is least telling (its folder and its name stay).
+    /// A path in a dialog, muted: never cut, it wraps onto more lines when it's too long.
     pub fn dialog_path(&self, path: &str) -> El {
         let k = &self.k;
-        text(path.to_owned())
-            .font(k.ty.text_small)
-            .color(k.c.text_muted)
-            .truncate_middle()
-            .shrink()
-            .min_w(0.0)
-            .help_when_truncated(path.to_owned())
+        text(path.to_owned()).font(k.ty.text_small).color(k.c.text_muted).wrap().shrink().min_w(0.0)
     }
 
     /// A line of a dialog's text, muted.

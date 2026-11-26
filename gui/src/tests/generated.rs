@@ -1400,7 +1400,7 @@ impl StateMachineTest for Screen {
                     ClashPick::Replace => press(rt, "clash-replace"),
                     ClashPick::Cancel => press(rt, "clash-cancel"),
                     ClashPick::Escape => rt.key(KeyEvent { key: Key::Escape, mods: Mods::default() }),
-                    ClashPick::Reveal => press(rt, "clash-reveal"),
+                    ClashPick::Reveal => press(rt, "clash-reveal-0"),
                 }
                 step(rt);
                 let revealed = sut.shown.all()[before..].to_vec();

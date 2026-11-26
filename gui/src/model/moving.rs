@@ -364,11 +364,11 @@ pub fn abandon(s: &mut Phantom) {
     s.asking = None;
 }
 
-/// Shows the clashing files in Finder (another torrent's place, where none was found); the
+/// Shows the `i`th clashing file in Finder (another torrent's place, where none was found); the
 /// dialog stays open, for the choice.
-pub fn reveal(s: &mut Phantom) {
+pub fn reveal(s: &mut Phantom, i: usize) {
     let Some(clash) = &s.clash else { return };
-    let path = clash.files.first().map_or_else(|| clash.to.join(&clash.name), |f| f.to_path_buf());
+    let path = clash.files.get(i).map_or_else(|| clash.to.join(&clash.name), |f| f.to_path_buf());
     crate::platform::show(s, &path, Show::Reveal);
 }
 
