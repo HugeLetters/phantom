@@ -23,7 +23,7 @@ use crate::model::settings::{Held, THEME, ThemeRow, ThemeRows, focused_side, joi
 use crate::model::settings::{close_picker, escape_picker, follow_color, follow_label, open_picker, pick, toggle_section};
 use crate::theme::preset::{Appearance, LookPreset};
 use crate::theme::setting::{Kind, Resolved, Section, Setting, Show, Value};
-use crate::ui::{Halves, Icon, LookChip, PopupParts, Tone, Ui};
+use crate::ui::{FIELD_HEIGHT, Halves, Icon, LookChip, PopupParts, Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
 pub const SETTINGS: [&str; 11] = [
@@ -574,10 +574,10 @@ fn theme_control(
                     .text_field(control_key.clone(), &field.text, &format!("{} hex", setting.label))
                     .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").color_edit(side, key))
                     .on_submit(move |s: &mut SettingsWindow, _| submit_color(s, side, key))
-                    // As tall as the button beside it, a regular control's.
-                    .height(HEX_HEIGHT)
-                    .build()
-                    .grow(1.0);
+                    // Wide enough for "#rrggbb", as tall as the button beside it.
+                    .width(HEX_WIDTH)
+                    .height(FIELD_HEIGHT)
+                    .build();
                 let button = ui
                     .button(format!("{control_key}-follow"), &follow_label(setting, of))
                     .disabled(set.is_none())
@@ -590,8 +590,8 @@ fn theme_control(
                     .enumerate()
                     .map(|(i, w)| (w.to_owned(), Tone::Warning, format!("{control_key}-warning-{i}")))
                     .collect();
-                let room = half.resolved.room(key).into_iter().map(str::to_owned).collect();
-                let parts = PopupParts { field, button, lines, room };
+                let most = half.resolved.room(key).into_iter().map(str::to_owned).collect();
+                let parts = PopupParts { field, button, lines, most };
                 ui.color_popup(
                     &control_key,
                     &swatch_key,
@@ -742,8 +742,8 @@ const SAVE_AS_WIDTH: f32 = 160.0;
 /// How tall Save as…'s line is, its field or its question: a field and the line's padding under it.
 const SAVE_AS_HEIGHT: f32 = 32.0;
 
-/// How tall a color picker's hex field is: a regular button's height, as its Follow or Reset.
-const HEX_HEIGHT: f32 = 24.0;
+/// How wide a color picker's hex field is: "#rrggbb" and its padding.
+const HEX_WIDTH: f32 = 96.0;
 
 /// How wide the editor's sheet gets, and the App icon's.
 const EDITOR_WIDTH: f32 = 760.0;

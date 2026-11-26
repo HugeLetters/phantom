@@ -4693,18 +4693,21 @@ fn a_drag_picks_and_follow_puts_it_back() {
     assert_eq!(color_of(&d, light, "faint_text"), before, "⌘Z again: the drag was one step");
 }
 
-/// The picker keeps room for every warning its color could have: a drag that brings warnings up
-/// neither grows the popup nor moves it, in a window short enough that a taller one would flip
-/// above its swatch; the color applies all the while.
+/// Where the picker goes is worked out for every warning its color could have: beside its swatch,
+/// top edges level when the tallest it could get fits below, else bottom edges level. A drag that
+/// brings warnings up grows it away from that edge, never moving the edge or the swatch, in a
+/// window tall enough for it to fit below and in one too short; the color applies all the while.
 #[test]
 fn a_drag_that_brings_warnings_never_moves_the_picker() {
-    for width in [960.0, 640.0] {
+    let mut placed = Vec::new();
+    for (width, height) in [(960.0, 900.0), (640.0, 900.0), (960.0, 760.0)] {
+        let at = format!("at {width}x{height}");
         let mut d = appearance_tab();
-        d.settings.set_viewport((width, 600.0), 2.0);
+        d.settings.set_viewport((width, height), 2.0);
         d.settle();
         press(&mut d, "active-edit");
         press(&mut d, "edit-accent-light-swatch");
-        let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key} at {width}"));
+        let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key} {at}"));
         let warned = |d: &Desk| {
             d.settings
                 .elements()
@@ -4712,8 +4715,15 @@ fn a_drag_that_brings_warnings_never_moves_the_picker() {
                 .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("edit-accent-light-warning-")))
                 .count()
         };
+        let swatch = rect(&d, "edit-accent-light-swatch");
         let popup = rect(&d, "edit-accent-light-popup");
-        assert_eq!(warned(&d), 0, "at {width} pt the default Accent has no warning");
+        assert_eq!(warned(&d), 0, "{at} the default Accent has no warning");
+        let below = (popup[1] - swatch[1]).abs() < 0.5;
+        let bottom = |r: [f32; 4]| r[1] + r[3];
+        assert!(below || (bottom(popup) - bottom(swatch)).abs() < 0.5, "{at} beside its swatch, an edge level: {popup:?} {swatch:?}");
+        placed.push(below);
+        // The edge it keeps.
+        let edge = |r: [f32; 4]| if below { r[1] } else { bottom(r) };
         let square = rect(&d, "edit-accent-light-square");
         let (x, y) = (square[0] + square[2] / 2.0, square[1] + square[3] / 2.0);
         d.settings.pointer_down(x, y);
@@ -4722,16 +4732,21 @@ fn a_drag_that_brings_warnings_never_moves_the_picker() {
             let t = i as f32 / 10.0;
             d.settings.pointer_move(x - 110.0 * t, y - 40.0 * t);
             d.settle();
-            assert_eq!(rect(&d, "edit-accent-light-popup"), popup, "at {width} pt, step {i}: the popup stays");
+            let now = rect(&d, "edit-accent-light-popup");
+            assert_eq!(edge(now), edge(popup), "{at}, step {i}: the popup keeps its edge");
+            assert_eq!((now[0], now[2]), (popup[0], popup[2]), "{at}, step {i}: and its side");
+            assert_eq!(rect(&d, "edit-accent-light-swatch"), swatch, "{at}, step {i}: the swatch stays");
             colors.push(color_of(&d, Appearance::Light, "accent"));
         }
-        assert!(warned(&d) > 0, "at {width} pt the drag ends on a light Accent, hard to see");
+        assert!(warned(&d) > 0, "{at} the drag ends on a light Accent, hard to see");
+        assert!(rect(&d, "edit-accent-light-popup")[3] > popup[3], "{at} grown for its warnings");
         d.settings.pointer_up(x - 110.0, y - 40.0);
         d.settle();
-        assert_eq!(rect(&d, "edit-accent-light-popup"), popup, "at {width} pt the popup stays as the drag ends");
+        assert_eq!(edge(rect(&d, "edit-accent-light-popup")), edge(popup), "{at} the popup keeps its edge as the drag ends");
         colors.dedup();
-        assert!(colors.len() > 5, "at {width} pt the color applies as it moves: {colors:?}");
+        assert!(colors.len() > 5, "{at} the color applies as it moves: {colors:?}");
     }
+    assert_eq!(placed, [true, true, false], "below where it fits, else above");
 }
 
 /// Reset on a changed base: the theme's own again, and Escape closes the picker, the sheet staying.

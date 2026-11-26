@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 
-use rune::{Drag, El, Key, KeyEvent, Phase, Tx, col, el, row, text};
+use rune::{Align, Drag, El, Key, KeyEvent, Phase, Side, Tx, col, el, row, text};
 use rune_kit::{Placement, popover};
 
 use super::{Tone, Ui};
@@ -24,6 +24,9 @@ const BAR: f32 = 16.0;
 const PAD: f32 = 12.0;
 const GAP: f32 = 8.0;
 pub const POPUP_WIDTH: f32 = SQUARE.0 + 2.0 * GAP + BAR + 2.0 * PAD;
+
+/// How tall the hex field is: a regular button's height, as its Follow or Reset beside it.
+pub const FIELD_HEIGHT: f32 = 24.0;
 
 /// How far an arrow nudges: hue and lightness in the square, saturation in the bar.
 const NUDGE: f32 = 0.01;
@@ -46,9 +49,9 @@ pub struct PopupParts {
     pub button: El,
     /// Lines under them, each in its tone, and its key: the warnings.
     pub lines: Vec<(String, Tone, String)>,
-    /// The most lines there could be, each as long as it could be: the room kept under them, so
-    /// the popup's size and place stay the same whatever `lines` holds.
-    pub room: Vec<String>,
+    /// The most lines there could be, each as long as it could be: where the popup goes is
+    /// worked out for them, so it never moves whatever `lines` holds.
+    pub most: Vec<String>,
 }
 
 impl Ui {
@@ -173,7 +176,8 @@ impl Ui {
                 true
             })
             .child(mark(el().absolute(2.0, (1.0 - at.s) * h - 3.0).size(BAR - 4.0, 6.0).radius(3.0)));
-        let PopupParts { field, button, lines, room } = parts;
+        let PopupParts { field, button, lines, most } = parts;
+        let line = |line: String| text(line).font(k.ty.text_small).wrap();
         let mut body = col()
             .key(format!("{key}-content"))
             .w(POPUP_WIDTH)
@@ -181,21 +185,34 @@ impl Ui {
             .gap(GAP + 2.0)
             .child(row().gap(GAP + GAP).child(square).child(bar))
             .child(row().gap(GAP).items_stretch().child(field).child(button));
-        if !room.is_empty() || !lines.is_empty() {
-            // The room the lines could take, unseen; the lines over it, from its top.
-            let ghost = |line: String| text(line).font(k.ty.text_small).color(rune::Color::TRANSPARENT).wrap();
-            let kept = col().gap(GAP + 2.0).children(room.into_iter().map(ghost)).a11y_hidden().inert();
-            let mut shown = col().absolute(0.0, 0.0).w_full().gap(GAP + 2.0);
-            for (line, tone, line_key) in lines {
-                shown = shown.child(text(line).key(line_key).font(k.ty.text_small).color(self.tone_color(tone)).wrap());
-            }
-            body = body.child(col().key(format!("{key}-lines")).w_full().child(kept).child(shown));
+        for (text, tone, line_key) in lines {
+            body = body.child(line(text).key(line_key).color(self.tone_color(tone)));
         }
         let surface = popover::raised(k, body, k.radius.md)
             .border(1.0, self.colors.border_on_page)
             .key(format!("{key}-popup"))
             .role("dialog")
             .label("Color".to_owned());
+        // The popup as tall as it could get, unseen: beside the swatch, top edges level if it
+        // fits below, else bottom edges level. The popup takes the same place and keeps that
+        // edge, so warnings coming and going grow and shrink it away from it, never moving it.
+        let tallest = col()
+            .w(POPUP_WIDTH)
+            .padding(PAD)
+            .gap(GAP + 2.0)
+            .child(el().h(SQUARE.1))
+            .child(el().h(FIELD_HEIGHT))
+            .children(most.into_iter().map(|l| line(l).color(rune::Color::TRANSPARENT)))
+            .border(1.0, rune::Color::TRANSPARENT);
+        let room_key = format!("{key}-room");
+        let (side, align) = rune::memo::anchor_placement(&room_key).unwrap_or((Side::Right, Align::Start));
+        let placement = match (side, align) {
+            (Side::Left, Align::End) => Placement::LeftEnd,
+            (Side::Left, _) => Placement::LeftStart,
+            (_, Align::End) => Placement::RightEnd,
+            _ => Placement::RightStart,
+        };
+        let room = tallest.key(room_key).anchored(anchor, Side::Right, Align::Start, GAP).a11y_hidden().inert();
         // Modal over the sheet, with its own scrim inside it: a press outside closes it as
         // `on_close` says, Escape as `on_escape` does.
         let scope = el()
@@ -204,7 +221,8 @@ impl Ui {
             .w_full()
             .h_full()
             .child(rune_kit::scrim(format!("{key}-scrim"), on_close))
-            .child(popover::anchored(k, surface, anchor, Placement::RightStart, GAP))
+            .child(room)
+            .child(popover::anchored(k, surface, anchor, placement, GAP))
             .modal(false, on_escape);
         layer.push(scope);
     }

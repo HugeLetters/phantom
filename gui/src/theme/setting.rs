@@ -219,7 +219,7 @@ impl Resolved {
     }
 
     /// The warnings setting `key` could have at most, each as long as it could be, whatever it's
-    /// set to: the room its picker keeps for them, so it never grows while a drag goes.
+    /// set to: what its picker is placed for, so it never moves while a drag goes.
     pub fn room(&self, key: &str) -> Vec<&str> {
         self.room.iter().filter(|(k, _)| *k == key).map(|(_, w)| w.as_str()).collect()
     }

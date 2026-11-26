@@ -358,7 +358,7 @@ fn warnings(p: &Palette, today: &Palette) -> Vec<(&'static str, String)> {
 }
 
 /// Every warning there could be, each as long as it can be (its ratio "0.0"), about the setting
-/// whose popup shows it: what the popup keeps room for.
+/// whose popup shows it: what the popup is placed for.
 fn room() -> Vec<(&'static str, String)> {
     pairs().into_iter().map(|pair| (pair.key, pair.line(0.0))).collect()
 }
