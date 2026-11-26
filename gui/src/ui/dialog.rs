@@ -65,10 +65,10 @@ impl Ui {
             .on_key(on_key);
         // Dark: a wash of the text's colour over the raised surface, lifting it off the window.
         let panel = match self.colours.dialog_wash {
-            Some(wash) => panel.radius(8.0).fill(wash),
+            Some(wash) => panel.radius(k.radius.lg).fill(wash),
             None => panel,
         };
-        let surface = popover::raised(k, panel, 8.0);
+        let surface = popover::raised(k, panel, k.radius.lg);
         let surface = match self.colours.dialog_fill {
             Some(fill) => surface.fill(fill),
             None => surface,

@@ -95,7 +95,7 @@ impl Ui {
                 .h(self.spacing.palette_row)
                 .px(self.spacing.s5)
                 .gap(self.spacing.s5)
-                .radius(4.0)
+                .radius(k.radius.sm)
                 .center_y()
                 .child(match r.icon {
                     Some(i) => icon(self.icon(i), 14.0).key("icon").color(c.icon_base).a11y_hidden(),
@@ -122,7 +122,7 @@ impl Ui {
             .w(width)
             .shrink()
             .min_h(0.0)
-            .radius(8.0)
+            .radius(k.radius.lg)
             .fill(c.layer_01)
             .border(1.0, self.colours.border_on_page)
             .child(search)
