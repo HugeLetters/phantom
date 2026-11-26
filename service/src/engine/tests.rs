@@ -356,6 +356,8 @@ async fn a_partial_delete_outlasts_its_drive_going_and_a_restart_meanwhile() {
     let engine = start().await;
     let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), false).await.unwrap();
     let (a, b) = (downloads.join("pack/a.bin"), downloads.join("pack/b.bin"));
+    // Its folder is made with its files as it starts, after the add (#374, #439).
+    assert!(eventually(10, || a.exists() && b.exists()).await, "its files are made as it starts");
     std::fs::write(downloads.join("pack/mine.txt"), b"mine").unwrap();
     *refusing.lock().unwrap() = vec![a.clone()];
     refusal(engine.command(added.id, TorrentCommand::Delete).await);
@@ -5906,9 +5908,10 @@ async fn the_undo_of_a_move_to_trash_puts_the_old_copy_back_over_a_new_download(
         }
         engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
         engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Normal }).await.unwrap();
-        // The new copy, as far as it got.
+        // The new copy, as far as it got: made as librqbit gets it, once it's added back without
+        // the pieces it let go of (#374, #436), Downloading meanwhile.
         until(&engine, id, |s| *s == Status::Downloading).await;
-        assert!(path.exists(), "made again at its path");
+        assert!(eventually(10, || path.exists()).await, "made again at its path");
         assert_ne!(std::fs::read(&path).unwrap(), old);
         assert_eq!(stack(&engine).await, [proto::UndoAction::TrashFiles { count: 1 }], "still undoable");
         engine.undo().await.unwrap();

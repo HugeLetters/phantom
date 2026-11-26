@@ -638,6 +638,13 @@ impl Model {
             Some(Torrent::Pack(p)) => self.in_trash_now(p.pack),
             _ => [false; FILES],
         };
+        // The files that another file replaced at their path since librqbit opened them.
+        let replaced: [bool; FILES] = match self.torrents.get(&id) {
+            Some(Torrent::Pack(p)) => {
+                std::array::from_fn(|f| self.disk[p.pack][f] != OnDisk::Absent && p.open[f] != Some(self.inodes[p.pack][f]))
+            }
+            _ => [false; FILES],
+        };
         let (disk, folder, held) = (&mut self.disk, &mut self.folder, self.checks_held);
         let Some(torrent) = self.torrents.get_mut(&id) else { return Answer::Err };
         let p = match torrent {
@@ -673,9 +680,11 @@ impl Model {
             Step::CancelCheck(_) => p.cancel(),
             Step::Pause(_) => p.running = false,
             Step::Resume(_) => {
+                let started = !p.running && p.checking.is_none() && !p.letting_go;
                 p.running = true;
-                // Missing files, or Unchecked, are checked first.
-                if missing || p.unchecked {
+                // Missing files, or Unchecked, are checked first; as is one a file replaced by hand
+                // while it was stopped, which its start's grant finds isn't the file it read (#374, #438).
+                if missing || p.unchecked || (started && (0..FILES).any(|f| !p.off[f] && replaced[f])) {
                     p.check(&mut disk[pack], &mut folder[pack], held, BTreeMap::new(), away);
                 }
             }
@@ -683,7 +692,14 @@ impl Model {
             Step::Check(_) if p.checking.is_some() => {}
             Step::Check(_) => p.check(&mut disk[pack], &mut folder[pack], held, BTreeMap::new(), away),
             Step::SetPriority { file, priority, .. } => {
+                let live = matches!(p.status(), Status::Seeding | Status::Downloading) && !p.letting_go;
+                let changed = p.off[*file] != (*priority == Priority::Off);
                 p.off[*file] = *priority == Priority::Off;
+                // Running, its new choice is handed to librqbit once its files are granted: one a file
+                // replaced by hand isn't the one its check read, so it's checked again (#374, #438).
+                if live && changed && (0..FILES).any(|f| !p.off[f] && replaced[f]) {
+                    p.check(&mut disk[pack], &mut folder[pack], held, BTreeMap::new(), away);
+                }
                 if *priority == Priority::Off {
                     // Missing, set Off: it's let go of (#244's re-check), librqbit offering none of its
                     // pieces once the torrent runs again; but for one in the Trash, read where it went.
@@ -1098,6 +1114,9 @@ impl Model {
                 // A check under way when it went is over: it's checked again in full.
                 let checking = p.checking.take().is_some();
                 p.reopens = true;
+                // Added again, it has no file open: one it had made, gone since, is made again as it
+                // starts, not Missing files (#374).
+                p.granted = [false; FILES];
                 // The destination is available now (else the Undo was refused above): one removed
                 // while it was gone is added again with it back, and runs if it was running (#202).
                 let was_unavailable = std::mem::take(&mut p.unavailable);
@@ -1250,8 +1269,16 @@ impl Model {
         // The Deletes, in the order they came.
         deletes.sort_by_key(|(at, _)| *at);
         self.came.clear();
-        // Then what waited behind the rollbacks, in the order it came.
-        let behind = std::mem::take(&mut self.behind).into_iter().map(|b| self.after_rollback(b)).collect();
+        // Then what waited behind the rollbacks, in the order it came, each once what ran before it
+        // has started, its files granted (#374).
+        let behind = std::mem::take(&mut self.behind)
+            .into_iter()
+            .map(|b| {
+                self.reopen();
+                self.grant_running();
+                self.after_rollback(b)
+            })
+            .collect();
         Answer::Released { deletes: deletes.into_iter().map(|(_, d)| d).collect(), undos, behind }
     }
 
@@ -2347,10 +2374,20 @@ impl Model {
     /// pieces, has its files as they are now, and one missing is closed.
     fn open_files(&mut self, disk_before: [[OnDisk; FILES]; PACKS], undo: bool) {
         for (k, f) in (0..PACKS).flat_map(|k| (0..FILES).map(move |f| (k, f))) {
-            if !undo && disk_before[k][f] == OnDisk::Absent && self.disk[k][f] == OnDisk::Sparse {
+            // Not one a grant made during the step: that one has its inode, and is open.
+            let granted =
+                self.torrents.values().any(|t| matches!(t, Torrent::Pack(p) if p.pack == k && p.open[f] == Some(self.inodes[k][f])));
+            if !undo && !granted && disk_before[k][f] == OnDisk::Absent && self.disk[k][f] == OnDisk::Sparse {
                 self.new_inode(k, f);
             }
         }
+        self.reopen();
+        self.grant_running();
+    }
+
+    /// A torrent added again, or added back as it let go of pieces, has its files open as they are
+    /// now; one missing is closed.
+    fn reopen(&mut self) {
         let aways = self.aways();
         for (id, t) in &mut self.torrents {
             let Torrent::Pack(p) = t else { continue };
@@ -2373,7 +2410,6 @@ impl Model {
                 p.open[f] = None;
             }
         }
-        self.grant_running();
     }
 
     /// Each torrent let run has its files granted, those not there made (#374): as it starts, before
@@ -3937,5 +3973,83 @@ fn a_cancel_check_once_the_destination_is_gone_is_refused() {
         CancelCheck(1),
         DestinationBack { pack: 1 },
         CancelCheck(1),
+    ]);
+}
+
+/// #438, found by a 256-case run: the model was wrong. A file overwritten by hand while its torrent
+/// is stopped isn't the one its check read, so its start's grant has it checked again (#374): it's
+/// Downloading what that file lacks, not Seeding from the file librqbit had open.
+#[test]
+fn a_file_overwritten_by_hand_while_stopped_is_checked_as_its_torrent_starts() {
+    use Step::*;
+    for pack in [0, 1] {
+        replay(&[Add { pack: Some(pack), paused: true }, Overwrite { pack, file: 0 }, Resume(0)]);
+    }
+}
+
+/// #438, found by a 256-case run: the model was wrong. A file overwritten by hand as its torrent
+/// runs is caught once another file is set Normal: the grant that comes first finds it isn't the
+/// file its check read, so the torrent is checked again (#374).
+#[test]
+fn a_file_overwritten_by_hand_as_its_torrent_runs_is_checked_at_its_next_choice() {
+    use Step::*;
+    replay(&[
+        Add { pack: Some(0), paused: false },
+        SetPriority { id: 0, file: 2, priority: Priority::Off },
+        Overwrite { pack: 0, file: 0 },
+        SetPriority { id: 0, file: 2, priority: Priority::Normal },
+    ]);
+}
+
+/// Found by a 256-case run for #438: the model was wrong. A torrent whose Delete is undone is added
+/// again with no file open, so a file it had made, deleted by hand since, is made again as it
+/// starts (#374): Downloading, not Missing files.
+#[test]
+fn a_file_made_then_deleted_by_hand_is_made_again_once_its_torrents_delete_is_undone() {
+    use Step::*;
+    replay(&[
+        DeleteFile { pack: 0, file: 1 },
+        Add { pack: Some(0), paused: false },
+        DeleteFile { pack: 0, file: 1 },
+        Burst(vec![HoldTrash, Delete(0)]),
+        Undo,
+        ReleaseTrash,
+    ]);
+}
+
+/// Found by a 256-case run for #438: the model was wrong. A Pause sent while an aborted Delete is
+/// rolled back comes once the torrent is back running, so its start has made the file deleted by
+/// hand meanwhile (#374): it's paused with that file there, empty.
+#[test]
+fn a_pause_behind_a_delete_undone_comes_once_its_torrent_has_started() {
+    use Step::*;
+    replay(&[
+        Add { pack: None, paused: false },
+        Add { pack: Some(0), paused: true },
+        HoldTrash,
+        Resume(1),
+        DeleteFile { pack: 0, file: 0 },
+        Delete(1),
+        Undo,
+        Pause(1),
+        ReleaseTrash,
+    ]);
+}
+
+/// Found by a 256-case run for #438: the model was wrong. What waits behind an aborted Delete's
+/// rollback runs in turn, each after what came before it has started: a Resume grants the files,
+/// making the one deleted by hand, before a Move to Trash of them all takes it too (#374).
+#[test]
+fn what_waits_behind_a_delete_undone_runs_once_what_came_before_it_has_started() {
+    use Step::*;
+    replay(&[
+        Add { pack: None, paused: false },
+        DeleteFile { pack: 1, file: 0 },
+        Add { pack: Some(1), paused: true },
+        Burst(vec![HoldTrash, Delete(1)]),
+        Undo,
+        Resume(1),
+        TrashFiles { id: 1, files: vec![0, 1, 2] },
+        ReleaseTrash,
     ]);
 }
