@@ -5117,3 +5117,89 @@ fn space_presses_what_tab_reaches_on_the_look_sheet() {
     key(&mut d, space);
     assert!(!open(&d), "Space on Done closes the sheet");
 }
+
+/// On the Look Preset's sheet, Return presses Done, the default button, wherever the focus is,
+/// as in a macOS sheet: on a Tone segment, a swatch, Split, Theme's pop-up and Cancel (Space
+/// presses the focused button; Return, the default one). Where Return means something already,
+/// it does that instead: in a picker's hex field it applies the color typed, and with the picker
+/// open the sheet stays; on Corners' pop-up menu it opens the menu.
+#[test]
+fn return_presses_done_on_the_look_sheet() {
+    let enter = |d: &mut Desk| {
+        d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+        d.settle();
+    };
+    let open = |d: &Desk| d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some();
+    let tone = |d: &Desk| d.main.state.looks.borrow().preset().light.settings.get("tone");
+    for (at, keeps) in [
+        ("edit-tone-light", "the Tone the arrow picked"),
+        ("edit-accent-light-swatch", "a swatch"),
+        ("edit-theme-split", "Split"),
+        ("edit-theme-both-trigger", "Theme's pop-up"),
+        ("edit-cancel", "Cancel"),
+    ] {
+        let mut d = appearance_tab();
+        press(&mut d, "active-edit");
+        let before = tone(&d);
+        tab_to(&mut d, "edit-tone-light");
+        d.settings.key(KeyEvent { key: Key::Right, mods: Mods::default() });
+        d.settle();
+        let picked = tone(&d);
+        assert_ne!(picked, before, "the arrow picks Light's next Tone");
+        // Picking a Tone can join the colors' rows, which follow it.
+        let at = if at == "edit-accent-light-swatch" && d.settings.find(at).is_none() { "edit-accent-both-swatch" } else { at };
+        tab_to(&mut d, at);
+        enter(&mut d);
+        assert!(!open(&d), "Return on {at} presses Done");
+        assert_eq!(tone(&d), picked, "Done keeps what the sheet changed, with {keeps} focused");
+        assert!(d.settings.state.sheet.as_ref().is_none_or(|s| s.editor().is_none()), "no picker or menu left open");
+    }
+    // A pop-up menu opens on Return, as it does on Space.
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    tab_to(&mut d, "edit-corners-both-trigger");
+    enter(&mut d);
+    assert!(open(&d), "Return on Corners opens its menu, not Done");
+    assert!(d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.menu.is_some()), "its menu");
+    // In a picker's hex field, Return applies the color; the picker and the sheet stay.
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    type_into(&mut d, "edit-accent-light", "#6526d4");
+    enter(&mut d);
+    assert_eq!(color_of(&d, Appearance::Light, "accent"), Some(Value::Color(Some(Rgb::parse("#6526d4").unwrap()))), "the hex applied");
+    assert!(open(&d), "Return in the hex field leaves the sheet open");
+    assert!(d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.picker.is_some()), "and its picker");
+    // On the picker's square, Return leaves the sheet open; Escape closes the picker, then Return
+    // presses Done.
+    tab_to(&mut d, "edit-accent-light-square");
+    enter(&mut d);
+    assert!(open(&d), "with the picker open, Return leaves the sheet open");
+    d.settings.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+    d.settle();
+    assert!(
+        open(&d) && d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.picker.is_none()),
+        "Escape closes the picker"
+    );
+    enter(&mut d);
+    assert!(!open(&d), "then Return presses Done");
+    assert_eq!(color_of(&d, Appearance::Light, "accent"), Some(Value::Color(Some(Rgb::parse("#6526d4").unwrap()))), "the color kept");
+}
+
+/// On the App icon's sheet, Return presses Done too, with nothing focused or with a tile focused.
+#[test]
+fn return_presses_done_on_the_app_icons_sheet() {
+    let icons = |d: &Desk| d.settings.state.sheet.as_ref().is_some_and(|s| s.icons.is_some());
+    for tab in [false, true] {
+        let mut d = appearance_tab();
+        press(&mut d, "app-icon-edit");
+        assert!(icons(&d), "its sheet");
+        if tab {
+            d.settings.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+            d.settle();
+            assert!(super::focus_path(&d.settings).is_some_and(|p| p.contains("icons-sheet")), "the focus in the sheet");
+        }
+        d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+        d.settle();
+        assert!(!icons(&d), "Return presses Done (focus in the sheet: {tab})");
+    }
+}

@@ -364,8 +364,9 @@ impl Ui {
     /// one; as tall as they are, up to the window less the title band above and 20 pt below, past
     /// which the body
     /// scrolls; up to `max_w` wide. Modal, keyed `<key>-sheet`, over a scrim. Escape calls
-    /// `on_escape`, Done `on_done`. Tab reaches Cancel and Done with Full Keyboard Access off. The
-    /// overlays to draw it with ([`Ui::root`]).
+    /// `on_escape`, Done `on_done`, as does Return wherever the focus is (Done is the default
+    /// button), unless the focused control takes Return itself. Tab reaches Cancel and Done with
+    /// Full Keyboard Access off. The overlays to draw it with ([`Ui::root`]).
     #[allow(clippy::too_many_arguments)]
     pub fn over_sheet<S: 'static>(
         &self,
@@ -393,7 +394,7 @@ impl Ui {
             .gap(self.spacing.s4)
             .justify_end()
             .children(cancel)
-            .child(self.button(format!("{key}-done"), "Done").primary().tab_stop().on_press(on_done).build());
+            .child(self.button(format!("{key}-done"), "Done").primary().default_button().tab_stop().on_press(on_done).build());
         let panel = col()
             .key(format!("{key}-sheet"))
             .role("dialog")

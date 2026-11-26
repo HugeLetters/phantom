@@ -18,6 +18,8 @@ pub struct Button<'a> {
     first_focus: bool,
     /// Tab reaches it with Full Keyboard Access off ([`super::tab_stop`]).
     tab_stop: bool,
+    /// Return presses it wherever the focus is, unless the focused control takes Return itself.
+    default: bool,
     /// What VoiceOver reads, when the label it shows doesn't say it (a glyph).
     accessible: Option<String>,
     fill: bool,
@@ -38,6 +40,7 @@ impl Ui {
             when_disabled: None,
             first_focus: false,
             tab_stop: false,
+            default: false,
             accessible: None,
             fill: false,
             hint: None,
@@ -99,6 +102,14 @@ impl Button<'_> {
     /// controls that are all Tab stops (a color's picker).
     pub fn tab_stop(mut self) -> Self {
         self.tab_stop = true;
+        self
+    }
+
+    /// The window's or sheet's default button: Return presses it wherever the focus is, unless the
+    /// focused control takes Return itself (a text field, a pop-up menu); Space still presses the
+    /// focused control. Drawn as it is otherwise.
+    pub fn default_button(mut self) -> Self {
+        self.default = true;
         self
     }
 
@@ -164,6 +175,9 @@ impl Button<'_> {
         }
         if self.tab_stop {
             built = super::tab_stop(built);
+        }
+        if self.default {
+            built = built.default_button();
         }
         let button = keyed(self.key, if self.first_focus { built.tab_index(1) } else { built });
         match self.when_disabled {
