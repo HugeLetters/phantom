@@ -61,9 +61,9 @@ impl Rgb {
         format!("#{r:02x}{g:02x}{b:02x}")
     }
 
+    /// The colour as Rune holds it: linear, decoded from the sRGB bytes by Rune's own `hex`.
     pub fn color(self) -> rune::Color {
-        let [r, g, b] = self.0.map(|c| f32::from(c) / 255.0);
-        rune::Color { r, g, b, a: 1.0 }
+        rune::color::hex(&self.hex()).expect("`hex` is always `#rrggbb`")
     }
 }
 
@@ -174,6 +174,14 @@ pub(crate) mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// A picked colour is sRGB; `rune::Color` is linear, so it is decoded as Rune decodes a hex.
+    #[test]
+    fn a_picked_colour_is_decoded_from_srgb() {
+        let picked = Rgb::parse("#2f7fe3").unwrap().color();
+        assert_eq!(picked, rune::color::hex("#2f7fe3").unwrap());
+        assert!(picked.r < 0.1, "0x2f as linear is 0.18, as sRGB 0.03");
+    }
 
     /// One setting of every kind.
     pub static SAMPLE: [Setting; 3] = [
