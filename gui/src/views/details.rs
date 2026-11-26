@@ -26,7 +26,7 @@ use proto::{Action, File, Priority, TorrentInfo};
 use rune::{Align, El, ScrollSpec, Tx, col, el, row};
 
 use crate::commands::OnTorrents;
-use crate::model::layout::{Header, INFO_LINE, INFO_PAD, LINE, NAME_LINE, NO_FILES, PaneContent, PaneTab, TABS};
+use crate::model::layout::{Header, PaneContent, PaneTab};
 use crate::model::{Phantom, copy_magnet, cycle_priority, renaming, reveal_target, size_label, sort_files};
 use crate::shortcuts;
 use crate::ui::{TEXT_INSET, Table, TableColumn, Tone, Ui};
@@ -73,12 +73,6 @@ const NAME_CAP: f32 = 0.6;
 /// The share of the header's width the reason may take on the right.
 const REASON_CAP: f32 = 0.6;
 
-/// The header's side padding.
-const HEADER_INSET: f32 = 10.0;
-
-/// The room between a header line's two sides.
-const SIDES_GAP: f32 = 16.0;
-
 pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
     // The header offers Rename…, as its name is where the field opens (ADR 0013).
     s.mounted.offer([OnTorrents::Rename]);
@@ -90,8 +84,8 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
         None => String::new(),
     };
     let reason = reason(s, t);
-    // The header's text runs from the pane's inset to its edge.
-    let room = shape.width - 2.0 * HEADER_INSET;
+    // The header's text runs from the pane's inset (its side padding) to its edge.
+    let room = shape.width - 2.0 * ui.spacing().s5;
 
     // The name, shortened in the middle to what the right side leaves; its hover is the whole of
     // it where it was cut, and after a Rename the original name under it, with no label (#331). rune's tooltip is one plain
@@ -127,12 +121,12 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
             let side = display::size_and_off(t.content.as_ref());
             let side_width = ui.caption_width(&side);
             let side = ui.caption(side).key("details-side");
-            let gap = || el().grow(1.0).min_w(SIDES_GAP);
+            let gap = || el().grow(1.0).min_w(ui.spacing().s7);
             let first = row()
                 .w_full()
-                .h(NAME_LINE)
+                .h(ui.spacing().pane_name_line)
                 .center_y()
-                .child(heading((room - side_width - SIDES_GAP).min(room * NAME_CAP)))
+                .child(heading((room - side_width - ui.spacing().s7).min(room * NAME_CAP)))
                 .child(gap())
                 .child(side);
             // The path's line: the problem whole, the path shortened to what it leaves.
@@ -147,15 +141,23 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
                     },
                 )
             });
-            let path_room = room - SIDES_GAP - reason.as_ref().map_or(0.0, |(w, _)| *w);
+            let path_room = room - ui.spacing().s7 - reason.as_ref().map_or(0.0, |(w, _)| *w);
             let second = row()
                 .w_full()
-                .h(LINE)
+                .h(ui.spacing().pane_line)
                 .center_y()
                 .child(where_(path_room.min(room * NAME_CAP)))
                 .child(gap())
                 .children(reason.map(|(_, r)| r));
-            col().key("details-header").instant_changes().w_full().px(HEADER_INSET).pt(8.0).pb(6.0).child(first).child(second)
+            col()
+                .key("details-header")
+                .instant_changes()
+                .w_full()
+                .px(ui.spacing().s5)
+                .pt(ui.spacing().s4)
+                .pb(ui.spacing().s3)
+                .child(first)
+                .child(second)
         }
         // One line: name · size · where; the problem it has on hover.
         Header::OneLine => {
@@ -163,13 +165,20 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
             let size = ui.caption(size_label(t)).key("details-side");
             let line = row()
                 .w_full()
-                .h(NAME_LINE)
-                .gap(8.0)
+                .h(ui.spacing().pane_name_line)
+                .gap(ui.spacing().s4)
                 .center_y()
                 .child(heading(name_room))
                 .child(size)
-                .child(row().gap(8.0).min_w(0.0).shrink().grow(1.0).child(ui.caption("·")).child(where_(room - name_room)));
-            let line = col().key("details-header").instant_changes().w_full().px(HEADER_INSET).pt(8.0).pb(6.0).child(line);
+                .child(row().gap(ui.spacing().s4).min_w(0.0).shrink().grow(1.0).child(ui.caption("·")).child(where_(room - name_room)));
+            let line = col()
+                .key("details-header")
+                .instant_changes()
+                .w_full()
+                .px(ui.spacing().s5)
+                .pt(ui.spacing().s4)
+                .pb(ui.spacing().s3)
+                .child(line);
             match reason {
                 Some((line_, _)) => line.help(line_),
                 None => line,
@@ -186,10 +195,10 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
             })
             .collect(),
     );
-    let tabs = tabs.key("pane-tabs").w_full().h(TABS);
+    let tabs = tabs.key("pane-tabs").w_full().h(ui.spacing().pane_tabs);
     let body = match tab {
         PaneTab::Files if fetching => {
-            ui.empty_state("No files yet", "They show once the torrent's info arrives").key("no-files").h(NO_FILES)
+            ui.empty_state("No files yet", "They show once the torrent's info arrives").key("no-files").h(ui.spacing().no_files)
         }
         PaneTab::Files if s.pane.details.is_some() => file_table(s, ui, t.actions.does(Action::SetPriority)),
         PaneTab::Files => el().grow(1.0),
@@ -208,7 +217,7 @@ fn rename_field(s: &Phantom, ui: &Ui, room: f32) -> El {
         .text_field("rename-field", &s.rename.field, "Name")
         .plain()
         .text_style(font)
-        .height(NAME_LINE)
+        .height(ui.spacing().pane_name_line)
         .on_edit(|s: &mut Phantom| &mut s.rename.field)
         .on_submit(|s: &mut Phantom, _| renaming::submit(s))
         .on_key(|s: &mut Phantom, ev: &rune::KeyEvent, _: &mut Tx| match ev.key {
@@ -221,7 +230,8 @@ fn rename_field(s: &Phantom, ui: &Ui, room: f32) -> El {
         .build()
         .grow(1.0)
         .min_w(0.0);
-    let field = ui.in_place(row().w_full().h(NAME_LINE).child(field), behind).w(room + TEXT_INSET).h(NAME_LINE);
+    let field =
+        ui.in_place(row().w_full().h(ui.spacing().pane_name_line).child(field), behind).w(room + TEXT_INSET).h(ui.spacing().pane_name_line);
     row().key(RENAME_FIELD).ml(-TEXT_INSET).shrink().min_w(0.0).child(field).child(ui.focus_goes_nowhere())
 }
 
@@ -234,7 +244,8 @@ pub const RENAME_FIELD: &str = "rename-over";
 fn info(ui: &Ui, t: &TorrentInfo) -> El {
     let lines = info_lines(t).into_iter().map(|(label, text, key)| {
         let value = ui.caption(text.clone()).key(key).truncate().min_w(0.0).shrink().help(text);
-        let line = row().w_full().h(INFO_LINE).gap(12.0).center_y().child(ui.caption(label).w(INFO_LABEL)).child(value);
+        let line =
+            row().w_full().h(ui.spacing().info_line).gap(ui.spacing().s6).center_y().child(ui.caption(label).w(INFO_LABEL)).child(value);
         if key == "info-magnet" {
             line.child(el().grow(1.0)).child(ui.button("copy-magnet", display::copy()).on_press_tx(copy_magnet).build())
         } else {
@@ -246,7 +257,7 @@ fn info(ui: &Ui, t: &TorrentInfo) -> El {
         .key("info")
         .w_full()
         .scroll(ScrollSpec { stick_bottom: false })
-        .child(col().w_full().px(HEADER_INSET).py(INFO_PAD).children(lines))
+        .child(col().w_full().px(ui.spacing().s5).py(ui.spacing().info_pad).children(lines))
 }
 
 /// The width of the Info tab's labels, so the texts line up.

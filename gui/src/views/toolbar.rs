@@ -17,50 +17,47 @@ use crate::model::{AddNote, Phantom, add_files, link_problem, submit_url};
 use crate::notice::Notice;
 use crate::ui::{BandSide, Ui};
 
-/// The titlebar band's height, which the toolbar fills.
-pub const BAND: f32 = 40.0;
-
 /// The widest the link field gets; the narrowest, before the band's free room gives way.
 pub const FIELD_MAX: f32 = 460.0;
 const FIELD_LEAST: f32 = 120.0;
 /// The least free room either side of the field, to drag the window by.
 pub const DRAG_MIN: f32 = 12.0;
-/// The band's edge, past the traffic lights or the window's, and the gap between its controls.
-const EDGE: f32 = 12.0;
-const GAP: f32 = 6.0;
 
 /// The field's placeholder, the longest that fits whole.
 pub const PLACEHOLDERS: [&str; 3] =
     ["Paste a magnet link, .torrent URL or info hash", "Magnet link, .torrent URL or info hash", "Magnet link or info hash"];
 
 /// The band's room, as last laid out: the window's width, where the traffic lights end (0 in full
-/// screen), and how wide Add and Add file… are.
+/// screen), and how wide Add and Add file… are; its edge, past the traffic lights or the window's,
+/// and the gap between its controls, as the look spaces them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Band {
     pub width: f32,
     pub inset: f32,
     pub add: f32,
     pub add_file: f32,
+    pub edge: f32,
+    pub gap: f32,
 }
 
 impl Band {
     /// Where the band's controls start: past the traffic lights, or the window's edge.
     fn lead(self) -> f32 {
-        if self.inset > 0.0 { self.inset + EDGE } else { EDGE }
+        if self.inset > 0.0 { self.inset + self.edge } else { self.edge }
     }
 
     /// What the band holds besides the field and its free room: the edges, Add, Add file… and the
     /// gaps between.
     fn fixed(self) -> f32 {
-        self.lead() + self.add + self.add_file + EDGE + 4.0 * GAP
+        self.lead() + self.add + self.add_file + self.edge + 4.0 * self.gap
     }
 
     /// The field's width: as wide as keeping it (with Add at its end) in the window's middle
     /// leaves, up to [`FIELD_MAX`].
     pub fn field(self) -> f32 {
-        let left = self.lead() + GAP + DRAG_MIN;
-        let right = 2.0 * GAP + self.add_file + DRAG_MIN + EDGE;
-        let centred = self.width - 2.0 * left.max(right) - GAP - self.add;
+        let left = self.lead() + self.gap + DRAG_MIN;
+        let right = 2.0 * self.gap + self.add_file + DRAG_MIN + self.edge;
+        let centred = self.width - 2.0 * left.max(right) - self.gap - self.add;
         let room = self.width - self.fixed() - 2.0 * DRAG_MIN;
         centred.min(room).clamp(FIELD_LEAST, FIELD_MAX)
     }
@@ -69,7 +66,7 @@ impl Band {
     /// keeps the field and Add in the window's middle, the rest on the right.
     fn free(self) -> (f32, f32) {
         let free = (self.width - self.fixed() - self.field()).max(2.0 * DRAG_MIN);
-        let middle = self.width / 2.0 - (self.field() + GAP + self.add) / 2.0 - self.lead() - GAP;
+        let middle = self.width / 2.0 - (self.field() + self.gap + self.add) / 2.0 - self.lead() - self.gap;
         let left = middle.clamp(DRAG_MIN, free - DRAG_MIN);
         (left, free - left)
     }
@@ -109,7 +106,7 @@ pub fn toolbar(s: &Phantom, ui: &Ui, band: Band, overlays: &mut Vec<El>) -> El {
         .build();
     let field = row()
         .key("band-field")
-        .gap(GAP)
+        .gap(band.gap)
         .center_y()
         .child(row().w(band.field()).child(field.grow(1.0).min_w(0.0)))
         .child(add)
@@ -122,10 +119,10 @@ pub fn toolbar(s: &Phantom, ui: &Ui, band: Band, overlays: &mut Vec<El>) -> El {
     row()
         .key("toolbar")
         .w_full()
-        .h(BAND)
+        .h(ui.spacing().toolbar)
         .pl(band.lead())
-        .pr(EDGE)
-        .gap(GAP)
+        .pr(band.edge)
+        .gap(band.gap)
         .center_y()
         .window_drag()
         .child(free("band-left", BandSide::Left, left))

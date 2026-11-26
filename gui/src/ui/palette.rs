@@ -55,16 +55,21 @@ impl Ui {
         let search = row()
             .key("search")
             .w_full()
-            .px(12.0)
-            .py(10.0)
-            .gap(8.0)
+            .px(self.spacing.s6)
+            .py(self.spacing.s5)
+            .gap(self.spacing.s4)
             .center_y()
             .child(icon(self.icon(Icon::Search), 16.0).color(c.icon_base).a11y_hidden())
             .child(field.grow(1.0).min_w(0.0));
-        let mut list = col().key("rows").role("listbox").w_full().items_stretch().padding(4.0);
+        let mut list = col().key("rows").role("listbox").w_full().items_stretch().padding(self.spacing.s2);
         if rows.is_empty() {
             list = list.child(
-                row().key("empty").h(32.0).px(10.0).center_y().child(text(empty.to_owned()).font(k.ty.ui_compact).color(c.text_faint)),
+                row()
+                    .key("empty")
+                    .h(self.spacing.palette_row)
+                    .px(self.spacing.s5)
+                    .center_y()
+                    .child(text(empty.to_owned()).font(k.ty.ui_compact).color(c.text_faint)),
             );
         }
         for (i, r) in rows.into_iter().enumerate() {
@@ -75,9 +80,9 @@ impl Ui {
                         .role("heading")
                         .label(heading.clone())
                         .w_full()
-                        .h(28.0)
-                        .px(10.0)
-                        .pt(8.0)
+                        .h(self.spacing.palette_section)
+                        .px(self.spacing.s5)
+                        .pt(self.spacing.s4)
                         .center_y()
                         .child(text(heading).font(k.ty.small_medium).color(c.text_faint).truncate().grow(1.0).shrink()),
                 );
@@ -87,9 +92,9 @@ impl Ui {
                 .key(row_key(i))
                 .role("option")
                 .label(r.label.clone())
-                .h(32.0)
-                .px(10.0)
-                .gap(10.0)
+                .h(self.spacing.palette_row)
+                .px(self.spacing.s5)
+                .gap(self.spacing.s5)
                 .radius(4.0)
                 .center_y()
                 .child(match r.icon {
@@ -136,7 +141,7 @@ impl Ui {
                 .w_full()
                 .h_full()
                 .pt(TOP)
-                .pb(16.0)
+                .pb(self.spacing.s7)
                 .pl(left)
                 .pr(SIDE)
                 .items_start()

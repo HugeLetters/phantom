@@ -6,7 +6,7 @@
 use rune_kit::Kit;
 
 use super::setting::{Choice, Kind, Rgb, Setting, Value, Values};
-use super::{Built, Colours, Theme, phantom};
+use super::{Built, Colours, Spacing, Theme, phantom};
 
 pub struct StandIn;
 
@@ -45,6 +45,13 @@ impl Theme for StandIn {
             tokens.c.bg_accent = rgb.color();
             tokens.c.border_focus = rgb.color();
         }
-        Built { colours: Colours::of(&tokens), tokens, blocks: Default::default(), screens: Default::default(), app_icon: "dark-hour" }
+        Built {
+            colours: Colours::of(&tokens),
+            spacing: Spacing::phantom(),
+            tokens,
+            blocks: Default::default(),
+            screens: Default::default(),
+            app_icon: "dark-hour",
+        }
     }
 }

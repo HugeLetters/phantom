@@ -131,9 +131,10 @@ impl Button<'_> {
         if let Some(hint) = self.hint {
             let label = self.label.clone();
             let muted = k.ty.text_xsmall;
+            let gap = self.ui.spacing.s3;
             inner = inner.label_with(move |font, ink| {
                 rune::row()
-                    .gap(6.0)
+                    .gap(gap)
                     .center_y()
                     .child(text(label).font(font).color(ink))
                     .child(text(hint).key("notice-action-hint").font(muted).color(ink.alpha(0.6)))

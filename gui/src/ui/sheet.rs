@@ -71,8 +71,15 @@ impl Ui {
         let Some(body) = body else { return page };
         // The tabs centred in the band, level with the traffic lights ([`TRAFFIC_LIGHTS`]).
         let header = col().key("header").w_full().h(HEADER).center().child(top);
-        let body =
-            col().key("sheet-body").w_full().grow(1.0).min_h(0.0).px(16.0).pb(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
+        let body = col()
+            .key("sheet-body")
+            .w_full()
+            .grow(1.0)
+            .min_h(0.0)
+            .px(self.spacing.s7)
+            .pb(self.spacing.s7)
+            .scroll(ScrollSpec { stick_bottom: false })
+            .child(body);
         page.key(format!("{key}-sheet")).role("dialog").label(title.to_owned()).child(header).child(body).modal(false, on_close)
     }
 
@@ -147,7 +154,7 @@ impl Ui {
                 .grow(1.0)
                 .shrink()
                 .h(28.0)
-                .px(8.0)
+                .px(self.spacing.s4)
                 .center()
                 .radius(6.0)
                 .grid_cell(i)
@@ -279,14 +286,14 @@ impl Ui {
         // An unseen "Save as…" in the same cell sets its width; the real button fills it.
         let sizer = self.button("last-sizer", "Save as…").disabled(true).build().opacity(0.0).a11y_hidden().inert().grid_cell(0);
         let last = el().key("last").equal_columns(1).child(last.w_full().grid_cell(0)).child(sizer);
-        let controls = row().gap(6.0).center_y().child(both).child(light).child(dark).child(edit).child(last);
+        let controls = row().gap(self.spacing.s3).center_y().child(both).child(light).child(dark).child(edit).child(last);
         row()
             .key(key.to_owned())
             .w_full()
             .min_h(36.0)
-            .px(8.0)
-            .py(4.0)
-            .gap(12.0)
+            .px(self.spacing.s4)
+            .py(self.spacing.s2)
+            .gap(self.spacing.s6)
             .center_y()
             .flex_wrap()
             .justify_end()
@@ -309,14 +316,18 @@ impl Ui {
         on_done: impl Fn(&mut S) + 'static,
     ) -> Vec<El> {
         let k = &self.k;
-        let header =
-            row().key("header").w_full().padding(16.0).child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
-        let body = col().key("body").w_full().shrink().min_h(0.0).px(16.0).scroll(ScrollSpec { stick_bottom: false }).child(body);
+        let header = row()
+            .key("header")
+            .w_full()
+            .padding(self.spacing.s7)
+            .child(text(title.to_owned()).font(k.ty.ui_medium.lh(16.0)).color(k.c.text_base));
+        let body =
+            col().key("body").w_full().shrink().min_h(0.0).px(self.spacing.s7).scroll(ScrollSpec { stick_bottom: false }).child(body);
         let cancel = on_cancel.map(|cancel| self.button(format!("{key}-cancel"), "Cancel").on_press(move |s: &mut S| cancel(s)).build());
         let done = row()
             .w_full()
-            .padding(16.0)
-            .gap(8.0)
+            .padding(self.spacing.s7)
+            .gap(self.spacing.s4)
             .justify_end()
             .children(cancel)
             .child(self.button(format!("{key}-done"), "Done").primary().on_press(on_done).build());
@@ -350,7 +361,7 @@ impl Ui {
             .absolute(0.0, 0.0)
             .w_full()
             .h_full()
-            .px(16.0)
+            .px(self.spacing.s7)
             .py(SHEET_MARGIN)
             .justify_center()
             .items_center()
@@ -366,7 +377,8 @@ impl Ui {
     /// A raised card of rows, with a hairline between each.
     pub fn card(&self, rows: impl IntoIterator<Item = El>) -> El {
         let k = &self.k;
-        let mut card = col().w_full().padding(4.0).radius(k.radius.md).fill(k.c.bg_base).border(1.0, self.colours.border_on_page);
+        let mut card =
+            col().w_full().padding(self.spacing.s2).radius(k.radius.md).fill(k.c.bg_base).border(1.0, self.colours.border_on_page);
         for (i, r) in rows.into_iter().enumerate() {
             if i > 0 {
                 card = card.child(el().h(1.0).mx(8.0).fill(k.c.border_weak).a11y_hidden());
@@ -393,16 +405,17 @@ impl Ui {
         };
         let line = row()
             .w_full()
-            .gap(12.0)
+            .gap(self.spacing.s6)
             .center_y()
             .child(text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base).w(HALF_LABEL).wrap())
             .child(left_cell);
-        let mut left = col().w_full().gap(2.0).child(line);
+        let mut left = col().w_full().gap(self.spacing.s1).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { light.tokens().c.danger.fg } else { light.tone_color(tone) };
-            left = left.child(text(note).key(format!("{key}-refused")).font(light.tokens().ty.text_small).color(ink).wrap().pb(4.0));
+            left = left
+                .child(text(note).key(format!("{key}-refused")).font(light.tokens().ty.text_small).color(ink).wrap().pb(self.spacing.s2));
         }
-        let right = row().w_full().gap(12.0).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
+        let right = row().w_full().gap(self.spacing.s6).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
         self.halves_line(key, left, right, [light.tokens().c.bg_base, dark.tokens().c.bg_base])
     }
 
@@ -411,7 +424,15 @@ impl Ui {
     /// `<key>-left` and `<key>-right`.
     fn halves_line(&self, key: &str, left: El, right: El, pages: [rune::Color; 2]) -> El {
         let half = |content: El, page: rune::Color, which: &str, cell: usize| {
-            col().key(format!("{key}-{which}")).grow(1.0).min_w(0.0).px(8.0).fill(page).justify_start().grid_cell(cell).child(content)
+            col()
+                .key(format!("{key}-{which}"))
+                .grow(1.0)
+                .min_w(0.0)
+                .px(self.spacing.s4)
+                .fill(page)
+                .justify_start()
+                .grid_cell(cell)
+                .child(content)
         };
         row().key(key.to_owned()).w_full().equal_columns(2).child(half(left, pages[0], "left", 0)).child(half(right, pages[1], "right", 1))
     }
@@ -437,7 +458,7 @@ impl Ui {
                         .equal_columns(2)
                         .child(page(light.bg_base, 0))
                         .child(page(dark.bg_base, 1))
-                        .child(row().absolute(0.0, 0.0).w_full().h(1.0).px(8.0).child(line_over)),
+                        .child(row().absolute(0.0, 0.0).w_full().h(1.0).px(self.spacing.s4).child(line_over)),
                 );
             }
             card = card.child(line);
@@ -454,8 +475,8 @@ impl Ui {
             .key(format!("halves-header-{which}"))
             .w_full()
             .h(28.0)
-            .px(8.0)
-            .gap(4.0)
+            .px(self.spacing.s4)
+            .gap(self.spacing.s2)
             .center_y()
             .fill(k.c.bg_base)
             .child(icon(self.icon(glyph), 12.0).color(k.c.text_muted).a11y_hidden())
@@ -466,8 +487,8 @@ impl Ui {
     /// ([`Ui::half_heading`]) over their columns, the Light's in the left half, past the labels,
     /// the Dark's in the right.
     pub fn halves_header(&self, light: El, dark: El, looks: [&Ui; 2]) -> El {
-        let left = row().w_full().gap(12.0).child(el().w(HALF_LABEL)).child(light.grow(1.0).min_w(0.0));
-        let right = row().w_full().gap(12.0).child(dark.grow(1.0).min_w(0.0)).child(el().w(HALF_TOGGLE));
+        let left = row().w_full().gap(self.spacing.s6).child(el().w(HALF_LABEL)).child(light.grow(1.0).min_w(0.0));
+        let right = row().w_full().gap(self.spacing.s6).child(dark.grow(1.0).min_w(0.0)).child(el().w(HALF_TOGGLE));
         self.halves_line("halves-header", left, right, looks.map(|l| l.tokens().c.bg_base))
     }
 
@@ -483,11 +504,11 @@ impl Ui {
         let line = row()
             .w_full()
             .min_h(36.0)
-            .gap(12.0)
+            .gap(self.spacing.s6)
             .center_y()
             .child(text(label.to_owned()).font(k.ty.ui).color(k.c.text_base).grow(1.0).min_w(0.0))
             .child(control);
-        let mut setting = col().key(key.to_owned()).w_full().px(8.0).py(4.0).gap(2.0).child(line);
+        let mut setting = col().key(key.to_owned()).w_full().px(self.spacing.s4).py(self.spacing.s2).gap(self.spacing.s1).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
             let which = match tone {
@@ -681,7 +702,7 @@ impl Ui {
 
     /// A card's row holding only `text`, muted: what a list without entries says in their place.
     pub fn muted_row(&self, key: &str, text: &str) -> El {
-        row().key(key.to_owned()).w_full().min_h(36.0).px(8.0).center_y().child(self.caption(text.to_owned()))
+        row().key(key.to_owned()).w_full().min_h(36.0).px(self.spacing.s4).center_y().child(self.caption(text.to_owned()))
     }
 
     /// The App icon as it is now, small: one icon (`None` its half), or the Light one's and the
@@ -717,12 +738,12 @@ impl Ui {
             let width = if half.is_some() { PREVIEW + 6.0 } else { PREVIEW };
             el().key(format!("app-icon-preview-{which}")).size(width, PREVIEW).child(tile).children(mark)
         });
-        row().gap(4.0).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
+        row().gap(self.spacing.s2).center_y().a11y_hidden().children(drawings.collect::<Vec<_>>())
     }
 
     /// Tiles in rows, as many to a row as fit.
     pub fn tile_grid(&self, tiles: Vec<El>) -> El {
-        row().w_full().flex_wrap().gap(4.0).children(tiles)
+        row().w_full().flex_wrap().gap(self.spacing.s2).children(tiles)
     }
 }
 

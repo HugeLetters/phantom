@@ -9,10 +9,9 @@ use super::Ui;
 
 /// How long the pointer rests on an [`explained`](Ui::explained) control before its tooltip shows.
 const EXPLAIN_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
-/// The widest a note gets before its text wraps.
+/// The widest a note gets before its text wraps; its space either side of the text is the look's
+/// `s5`.
 const MAX_WIDTH: f32 = 320.0;
-/// A note's space either side of its text.
-const PAD_X: f32 = 10.0;
 
 impl Ui {
     /// How Rune draws every `.help` tooltip: the notices popover's fill, an edge that is the popover's
@@ -25,10 +24,10 @@ impl Ui {
             .ink(k.c.text_base)
             .ring(1.0, self.tooltip_edge())
             .radius(k.radius.md)
-            .padding(PAD_X, 6.0)
+            .padding(self.spacing.s5, self.spacing.s3)
             .font(k.ty.text_small)
-            .max_width(Some(MAX_WIDTH - 2.0 * PAD_X))
-            .gap(4.0)
+            .max_width(Some(MAX_WIDTH - 2.0 * self.spacing.s5))
+            .gap(self.spacing.s2)
             .delay(EXPLAIN_AFTER.as_secs_f64())
             .shadows(k.elevation.md.iter().copied())
     }
@@ -87,7 +86,8 @@ impl Ui {
     fn tooltip(&self, key: &str, message: &str) -> El {
         let k = &self.k;
         let message = text(message.to_owned()).font(k.ty.text_small).color(k.c.text_base).max_lines(3);
-        let body = col().key(format!("{key}-content")).role("tooltip").max_w(MAX_WIDTH).px(PAD_X).py(6.0).child(message);
+        let body =
+            col().key(format!("{key}-content")).role("tooltip").max_w(MAX_WIDTH).px(self.spacing.s5).py(self.spacing.s3).child(message);
         popover::raised(k, body, k.radius.md).border(1.0, self.colours.border_on_page)
     }
 }

@@ -40,8 +40,14 @@ pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
         n => format!("{n} torrents · ↓ {} · ↑ {}", speed(down), speed(up)),
     };
 
-    let mut bar =
-        row().key("status").w_full().gap(8.0).center_y().child(ui.status_dot(tone)).child(words).children(connection_button(s, ui));
+    let mut bar = row()
+        .key("status")
+        .w_full()
+        .gap(ui.spacing().s4)
+        .center_y()
+        .child(ui.status_dot(tone))
+        .child(words)
+        .children(connection_button(s, ui));
     if let Some(newest) = s.bar.newest() {
         bar = bar.child(notices(s, newest.short.clone(), tone_of(newest.severity), ui, room, layer));
     }
@@ -145,7 +151,7 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
         let pager = row()
             .key("notices-head")
             .w_full()
-            .gap(2.0)
+            .gap(ui.spacing().s1)
             .center_y()
             .child(step("notice-newer", Icon::Previous, client::display::newer(), Way::Newer, at > 0))
             .child(ui.figures(client::display::notice_place(at, total)).key("notice-place"))
@@ -154,7 +160,7 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
         col()
             .key("notices-head")
             .w_full()
-            .gap(4.0)
+            .gap(ui.spacing().s2)
             .child(pager.key("notices-pager").child(all.muted().build()))
             .child(ui.rule("notices-head-rule"))
     });
@@ -163,12 +169,17 @@ fn popover_of(s: &Phantom, ui: &Ui, entry: &Entry, at: usize, total: usize) -> (
     // × beside the notice's line, pinned outside the notice's own subtree: the focus on it stays
     // as the next notice shows.
     let title = ui.notice_title(notice.short.clone(), tone).key("notice-line").pr(CROSS_ROOM);
-    let text = col().gap(4.0).grow(1.0).min_w(0.0).child(title).children(notice.more.as_ref().map(|listing| ui.notice_listing(listing)));
+    let text = col()
+        .gap(ui.spacing().s2)
+        .grow(1.0)
+        .min_w(0.0)
+        .child(title)
+        .children(notice.more.as_ref().map(|listing| ui.notice_listing(listing)));
     let (mark, mark_tone) = mark_of(notice);
-    let card = row().gap(8.0).items_start().w_full().child(ui.notice_mark(mark, mark_tone).mt(2.0)).child(text);
+    let card = row().gap(ui.spacing().s4).items_start().w_full().child(ui.notice_mark(mark, mark_tone).mt(2.0)).child(text);
     let actions: Vec<NoticeAction> = notice.actions.iter().filter(|a| offered(s, a)).cloned().collect();
     let (buttons, why_off) = buttons(s, ui, &actions, id);
-    let shown = col().key(format!("notice/{id}")).w_full().gap(10.0).child(card).children(buttons).children(why_off);
+    let shown = col().key(format!("notice/{id}")).w_full().gap(ui.spacing().s5).child(card).children(buttons).children(why_off);
     let body = col().key("notice-shown").w_full().child(shown).child(dismiss().pin(None, Some(-2.0), Some(-2.0), None));
     (head, body)
 }
@@ -222,7 +233,7 @@ fn buttons(s: &Phantom, ui: &Ui, actions: &[NoticeAction], id: crate::bar::machi
             row().key(format!("notice-action/{i}")).child(button)
         })
         .collect();
-    let row = row().key("notice-actions").w_full().gap(8.0).justify_end().children(buttons);
+    let row = row().key("notice-actions").w_full().gap(ui.spacing().s4).justify_end().children(buttons);
     (Some(row), why_shown.map(|why| ui.caption(why).wrap().key("notice-action-why")))
 }
 

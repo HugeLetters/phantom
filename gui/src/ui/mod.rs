@@ -28,7 +28,7 @@ mod text_field;
 use rune::{El, col, el, row};
 use rune_kit::Kit;
 
-use crate::theme::Colours;
+use crate::theme::{Colours, Spacing};
 
 pub use blocks::{BlockOverrides, Blocks};
 #[cfg(test)]
@@ -51,13 +51,20 @@ pub struct Ui {
     k: Kit,
     /// The colours the look sets that `k` has no field for.
     colours: Colours,
+    /// The room between and around things, and the fixed heights, as the look sets them.
+    spacing: Spacing,
     blocks: Blocks,
 }
 
 impl Ui {
     /// The look of `tokens` and `blocks`, as a theme resolved them.
-    pub fn new(tokens: Kit, colours: Colours, blocks: Blocks) -> Self {
-        Self { k: tokens, colours, blocks }
+    pub fn new(tokens: Kit, colours: Colours, spacing: Spacing, blocks: Blocks) -> Self {
+        Self { k: tokens, colours, spacing, blocks }
+    }
+
+    /// The look's spacing, which screens lay out with.
+    pub fn spacing(&self) -> &Spacing {
+        &self.spacing
     }
 
     #[cfg(test)]

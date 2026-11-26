@@ -200,7 +200,8 @@ fn grips(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
         .and_then(|_| spans.iter().find(|(c, _)| *c == Column::Name))
         .map(|(_, w)| *w);
     let shown: Vec<Column> = spans.iter().map(|(c, _)| *c).collect();
-    let mut grips = row().key("grips").pin(Some(0.0), Some(0.0), Some(0.0), None).h(layout::TABLE_HEADER).child(el().w(layout::TOGGLE));
+    let mut grips =
+        row().key("grips").pin(Some(0.0), Some(0.0), Some(0.0), None).h(ui.spacing().table_header).child(el().w(layout::TOGGLE));
     let mut start = layout::TOGGLE;
     for (c, w) in fitted.iter().copied() {
         let cell = match w {

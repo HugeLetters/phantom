@@ -476,6 +476,7 @@ fn a_screen_that_registers_no_command_offers_none() {
             let tokens = rune_kit::Kit::neutral(true);
             Built {
                 colours: crate::theme::Colours::of(&tokens),
+                spacing: crate::theme::Spacing::phantom(),
                 tokens,
                 blocks: Default::default(),
                 screens: ScreenOverrides { details: Some(details), ..Default::default() },
