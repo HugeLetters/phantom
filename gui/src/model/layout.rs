@@ -182,28 +182,69 @@ pub fn drop_index(spans: &[(Column, f32)], dragged: Column, x: f32) -> usize {
 /// or counted in the order; the columns fit what it leaves.
 pub const TOGGLE: f32 = 36.0;
 
-/// A row of the list or of the files, and their headers.
-pub const ROW: f32 = 28.0;
-pub const TABLE_HEADER: f32 = 30.0;
+/// The sizes the pane is laid out with: the model computes its height before anything is drawn, so
+/// it holds its own copy of them (in tests), which the look's spacing must equal in both densities.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sizes {
+    /// A row of the list or of the files, and their headers.
+    pub row: f32,
+    pub table_header: f32,
+    /// The divider between the list and the pane, which drags.
+    pub divider: f32,
+    /// The pane's header: its padding, the name's line and the path's under it.
+    pub header_pad: f32,
+    pub name_line: f32,
+    pub line: f32,
+    /// The pane's tab bar, Files · Info.
+    pub tabs: f32,
+    /// The Info tab: a line each, and the padding around them.
+    pub info_line: f32,
+    pub info_pad: f32,
+    /// What shows in place of the files before the info arrives.
+    pub no_files: f32,
+}
+
+#[cfg(test)]
+impl Sizes {
+    /// Comfortable, as the window has always been laid out.
+    pub const COMFORTABLE: Sizes = Sizes {
+        row: 28.0,
+        table_header: 30.0,
+        divider: 10.0,
+        header_pad: 14.0,
+        name_line: 22.0,
+        line: 18.0,
+        tabs: 30.0,
+        info_line: 26.0,
+        info_pad: 12.0,
+        no_files: 64.0,
+    };
+    /// Compact: the same lines of text in less room.
+    pub const COMPACT: Sizes = Sizes {
+        row: 22.0,
+        table_header: 24.0,
+        divider: 8.0,
+        header_pad: 10.0,
+        name_line: 20.0,
+        line: 18.0,
+        tabs: 24.0,
+        info_line: 22.0,
+        info_pad: 8.0,
+        no_files: 48.0,
+    };
+}
+
+impl Sizes {
+    /// The list's least height: its header and [`LIST_ROWS`] rows.
+    pub fn list_min(&self) -> f32 {
+        self.table_header + LIST_ROWS as f32 * self.row
+    }
+}
+
 /// The rows the list always keeps under its header, however tall the pane.
 pub const LIST_ROWS: usize = 3;
-/// The list's least height: its header and [`LIST_ROWS`] rows.
-pub const LIST_MIN: f32 = TABLE_HEADER + LIST_ROWS as f32 * ROW;
-/// The divider between the list and the pane, which drags.
-pub const DIVIDER: f32 = 10.0;
 /// The pane's share of the room, unless its divider was dragged or the list leaves more.
 pub const PANE_SHARE: f32 = 0.4;
-/// The pane's header: its padding, the name's line and the path's under it.
-pub const HEADER_PAD: f32 = 14.0;
-pub const NAME_LINE: f32 = 22.0;
-pub const LINE: f32 = 18.0;
-/// The pane's tab bar, Files · Info.
-pub const TABS: f32 = 30.0;
-/// The Info tab: a line each, and the padding around them.
-pub const INFO_LINE: f32 = 26.0;
-pub const INFO_PAD: f32 = 12.0;
-/// What shows in place of the files before the info arrives.
-pub const NO_FILES: f32 = 64.0;
 
 /// How the pane's header is drawn: whole (the name's line, then the path's), or as one line.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -213,10 +254,10 @@ pub enum Header {
 }
 
 impl Header {
-    pub fn height(self) -> f32 {
+    pub fn height(self, sz: &Sizes) -> f32 {
         match self {
-            Header::Whole => HEADER_PAD + NAME_LINE + LINE,
-            Header::OneLine => HEADER_PAD + NAME_LINE,
+            Header::Whole => sz.header_pad + sz.name_line + sz.line,
+            Header::OneLine => sz.header_pad + sz.name_line,
         }
     }
 }
@@ -238,35 +279,37 @@ pub struct PaneContent {
 }
 
 impl PaneContent {
-    fn height(self, header: Header) -> f32 {
-        let files = self.files.map_or(NO_FILES, |n| TABLE_HEADER + n.max(1) as f32 * ROW);
-        header.height() + TABS + files.max(2.0 * INFO_PAD + self.info as f32 * INFO_LINE)
+    fn height(self, header: Header, sz: &Sizes) -> f32 {
+        let files = self.files.map_or(sz.no_files, |n| sz.table_header + n.max(1) as f32 * sz.row);
+        header.height(sz) + sz.tabs + files.max(2.0 * sz.info_pad + self.info as f32 * sz.info_line)
     }
 }
 
 /// The most the pane may take of `room` (the height the list, the divider and the pane share).
-pub fn pane_most(room: f32) -> f32 {
-    (room - LIST_MIN - DIVIDER).max(0.0)
+pub fn pane_most(room: f32, sz: &Sizes) -> f32 {
+    (room - sz.list_min() - sz.divider).max(0.0)
 }
 
 /// The least the divider can make the pane: a one-line header and the tabs over one file.
-pub const PANE_LEAST: f32 = HEADER_PAD + NAME_LINE + TABS + TABLE_HEADER + ROW;
+pub fn pane_least(sz: &Sizes) -> f32 {
+    sz.header_pad + sz.name_line + sz.tabs + sz.table_header + sz.row
+}
 
 /// The pane in `room` points over a list of `rows` rows, holding `content`, and the height its
 /// divider was dragged to, if it was: as tall as its content, up to [`PANE_SHARE`] of the room or
 /// what the list's rows leave, whichever is more (or the dragged height), and never into the list's
 /// least. Where the whole header would leave less than two files showing, it's one line.
-pub fn pane(room: f32, content: PaneContent, dragged: Option<f32>, rows: usize) -> Pane {
-    let most = pane_most(room);
+pub fn pane(sz: &Sizes, room: f32, content: PaneContent, dragged: Option<f32>, rows: usize) -> Pane {
+    let most = pane_most(room, sz);
     // At least a one-line header over two files where the room has it, so a small window still
     // shows files; at most what the list leaves.
-    let least_useful = Header::OneLine.height() + TABS + TABLE_HEADER + 2.0 * ROW;
-    let spare = room - DIVIDER - (TABLE_HEADER + rows.max(LIST_ROWS) as f32 * ROW);
+    let least_useful = Header::OneLine.height(sz) + sz.tabs + sz.table_header + 2.0 * sz.row;
+    let spare = room - sz.divider - (sz.table_header + rows.max(LIST_ROWS) as f32 * sz.row);
     let cap = dragged.unwrap_or((room * PANE_SHARE).max(least_useful).max(spare)).min(most);
-    let full = content.height(Header::Whole);
-    let shows_two = cap - Header::Whole.height() - TABS - TABLE_HEADER >= 2.0 * ROW;
+    let full = content.height(Header::Whole, sz);
+    let shows_two = cap - Header::Whole.height(sz) - sz.tabs - sz.table_header >= 2.0 * sz.row;
     let header = if full <= cap || shows_two { Header::Whole } else { Header::OneLine };
-    Pane { height: content.height(header).min(cap), header }
+    Pane { height: content.height(header, sz).min(cap), header }
 }
 
 /// The details pane's tabs.
@@ -640,38 +683,44 @@ mod tests {
         /// its content when that fits in its share, or in what the list's rows leave; and its header
         /// is one line only when the whole header would leave fewer than two files showing.
         #[test]
-        fn the_pane_is_sized_to_its_content(room in 150.0f32..1600.0, files in proptest::option::of(0usize..40), info in 2usize..4, dragged in proptest::option::of(PANE_LEAST..900.0), rows in 0usize..60) {
+        fn the_pane_is_sized_to_its_content(compact in any::<bool>(), room in 150.0f32..1600.0, files in proptest::option::of(0usize..40), info in 2usize..4, dragged in proptest::option::of(0.0f32..900.0), rows in 0usize..60) {
+            let sz = &if compact { Sizes::COMPACT } else { Sizes::COMFORTABLE };
+            let dragged = dragged.map(|d| d.max(pane_least(sz)));
             let content = PaneContent { files, info };
-            let p = pane(room, content, dragged, rows);
-            prop_assert!(p.height <= content.height(p.header) + 0.01, "no blank under the files");
-            prop_assert!(p.height <= pane_most(room) + 0.01, "the list keeps its header and three rows");
-            let spare = room - DIVIDER - TABLE_HEADER - rows.max(LIST_ROWS) as f32 * ROW;
+            let p = pane(sz, room, content, dragged, rows);
+            prop_assert!(p.height <= content.height(p.header, sz) + 0.01, "no blank under the files");
+            prop_assert!(p.height <= pane_most(room, sz) + 0.01, "the list keeps its header and three rows");
+            let spare = room - sz.divider - sz.table_header - rows.max(LIST_ROWS) as f32 * sz.row;
             let share = dragged.unwrap_or((room * PANE_SHARE).max(spare));
-            let whole = content.height(Header::Whole);
-            if whole <= share.min(pane_most(room)) {
+            let whole = content.height(Header::Whole, sz);
+            if whole <= share.min(pane_most(room, sz)) {
                 prop_assert_eq!(p, Pane { height: whole, header: Header::Whole }, "all of it, when it fits");
             }
             if p.header == Header::OneLine {
-                prop_assert!(p.height - Header::Whole.height() - TABS - TABLE_HEADER < 2.0 * ROW);
+                prop_assert!(p.height - Header::Whole.height(sz) - sz.tabs - sz.table_header < 2.0 * sz.row);
             }
         }
     }
 
     #[test]
     fn a_one_file_torrent_takes_its_header_tabs_and_info() {
-        let p = pane(800.0, PaneContent { files: Some(1), info: 3 }, None, 3);
-        assert_eq!(p.height, Header::Whole.height() + TABS + 2.0 * INFO_PAD + 3.0 * INFO_LINE);
+        for sz in [Sizes::COMFORTABLE, Sizes::COMPACT] {
+            let p = pane(&sz, 800.0, PaneContent { files: Some(1), info: 3 }, None, 3);
+            assert_eq!(p.height, Header::Whole.height(&sz) + sz.tabs + 2.0 * sz.info_pad + 3.0 * sz.info_line);
+        }
     }
 
     /// Over a list of two rows the pane takes the room the list doesn't need, past its 40 %.
     #[test]
     fn the_pane_takes_the_room_a_short_list_leaves() {
-        let room = 500.0;
-        let p = pane(room, PaneContent { files: Some(30), info: 3 }, None, 2);
-        assert_eq!(p.height, room - DIVIDER - LIST_MIN);
-        assert!(p.height > room * PANE_SHARE);
-        let long = pane(room, PaneContent { files: Some(30), info: 3 }, None, 40);
-        assert_eq!(long.height, room * PANE_SHARE, "a long list keeps the rest");
+        for sz in [Sizes::COMFORTABLE, Sizes::COMPACT] {
+            let room = 500.0;
+            let p = pane(&sz, room, PaneContent { files: Some(30), info: 3 }, None, 2);
+            assert_eq!(p.height, room - sz.divider - sz.list_min());
+            assert!(p.height > room * PANE_SHARE);
+            let long = pane(&sz, room, PaneContent { files: Some(30), info: 3 }, None, 40);
+            assert_eq!(long.height, room * PANE_SHARE, "a long list keeps the rest");
+        }
     }
 
     /// A sized Name is a width like the others': nothing takes the rest, so the room left over stays empty.

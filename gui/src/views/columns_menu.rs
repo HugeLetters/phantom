@@ -8,12 +8,12 @@ use rune::{El, PointerEvent, Tx};
 
 use crate::menu::{Event, Menu, Open};
 use crate::model::Phantom;
-use crate::model::layout::{Column, TABLE_HEADER};
+use crate::model::layout::Column;
 use crate::ui::{Entry, Icon, Ui};
 
 /// A right-click on the list at `press`, in its own points: on its header, the menu opens there.
-pub fn open(s: &mut Phantom, press: PointerEvent, _: &mut Tx) {
-    if press.y <= TABLE_HEADER {
+pub fn open(s: &mut Phantom, press: PointerEvent, header: f32, _: &mut Tx) {
+    if press.y <= header {
         crate::overlay::open_menu(s, Open::Columns { at: (press.window_x, press.window_y) });
     }
 }

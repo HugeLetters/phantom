@@ -52,7 +52,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let mut body = col().key("body").w_full().grow(1.0).min_h(0.0).px(sp.margin).child(list);
     if let Some(torrent) = shown_torrent(&s.table, &s.torrents, &s.pane) {
         let files = torrent.content.map(|_| s.pane.details.as_ref().filter(|d| d.id == torrent.id).map_or(1, |d| d.files.len()));
-        let pane = layout::pane(room, details::content(torrent, files), s.prefs.dragged(), s.torrents.len());
+        let pane = layout::pane(&ui.spacing().sizes(), room, details::content(torrent, files), s.prefs.dragged(), s.torrents.len());
         let shape = PaneShape { header: pane.header, width };
         // Keyed by the torrent: another one's pane takes this marker away, and the focus that was
         // in the pane (its files, its Rename field, Copy on Info) goes to the list's selected row
@@ -104,7 +104,8 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
 /// pane never under a one-line header over one file nor into the list's header and three rows; let
 /// go, its height is kept (`gui.json`).
 fn divider(ui: &Ui, room: f32, height: f32) -> El {
-    let clamp = move |h: f32| h.clamp(layout::PANE_LEAST, layout::pane_most(room).max(layout::PANE_LEAST));
+    let sizes = ui.spacing().sizes();
+    let clamp = move |h: f32| h.clamp(layout::pane_least(&sizes), layout::pane_most(room, &sizes).max(layout::pane_least(&sizes)));
     ui.divider(ui.spacing().divider).key("divider").on_drag(move |s: &mut Phantom, d: &mut Drag, _: &mut Tx| match d.phase {
         Phase::Down => d.data = height,
         Phase::Move => s.prefs.dragging = Some(clamp(d.data - d.dy)),

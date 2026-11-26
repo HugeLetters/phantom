@@ -439,13 +439,15 @@ fn app_icon(theme: Icons) -> AppIcon {
 }
 
 /// The Active Look Preset kept in `gui.json` (repaired already), each change kept there;
-/// headless, a fresh install's, kept nowhere.
+/// headless, the one in the run's own (temp) data dir's `gui.json`, a fresh install's when it has
+/// none, so a still can show a setting; a change is kept nowhere.
 fn looks(headless: bool) -> Looks {
-    if headless {
-        return Looks::default();
-    }
     let stored: preset::Stored = settings::file::read(preset::SETTING).unwrap_or_default();
-    Looks::new(LookPreset::read(&stored).0, |preset: &LookPreset| settings::file::keep(preset::SETTING, Some(&preset.stored())))
+    let preset = LookPreset::read(&stored).0;
+    if headless {
+        return Looks::new(preset, |_| {});
+    }
+    Looks::new(preset, |preset: &LookPreset| settings::file::keep(preset::SETTING, Some(&preset.stored())))
 }
 
 /// The folders Move to ▸ offers, as `gui.json` keeps them (repaired already), each change kept there.

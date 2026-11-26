@@ -134,11 +134,12 @@ pub fn torrent_table(s: &Phantom, ui: &Ui, fitted: &Fitted, width: f32) -> El {
             }
         })
         .on_select(|s: &mut Phantom, _, _| follow_selection(&mut *s.service, &s.table, &s.torrents, &mut s.pane));
+    let header = ui.spacing().table_header;
     // A right-click on the header (the rows' cells have their own menu) lists the columns.
     ui.table(s, table)
         .grow(1.0)
         .min_h(0.0)
-        .on_secondary_press_local(columns_menu::open)
+        .on_secondary_press_local(move |s: &mut Phantom, press, tx: &mut Tx| columns_menu::open(s, press, header, tx))
         .on_key_preview(crate::shortcuts::on_list_key)
         .child(grips(s, ui, fitted, width - layout::TOGGLE))
 }

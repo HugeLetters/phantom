@@ -11,8 +11,8 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 use super::{FRAME, MIB, app, on_screen, settle, tap, toggle, torrent};
 use crate::model::Phantom;
 use crate::model::layout::{
-    self, COLUMN_ORDER, COLUMN_WIDTHS, Column, ColumnOrder, ColumnWidths, HIDDEN_COLUMNS, Header, INFO_LINE, INFO_PAD, Kept, NAME_MIN,
-    PANE_HEIGHT, PANE_TAB, PaneTab, ROW, TABLE_HEADER, TABS, WindowPrefs,
+    self, COLUMN_ORDER, COLUMN_WIDTHS, Column, ColumnOrder, ColumnWidths, HIDDEN_COLUMNS, Header, Kept, NAME_MIN, PANE_HEIGHT, PANE_TAB,
+    PaneTab, Sizes, WindowPrefs,
 };
 use crate::service::{DiskChange, MemoryService};
 use crate::settings::file;
@@ -21,6 +21,7 @@ use proto::{Content, File, Priority, Status, TorrentFailure, TorrentInfo, Unavai
 
 /// The lines Info has for a torrent as `torrent` makes it: what it uploaded, its ratio, its info hash and its magnet link.
 const INFO_LINES: usize = 4;
+const SZ: Sizes = Sizes::COMFORTABLE;
 
 /// The torrent list's header cells, in order, with their rects.
 fn header(rt: &Runtime<Phantom>) -> Vec<(Column, [f32; 4])> {
@@ -153,17 +154,21 @@ fn pane_is_as_tall_as_its_content(w: f32, h: f32, n: usize) -> Result<(), TestCa
     let room = rect(&rt, "body")[3];
     let pane = rect(&rt, "details")[3];
     let list = rect(&rt, "list")[3];
-    let under =
-        |header: Header| header.height() + TABS + (TABLE_HEADER + n as f32 * ROW).max(2.0 * INFO_PAD + INFO_LINES as f32 * INFO_LINE);
+    let under = |header: Header| {
+        header.height(&SZ) + SZ.tabs + (SZ.table_header + n as f32 * SZ.row).max(2.0 * SZ.info_pad + INFO_LINES as f32 * SZ.info_line)
+    };
     let whole = under(Header::Whole);
     prop_assert!(pane <= whole + 0.5, "no blank under the files: {} of {}", pane, whole);
-    prop_assert!(list >= layout::LIST_MIN - 0.5, "the list keeps its header and three rows: {}", list);
-    if whole <= layout::pane_most(room) {
+    prop_assert!(list >= SZ.list_min() - 0.5, "the list keeps its header and three rows: {}", list);
+    if whole <= layout::pane_most(room, &SZ) {
         prop_assert!((pane - whole).abs() < 0.5, "all of it, a list of two leaving the room: {} of {}", pane, whole);
     }
     let header = rect(&rt, "details-header")[3];
-    if (header - Header::OneLine.height()).abs() < 0.5 {
-        prop_assert!(pane - Header::Whole.height() - TABS - TABLE_HEADER < 2.0 * ROW + SNAP, "one line only when short: {pane}");
+    if (header - Header::OneLine.height(&SZ)).abs() < 0.5 {
+        prop_assert!(
+            pane - Header::Whole.height(&SZ) - SZ.tabs - SZ.table_header < 2.0 * SZ.row + SNAP,
+            "one line only when short: {pane}"
+        );
         prop_assert!(pane <= under(Header::OneLine) + 0.5);
     }
     Ok(())
@@ -424,7 +429,7 @@ fn the_divider_drags_and_its_height_is_kept() {
     assert!((after - (before + 100.0)).abs() < 1.0, "{before} → {after}");
     let height = kept.read().pane_height.expect("kept");
     assert!((height - after).abs() < 1.0, "kept {height}");
-    assert!(rect(&rt, "list")[3] >= layout::LIST_MIN - 0.5);
+    assert!(rect(&rt, "list")[3] >= SZ.list_min() - 0.5);
 
     let mut again = app(service());
     again.state.prefs = kept.prefs(kept.read());
@@ -444,7 +449,7 @@ fn the_pane_takes_the_room_a_short_list_leaves() {
     settle(&mut rt);
     let room = rect(&rt, "body")[3];
     let pane = rect(&rt, "details")[3];
-    assert!((pane - layout::pane_most(room)).abs() < 0.5, "all but the list's least: {pane} of {room}");
+    assert!((pane - layout::pane_most(room, &SZ)).abs() < 0.5, "all but the list's least: {pane} of {room}");
 
     let mut rt = app(long_list(30, 40));
     resize(&mut rt, 960.0, 700.0);
@@ -463,7 +468,8 @@ fn a_one_file_torrent_has_no_blank_under_it() {
     tap(&mut rt, "rows/0");
     settle(&mut rt);
     let pane = rect(&rt, "details")[3];
-    let expected = Header::Whole.height() + TABS + (TABLE_HEADER + ROW).max(2.0 * INFO_PAD + INFO_LINES as f32 * INFO_LINE);
+    let expected =
+        Header::Whole.height(&SZ) + SZ.tabs + (SZ.table_header + SZ.row).max(2.0 * SZ.info_pad + INFO_LINES as f32 * SZ.info_line);
     assert!((pane - expected).abs() < 0.5, "{pane} of {expected}");
 }
 

@@ -19,11 +19,24 @@ pub static PHANTOM: Phantom = Phantom;
 /// Light or Dark.
 pub const TONE: &str = "tone";
 
-static SETTINGS: [Setting; 1] = [Setting {
-    key: TONE,
-    label: "Tone",
-    kind: Kind::Choice { choices: &[Choice { id: "light", label: "Light" }, Choice { id: "dark", label: "Dark" }], default: "light" },
-}];
+/// How much room things leave: Compact or Comfortable.
+pub const DENSITY: &str = "density";
+
+static SETTINGS: [Setting; 2] = [
+    Setting {
+        key: TONE,
+        label: "Tone",
+        kind: Kind::Choice { choices: &[Choice { id: "light", label: "Light" }, Choice { id: "dark", label: "Dark" }], default: "light" },
+    },
+    Setting {
+        key: DENSITY,
+        label: "Density",
+        kind: Kind::Choice {
+            choices: &[Choice { id: "compact", label: "Compact" }, Choice { id: "comfortable", label: "Comfortable" }],
+            default: "comfortable",
+        },
+    },
+];
 
 impl Theme for Phantom {
     fn id(&self) -> &'static str {
@@ -47,7 +60,7 @@ impl Theme for Phantom {
         let tokens = Kit::neutral(dark);
         Built {
             colours: Colours::of(&tokens),
-            spacing: Spacing::phantom(),
+            spacing: if settings.get(DENSITY) == Some(Value::Choice("compact")) { Spacing::compact() } else { Spacing::phantom() },
             tokens,
             blocks: Default::default(),
             screens: Default::default(),
@@ -72,4 +85,30 @@ pub fn theme_look(dark: bool) -> ThemeLook {
 #[cfg(test)]
 pub fn look(dark: bool) -> Look {
     Look::build(&theme_look(dark))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spacing(density: Option<&'static str>) -> Spacing {
+        let mut look = theme_look(false);
+        if let Some(d) = density {
+            assert!(look.settings.set(DENSITY, Value::Choice(d)));
+        }
+        *Look::build(&look).ui.spacing()
+    }
+
+    #[test]
+    fn comfortable_is_todays_spacing_and_the_default() {
+        assert_eq!(spacing(None), Spacing::phantom());
+        assert_eq!(spacing(Some("comfortable")), Spacing::phantom());
+    }
+
+    #[test]
+    fn compact_changes_the_sizes() {
+        let c = spacing(Some("compact"));
+        assert_eq!(c, Spacing::compact());
+        assert_eq!((c.row, c.table_header, c.toolbar, c.margin), (22.0, 24.0, 32.0, 8.0));
+    }
 }
