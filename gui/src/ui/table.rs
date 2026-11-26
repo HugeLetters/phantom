@@ -56,7 +56,7 @@ impl Ui {
     /// What a drag moves a column by, over its header cell: clear, tinted on hover and while its
     /// column is being moved (`active`).
     pub fn column_grip(&self, active: bool) -> El {
-        let tint = self.k.alpha(self.k.c.text_accent, 0.16);
+        let tint = self.colours.grip_active;
         let grip = rune::el().grow(1.0).h_full().radius(self.k.radius.sm).cursor(rune::Cursor::Pointer).hover(self.k.c.hover);
         if active { grip.fill(tint) } else { grip }
     }

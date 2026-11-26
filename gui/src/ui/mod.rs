@@ -28,6 +28,8 @@ mod text_field;
 use rune::{El, col, el, row};
 use rune_kit::Kit;
 
+use crate::theme::Colours;
+
 pub use blocks::{BlockOverrides, Blocks};
 #[cfg(test)]
 pub use blocks::{ProgressBar, StatusDot};
@@ -47,13 +49,15 @@ pub use text_field::TEXT_INSET;
 pub struct Ui {
     /// The look's tokens: palette, type, radii, elevation, motion, glyphs.
     k: Kit,
+    /// The colours the look sets that `k` has no field for.
+    colours: Colours,
     blocks: Blocks,
 }
 
 impl Ui {
     /// The look of `tokens` and `blocks`, as a theme resolved them.
-    pub fn new(tokens: Kit, blocks: Blocks) -> Self {
-        Self { k: tokens, blocks }
+    pub fn new(tokens: Kit, colours: Colours, blocks: Blocks) -> Self {
+        Self { k: tokens, colours, blocks }
     }
 
     #[cfg(test)]
@@ -124,16 +128,6 @@ const NOWHERE: &str = "nowhere";
 /// A kit button with its focus ring 2.5 points out, as Phantom's is (the kit's is 2).
 fn ringed(button: El, k: &Kit) -> El {
     button.focus_ring(2.0, 2.5, k.c.border_focus)
-}
-
-/// `color` as it looks over the opaque `behind`, in sRGB as Rune blends. For an edge: Rune draws a
-/// translucent border over its own element's fill, so one that's to take in what's around it is
-/// made opaque first.
-fn opaque_over(color: rune::Color, behind: rune::Color) -> rune::Color {
-    let encode = |c: f32| if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
-    let decode = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
-    let mix = |top: f32, under: f32| decode(encode(top) * color.a + encode(under) * (1.0 - color.a));
-    rune::Color { r: mix(color.r, behind.r), g: mix(color.g, behind.g), b: mix(color.b, behind.b), a: 1.0 }
 }
 
 /// Gives a kit component a key, for tests, scripts and anchoring menus.

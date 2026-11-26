@@ -154,7 +154,7 @@ impl Ui {
                 .child(label)
                 .on_press(move |s: &mut S| on_pick(s, i));
             if !on {
-                segment = segment.hover(c.hover).press(pressed_over(c.hover, c.pressed));
+                segment = segment.hover(c.hover).press(self.colours.pressed_over_hover);
             }
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
         }
@@ -258,7 +258,7 @@ impl Ui {
         if let Some(on_apply) = on_apply {
             chip_el = chip_el.role("button").focusable(true).focus_ring(2.0, 1.0, c.border_focus);
             if !chip.in_use {
-                chip_el = chip_el.hover(c.hover).press(pressed_over(c.hover, c.pressed)).on_press(move |s: &mut S| on_apply(s));
+                chip_el = chip_el.hover(c.hover).press(self.colours.pressed_over_hover).on_press(move |s: &mut S| on_apply(s));
             }
             chip_el = if first_focus { chip_el.tab_index(1) } else { chip_el };
         } else {
@@ -366,8 +366,7 @@ impl Ui {
     /// A raised card of rows, with a hairline between each.
     pub fn card(&self, rows: impl IntoIterator<Item = El>) -> El {
         let k = &self.k;
-        let mut card =
-            col().w_full().padding(4.0).radius(k.radius.md).fill(k.c.bg_base).border(1.0, super::opaque_over(k.c.border_weak, k.c.page));
+        let mut card = col().w_full().padding(4.0).radius(k.radius.md).fill(k.c.bg_base).border(1.0, self.colours.border_on_page);
         for (i, r) in rows.into_iter().enumerate() {
             if i > 0 {
                 card = card.child(el().h(1.0).mx(8.0).fill(k.c.border_weak).a11y_hidden());
@@ -542,7 +541,7 @@ impl Ui {
             .gap(TILE_GAP)
             .items_center()
             .radius(k.radius.md)
-            .fill(k.alpha(k.c.text_base, 0.04))
+            .fill(self.colours.tile_fill)
             .hover_group()
             .child(picture)
             .child(self.tile_name(label))
@@ -646,14 +645,14 @@ impl Ui {
             .gap(TILE_GAP)
             .items_center()
             .radius(k.radius.md)
-            .fill(k.alpha(k.c.text_base, 0.04))
+            .fill(self.colours.tile_fill)
             .focusable(true)
             .focus_ring(2.0, 1.0, k.c.border_focus)
             .child(both)
             .child(self.tile_name(label))
             .children(ring);
         if !in_use {
-            tile = tile.hover(k.c.hover).press(pressed_over(k.c.hover, k.c.pressed)).on_press(on_press);
+            tile = tile.hover(k.c.hover).press(self.colours.pressed_over_hover).on_press(on_press);
         }
         tile
     }
@@ -762,12 +761,3 @@ const CHIP_GAP: f32 = (TILE_W - 2.0 * TILE_PAD - 3.0 * CHIP) / 2.0;
 
 /// The kinds of image file the App icon's sheet takes as an icon.
 pub const IMAGES: [&str; 6] = ["png", "jpg", "jpeg", "icns", "tiff", "heic"];
-
-/// The press overlay that, over the hover one the runtime already shows, gives `pressed` over the
-/// fill (as the kit's own controls).
-fn pressed_over(hover: rune::Color, pressed: rune::Color) -> rune::Color {
-    if hover.a >= 0.999 {
-        return pressed;
-    }
-    pressed.alpha(((pressed.a - hover.a) / (1.0 - hover.a)).clamp(0.0, 1.0))
-}

@@ -103,7 +103,7 @@ impl TextField<'_> {
         if !self.plain {
             // The kit's field is flat, its focus ring inside its edge; Phantom's keeps a sheen, and
             // its ring around it.
-            inner = inner.gradient(k.light(0.06), k.light(0.02));
+            inner = inner.gradient(self.ui.colours.field_sheen.0, self.ui.colours.field_sheen.1);
             if self.edit.focused {
                 inner = inner.outline(1.0, 0.0, k.c.border_focus);
             }
