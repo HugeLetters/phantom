@@ -1,0 +1,39 @@
+# #417 prototype: Phantom theme settings (stills)
+
+Headless renders of a throwaway build (branch `417-theme-settings`). Each colour and corner still has three panes, left to right: the list (pointer over archlinux, Big Buck Bunny selected, its files), the notices popover, and the clash dialog with a tooltip.
+
+## Colours
+- [colours-today-light.png](colours-today-light.png): today's eight bases through the derivation, Light.
+- [colours-today-dark.png](colours-today-dark.png): today's bases, Dark.
+- [colours-warm-light.png](colours-warm-light.png): warm set (cream, brown text, burnt-orange accent), Light.
+- [colours-warm-dark.png](colours-warm-dark.png): warm set, Dark.
+- [colours-bold-light.png](colours-bold-light.png): bold accent set (violet), Light.
+- [colours-bold-dark.png](colours-bold-dark.png): bold accent set, Dark.
+- [sheet-bases.png](sheet-bases.png): the Active look's sheet with Corners, Density, Motion and the eight bases per half; a too-low pair shows as a warning under its row.
+- [sheet-every-colour.png](sheet-every-colour.png): "Show every colour" on: 22 derived colours in groups, each with its value and base. Faint text is set by hand in Light (a field and Follow Text), and the sheet warns that it reads 3.8:1.
+
+## Corners (Dark)
+- [corners-square-dark.png](corners-square-dark.png): every radius 0.
+- [corners-small-dark.png](corners-small-dark.png): today's radii (2/4/6/8/10).
+- [corners-round-dark.png](corners-round-dark.png): 4/7/10/14/18.
+
+## Density (Light)
+- [density-comfortable-vs-compact.png](density-comfortable-vs-compact.png): Comfortable (today, left) and Compact (right), with the same rows. Compact has rows of 22 and a header of 24 (28/30 today), a toolbar of 32 (40), a margin of 8 (12).
+
+## Motion
+- [motion-notices-on-vs-off.gif](motion-notices-on-vs-off.gif): the notices popover opens, pages and closes. On is left, off is right. The popover has no motion today, so the two halves match.
+- [motion-settings-on-vs-off.gif](motion-settings-on-vs-off.gif): Settings tabs, then Edit… opens the sheet. With motion on (left) the tab pill slides and the sheet fades in. With it off (right) both land at once.
+
+## Text contrast (WCAG 2, derived)
+Muted and faint text are derived so they stay at 4.5:1 or more on the window, the surface and a selected row. Text on the accent is black or white, whichever reads better. Ratios under 4.5 are in bold.
+
+| Set | Tone | text/surface | muted/window | muted/selected row | faint/window | accent as text | text on accent | danger, warning, success on their fill |
+|---|---|---|---|---|---|---|---|---|
+| today | Light | 17.1 | 5.0 | 4.7 | 4.5 | **4.0** | black 5.3 | 5.4, 5.1, 4.7 |
+| today | Dark | 14.8 | 8.0 | 5.8 | 5.9 | 5.4 | black 6.7 | 5.7, 5.9, 6.3 |
+| warm | Light | 15.4 | 5.1 | 4.6 | 4.6 | 5.0 | white 5.1 | 5.3, 5.2, 5.0 |
+| warm | Dark | 14.3 | 7.7 | 5.3 | 5.7 | 7.1 | black 8.8 | 6.1, 6.3, 6.6 |
+| bold | Light | 18.3 | 5.5 | 4.7 | 4.5 | 7.6 | white 7.6 | 5.0, 5.2, 4.6 |
+| bold | Dark | 16.0 | 8.2 | 5.9 | 6.0 | 6.8 | black 7.8 | 6.0, 7.7, 7.8 |
+
+Today's palette misses 4.5 in two places, both in Light: faint text (muted at 80%) reads 3.8 on the surface and 3.4 on the window, and accent `#2f7fe3` reads 4.0 as text or under white text. The derivation fixes faint text. The accent is the user's pick, so the sheet warns about it instead of changing it.
