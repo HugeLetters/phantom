@@ -9,7 +9,7 @@
 
 use client::display;
 use proto::{Direction, ListenPort, SeedingLimit, Settings};
-use rune::{Cx, El, col, el, row};
+use rune::{Cx, El, col, el, row, text};
 
 use crate::changes::Target;
 use crate::model::settings::presets;
@@ -326,7 +326,7 @@ fn editor(
                 let of = preset.get(side.appearances()[0]).theme.settings();
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
                 let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
-                let mut lines = vec![heading, theme];
+                let mut lines = vec![(heading, false), (theme, false)];
                 let mut at = At::default();
                 for (setting, value) in held {
                     let (heads, shown) = headings(
@@ -340,17 +340,28 @@ fn editor(
                             })
                             .px(ui.spacing().s2)
                         },
-                        |group| ui.caption(group),
+                        |group| {
+                            let k = ui.tokens();
+                            text(group.to_owned())
+                                .key(format!("{EDIT}-group-{}-{}", group.to_lowercase(), side.key()))
+                                .font(k.ty.text_small_medium)
+                                .color(k.c.text_muted)
+                                .wrap()
+                                .px(ui.spacing().s2)
+                                .pt(ui.spacing().s4)
+                                .pb(ui.spacing().s2)
+                        },
                     );
-                    lines.extend(heads);
+                    lines.extend(heads.into_iter().map(|h| (h, true)));
                     if shown {
                         let control = theme_control(setting, side, *value, editor, half, of, wants(setting.key, side, &[side]), layer);
                         let notes =
                             sheet.refused(Row::Color(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
-                        lines.push(ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes));
+                        let row = ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes);
+                        lines.push((row, false));
                     }
                 }
-                ui.card(lines).grow(1.0).min_w(0.0)
+                ui.card_with_headers(lines).grow(1.0).min_w(0.0)
             };
             let light = column(Side::Only(Appearance::Light), &light);
             let dark = column(Side::Only(Appearance::Dark), &dark);

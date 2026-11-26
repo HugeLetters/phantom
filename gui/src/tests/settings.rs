@@ -3635,6 +3635,19 @@ fn a_theme_in_each_half_has_its_own_column() {
     assert!(d.settings.find("edit-faint_text-light-swatch").is_none(), "closed at first");
     press(&mut d, "edit-every-color-light-section");
     assert!(d.settings.find("edit-faint_text-light-swatch").is_some(), "open, its colors under ☀");
+    // Its headers have no hairline above or below them; its rows keep theirs.
+    let hairlines: Vec<[f32; 4]> = d.settings.elements().into_iter().filter(|e| !e.exiting && e.rect[3] == 1.0).map(|e| e.rect).collect();
+    let touching = |key: &str| {
+        let r = super::generated::rect_of(&d.settings, key).expect(key);
+        hairlines
+            .iter()
+            .filter(|h| h[0] < r[0] + r[2] && r[0] < h[0] + h[2])
+            .any(|h| (h[1] + 1.0 - r[1]).abs() < 0.5 || (h[1] - (r[1] + r[3])).abs() < 0.5)
+    };
+    for header in ["edit-every-color-light-section", "edit-group-text-light", "edit-group-surfaces-light"] {
+        assert!(!touching(header), "no hairline next to {header}");
+    }
+    assert!(touching("edit-muted_text-light-row"), "rows keep their hairlines");
     press(&mut d, "edit-every-color-light-section");
     assert!(d.settings.find("edit-faint_text-light-swatch").is_none(), "closed again");
     // Phantom in the Dark half's pop-up: one theme, Tone split as its values differ.
@@ -4747,6 +4760,61 @@ fn a_drag_that_brings_warnings_never_moves_the_picker() {
         assert!(colors.len() > 5, "{at} the color applies as it moves: {colors:?}");
     }
     assert_eq!(placed, [true, true, false], "below where it fits, else above");
+}
+
+/// The picker draws where it goes from its first frame: placed for the tallest it could get in the
+/// same pass that opens it, never below for a frame before it moves up, in a window where it goes
+/// above (960x760) and one where it goes below (960x900).
+#[test]
+fn the_picker_is_in_place_from_its_first_frame() {
+    for height in [760.0, 900.0] {
+        let mut d = appearance_tab();
+        d.settings.set_viewport((960.0, height), 2.0);
+        d.settle();
+        press(&mut d, "active-edit");
+        press_now(&mut d, "edit-accent-light-swatch");
+        d.settings.frame(super::FRAME);
+        let first = super::generated::rect_of(&d.settings, "edit-accent-light-popup").expect("drawn on its first frame");
+        d.settle();
+        let settled = super::generated::rect_of(&d.settings, "edit-accent-light-popup").expect("the popup");
+        assert_eq!(first, settled, "at 960x{height} the first frame is where it stays");
+    }
+}
+
+/// The picker is as tall as what it shows: its frame ends its padding under the last thing in it,
+/// the hex field and its button with no warning, the last warning with one or two, in either half
+/// and at 640 pt. The tallest it could get only places it, unseen.
+#[test]
+fn the_picker_is_as_tall_as_what_it_shows() {
+    // (width, field, hex typed, warnings)
+    let cases = [
+        (960.0, "edit-accent-light", None, 0),
+        (960.0, "edit-accent-dark", None, 0),
+        (640.0, "edit-accent-light", None, 0),
+        (960.0, "edit-danger-light", Some("#e06060"), 1),
+        (960.0, "edit-faint_text-light", Some("#a3a6ab"), 2),
+        (960.0, "edit-faint_text-dark", Some("#5a5c60"), 2),
+        (640.0, "edit-faint_text-light", Some("#a3a6ab"), 2),
+    ];
+    for (width, field, hex, warnings) in cases {
+        let at = format!("{field} at {width}");
+        let mut d = colors_sheet(width);
+        match hex {
+            Some(hex) => {
+                type_into(&mut d, field, hex);
+                d.settings.key(KeyEvent { key: Key::Enter, mods: Mods::default() });
+                d.settle();
+            }
+            None => press(&mut d, &format!("{field}-swatch")),
+        }
+        let rect = |key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}, {at}"));
+        let lines: Vec<[f32; 4]> = (0..).map_while(|i| super::generated::rect_of(&d.settings, &format!("{field}-warning-{i}"))).collect();
+        assert_eq!(lines.len(), warnings, "{at}: its warnings");
+        let last = lines.last().copied().unwrap_or_else(|| rect(&format!("{field}-follow")));
+        let popup = rect(&format!("{field}-popup"));
+        let under = popup[1] + popup[3] - (last[1] + last[3]);
+        assert!((under - 12.0).abs() < 0.5, "{at}: the frame ends its padding under its last line, not {under} pt");
+    }
 }
 
 /// Reset on a changed base: the theme's own again, and Escape closes the picker, the sheet staying.

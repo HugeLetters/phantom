@@ -427,14 +427,22 @@ impl Ui {
 
     /// A raised card of rows, with a hairline between each.
     pub fn card(&self, rows: impl IntoIterator<Item = El>) -> El {
+        self.card_with_headers(rows.into_iter().map(|r| (r, false)))
+    }
+
+    /// [`Ui::card`] whose lines may be headers (`(line, true)`): a section's or a group's, with no
+    /// hairline above or below it; rows keep theirs between them.
+    pub fn card_with_headers(&self, lines: impl IntoIterator<Item = (El, bool)>) -> El {
         let k = &self.k;
         let mut card =
             col().w_full().padding(self.spacing.s2).radius(k.radius.md).fill(k.c.bg_base).border(1.0, self.colors.border_on_page);
-        for (i, r) in rows.into_iter().enumerate() {
-            if i > 0 {
+        let mut header_before = true;
+        for (line, header) in lines {
+            if !header && !header_before {
                 card = card.child(el().h(1.0).mx(8.0).fill(k.c.border_weak).a11y_hidden());
             }
-            card = card.child(r);
+            header_before = header;
+            card = card.child(line);
         }
         card
     }
