@@ -587,6 +587,8 @@ fn theme_control(
                     .text_field(control_key.clone(), &field.text, &format!("{} hex", setting.label))
                     .on_edit(move |s: &mut SettingsWindow| s.sheet.as_mut().expect("the sheet is open").color_edit(side, key))
                     .on_submit(move |s: &mut SettingsWindow, _| submit_color(s, side, key))
+                    // As tall as the button beside it, a regular control's.
+                    .height(HEX_HEIGHT)
                     .build()
                     .grow(1.0);
                 let button = ui
@@ -751,6 +753,9 @@ const SAVE_AS_WIDTH: f32 = 160.0;
 
 /// How tall Save as…'s line is, its field or its question: a field and the line's padding under it.
 const SAVE_AS_HEIGHT: f32 = 32.0;
+
+/// How tall a color picker's hex field is: a regular button's height, as its Follow or Reset.
+const HEX_HEIGHT: f32 = 24.0;
 
 /// How wide the editor's sheet gets, and the App icon's.
 const EDITOR_WIDTH: f32 = 760.0;

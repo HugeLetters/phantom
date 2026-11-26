@@ -601,6 +601,17 @@ fn spec() -> AppSpec<Phantom> {
                     [Column::Name, Column::Status, Column::Progress, Column::Size, Column::Eta, Column::Down, Column::Up, Column::Peers];
                 s.prefs.kept.order = ColumnOrder::try_from(order.to_vec()).expect("every column");
             }),
+            // A torrent's files, with the Accent changed in both Appearances (#417).
+            ("colors-accent", |s| {
+                s.service = Box::new(demo_service());
+                s.table.select("4");
+                s.pane.files.select("1");
+                for (half, hex) in [(preset::Appearance::Light, "#c2410c"), (preset::Appearance::Dark, "#fb923c")] {
+                    let mut look = s.looks.borrow().preset().get(half).clone();
+                    look.settings.set("accent", theme::setting::Value::Color(theme::setting::Rgb::parse(hex)));
+                    s.looks.borrow_mut().set(half, look);
+                }
+            }),
             ("pane-dragged", |s| {
                 s.service = Box::new(demo_service());
                 s.table.select("4");
@@ -1193,6 +1204,23 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 model::settings::presets::edit_active(s);
                 model::settings::toggle_menu(s, model::settings::THEME, model::settings::Side::Only(preset::Appearance::Dark));
             }),
+            // The Active look's sheet: Look and Colors; "Every color" open, Faint text set by hand
+            // in Light and Muted text in Dark; the Accent changed in Light (#417).
+            ("settings-colors", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                model::settings::presets::edit_active(s);
+            }),
+            ("settings-every-color", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "faint_text", "#a3a6ab"), (preset::Appearance::Dark, "muted_text", "#c9b99a")]);
+                model::settings::presets::edit_active(s);
+                model::settings::toggle_section(s, "every-color");
+            }),
+            ("settings-accent-set", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "accent", "#6526d4")]);
+                model::settings::presets::edit_active(s);
+            }),
             // The Active look's sheet with Motion's dropdown open.
             ("settings-motion-menu", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
@@ -1242,6 +1270,15 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
 
 /// The Active look's Dark half the stand-in theme, in a debug build; unchanged in a release one,
 /// which has no stand-in.
+/// Each color `(half, key, hex)` set by hand in the Active look.
+fn set_colors(s: &mut SettingsWindow, colors: &[(preset::Appearance, &str, &str)]) {
+    for (half, key, hex) in colors {
+        let mut look = s.looks.borrow().preset().get(*half).clone();
+        look.settings.set(key, theme::setting::Value::Color(theme::setting::Rgb::parse(hex)));
+        s.looks.borrow_mut().set(*half, look);
+    }
+}
+
 fn stand_in_dark(s: &mut SettingsWindow) {
     if let Some(theme) = theme::find("stand-in") {
         let look = theme::ThemeLook { theme, settings: theme::setting::Values::defaults(theme.settings()) };
