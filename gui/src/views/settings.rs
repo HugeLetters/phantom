@@ -320,12 +320,11 @@ fn editor(
                 let key = row.setting.key;
                 let derived = proto::derived(key);
                 if key == crate::theme::phantom::EVERY {
-                    let hint = every.then_some("Each follows one of the eight, until set by hand");
                     lines.push((
                         ui.section_header(
                             "edit-section-every",
                             "Every color",
-                            hint,
+                            None,
                             Some(every),
                             looks,
                             Some(Box::new(move |s: &mut SettingsWindow| {
@@ -530,7 +529,7 @@ fn theme_control(
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
             // PROTOTYPE (#417): Motion is always a dropdown, its labels long; any other choice
             // whose segments don't fit its cell becomes one too.
-            if key == crate::theme::phantom::MOTION || !crate::theme::phantom::proto::segments_fit(&labels) {
+            if true {
                 use crate::theme::phantom::proto;
                 let shown = proto::env("motion").filter(|_| key == crate::theme::phantom::MOTION);
                 let selected = shown.and_then(|m| choices.iter().position(|c| c.id == m)).unwrap_or(selected);
@@ -632,8 +631,8 @@ fn colour_popup(setting: &'static crate::theme::setting::Setting, side: &str, va
     let id = format!("{key}|{side}");
     let which = if side == "dark" { Side::Only(Appearance::Dark) } else { Side::Only(Appearance::Light) };
     let ck = format!("{EDIT}-{key}-{side}");
-    let field = ui.text_field(format!("{ck}-hex"), &rune::TextEdit::new(hex), setting.label).width(COLOUR_WIDTH).build();
-    let mut line = row().gap(8.0).center_y().child(field);
+    let field = ui.text_field(format!("{ck}-hex"), &rune::TextEdit::new(hex), setting.label).width(COLOUR_WIDTH).height(28.0).build();
+    let mut line = row().gap(8.0).items_stretch().child(field);
     if !follows {
         let (label, accessible) = match derived {
             Some(d) => (format!("Follow {}", d.base), format!("Follow {}", d.base)),
@@ -641,7 +640,6 @@ fn colour_popup(setting: &'static crate::theme::setting::Setting, side: &str, va
         };
         line = line.child(
             ui.button(format!("{ck}-reset"), &label)
-                .small()
                 .accessible(&accessible)
                 .on_press(move |s: &mut SettingsWindow| set_theme(s, which, key, Value::Colour(proto::FOLLOW)))
                 .build(),
@@ -786,7 +784,7 @@ const SAVE_AS_WIDTH: f32 = 160.0;
 const SAVE_AS_HEIGHT: f32 = 32.0;
 
 /// How wide a colour's field is: `#rrggbb`.
-const COLOUR_WIDTH: f32 = 84.0;
+const COLOUR_WIDTH: f32 = 96.0;
 
 /// The App icon's row, one line: what it is, the icon each Appearance shows now, small (both,
 /// each with a ☀ or ☾ at its corner, while they differ; one while they're the same), and Edit…,

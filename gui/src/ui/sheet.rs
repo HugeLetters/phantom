@@ -531,55 +531,74 @@ impl Ui {
         self.halves_line(key, left, col().w_full().min_h(36.0), [light.k.c.page, dark.k.c.page])
     }
 
-    /// PROTOTYPE (#417): the picker of a colour popup: a saturation/brightness square with a hue
-    /// strip beside it, drawn with gradient fills (a still, not yet draggable), the marker of
-    /// `now` on each, then `below` (the hex field, a button, warnings).
+    /// PROTOTYPE (#417): the picker of a colour popup, drawn with gradient fills (a still, not yet
+    /// draggable): a square with hue across and lightness down (light at the top), a bar of
+    /// saturation (chroma) beside it, the marker of `now` on each, then `below`. Computed in OKLCH,
+    /// out-of-gamut colours drawn as the nearest displayable; `PHANTOM_PROTO_PICKER=hsl` draws
+    /// plain HSL for comparison.
     pub fn picker_body(&self, key: &str, now: rune::Color, below: Vec<El>) -> El {
         use crate::theme::phantom::proto;
         let k = &self.k;
-        let (h, sat, val) = proto::hsv(now);
-        let (w, ht, strip) = (232.0_f32, 120.0_f32, 16.0_f32);
-        let ramp = |a: rune::Color, b: rune::Color| -> Vec<(f32, rune::Color)> {
-            (0..=8).map(|i| (i as f32 / 8.0, proto::mix(a, b, i as f32 / 8.0))).collect()
+        let hsl = proto::env("picker").as_deref() == Some("hsl");
+        let (w, ht, strip) = (312.0_f32, 140.0_f32, 16.0_f32);
+        let (h, c0, l0, bar_at) = if hsl {
+            let (h, s, l) = proto::hsl(now);
+            (h, s, l, s)
+        } else {
+            let (l, c, h) = proto::oklch(now);
+            (h, c, l, c / proto::max_chroma(l, h).max(1e-4))
         };
-        let shade: Vec<(f32, rune::Color)> = (0..=8).map(|i| (i as f32 / 8.0, rune::Color::BLACK.alpha(i as f32 / 8.0))).collect();
-        let marker = |x: f32, y: f32| {
-            el().absolute(x - 6.0, y - 6.0)
-                .size(12.0, 12.0)
-                .radius(6.0)
-                .border(2.0, rune::Color::WHITE)
-                .box_shadow(rune::Shadow { spread: 1.0, color: rune::Color::BLACK.alpha(0.5), ..Default::default() })
-                .a11y_hidden()
-        };
-        let square = el()
+        // The colour of a cell: hue `x`, lightness `l`, at the picked colour's chroma/saturation.
+        let at = |x: f32, l: f32| if hsl { proto::at_hsl(x, c0, l) } else { proto::at_oklch(l, c0, x) };
+        let rows = 35;
+        let rh = ht / rows as f32;
+        let mut square = col()
             .key(format!("{key}-square"))
             .size(w, ht)
             .radius(k.radius.sm)
             .clip_rounded(k.radius.sm)
-            .fill(proto::hue(h))
-            .linear_gradient(std::f32::consts::FRAC_PI_2, ramp(rune::Color::WHITE, proto::hue(h)))
             .role("slider")
-            .label("Saturation and brightness".to_owned())
-            .child(el().absolute(0.0, 0.0).size(w, ht).linear_gradient(std::f32::consts::PI, shade).a11y_hidden())
-            .child(marker(sat * w, (1.0 - val) * ht));
-        let hues: Vec<(f32, rune::Color)> = (0..=12).map(|i| (i as f32 / 12.0, proto::hue(i as f32 / 12.0))).collect();
+            .label("Hue and lightness".to_owned());
+        // Three segments a row: a gradient carries at most 16 stops.
+        let parts = 3;
+        for r in 0..rows {
+            let l = 1.0 - (r as f32 + 0.5) / rows as f32;
+            let mut line = row().size(w, rh + 0.5).a11y_hidden();
+            for p in 0..parts {
+                let stops: Vec<(f32, rune::Color)> = (0..=12)
+                    .map(|i| {
+                        let t = i as f32 / 12.0;
+                        (t, at((p as f32 + t) / parts as f32, l))
+                    })
+                    .collect();
+                line = line.child(el().size(w / parts as f32, rh + 0.5).linear_gradient(std::f32::consts::FRAC_PI_2, stops).a11y_hidden());
+            }
+            square = square.child(line);
+        }
+        let ring = |e: El| {
+            e.border(2.0, rune::Color::WHITE)
+                .box_shadow(rune::Shadow { spread: 1.0, color: rune::Color::BLACK.alpha(0.5), ..Default::default() })
+                .a11y_hidden()
+        };
+        let square = square.child(ring(el().absolute(h * w - 6.0, (1.0 - l0) * ht - 6.0).size(12.0, 12.0).radius(6.0)));
+        // The bar: full chroma (or saturation) at the top, grey at the bottom, for the picked hue and lightness.
+        let top = if hsl { 1.0 } else { proto::max_chroma(l0, h) };
+        let stops: Vec<(f32, rune::Color)> = (0..=12)
+            .map(|i| {
+                let t = 1.0 - i as f32 / 12.0;
+                (i as f32 / 12.0, if hsl { proto::at_hsl(h, t * top, l0) } else { proto::at_oklch(l0, t * top, h) })
+            })
+            .collect();
         let bar = el()
-            .key(format!("{key}-hue"))
+            .key(format!("{key}-saturation"))
             .size(strip, ht)
             .radius(k.radius.sm)
             .clip_rounded(k.radius.sm)
-            .linear_gradient(std::f32::consts::PI, hues)
+            .linear_gradient(std::f32::consts::PI, stops)
             .role("slider")
-            .label("Hue".to_owned())
-            .child(
-                el().absolute(-2.0, h * ht - 3.0)
-                    .size(strip + 4.0, 6.0)
-                    .radius(3.0)
-                    .border(2.0, rune::Color::WHITE)
-                    .box_shadow(rune::Shadow { spread: 1.0, color: rune::Color::BLACK.alpha(0.5), ..Default::default() })
-                    .a11y_hidden(),
-            );
-        let mut body = col().w(w + strip + 8.0).gap(10.0).px(12.0).py(12.0).child(row().gap(8.0).child(square).child(bar));
+            .label("Saturation".to_owned())
+            .child(ring(el().absolute(2.0, (1.0 - bar_at.clamp(0.0, 1.0)) * ht - 3.0).size(strip - 4.0, 6.0).radius(3.0)));
+        let mut body = col().w(w + strip + 8.0 + 24.0).gap(10.0).px(12.0).py(12.0).child(row().gap(8.0).child(square).child(bar));
         for b in below {
             body = body.child(b);
         }
@@ -604,7 +623,8 @@ impl Ui {
             .fill(color)
             .border(1.0, k.c.border_strong);
         if hand_set {
-            s = s.child(el().absolute(15.0, 15.0).size(8.0, 8.0).radius(4.0).fill(k.c.text_base).border(1.5, k.c.bg_base).a11y_hidden());
+            // A ring in the accent colour, a 2 pt gap off the swatch.
+            s = s.child(el().absolute(-5.0, -5.0).size(32.0, 32.0).radius(k.radius.sm + 3.0).border(1.5, k.c.border_focus).a11y_hidden());
         }
         s
     }

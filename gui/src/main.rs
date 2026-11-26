@@ -1271,6 +1271,9 @@ fn proto_sheet<E: Into<Option<bool>>>(s: &mut SettingsWindow, every: E) {
             look.settings.set("c_accent", Value::Colour(hand));
         } else {
             // Faint text set by hand, failing: Light reads 3.8:1 on Surface, Dark 2.5:1.
+            if every {
+                look.settings.set("d_text_muted", Value::Colour(if dark { Rgb([0x9a, 0x9c, 0xa1]) } else { Rgb([0x5c, 0x5e, 0x63]) }));
+            }
             look.settings.set("d_text_faint", Value::Colour(if dark { Rgb([0x5a, 0x5c, 0x60]) } else { Rgb([0x80, 0x82, 0x87]) }));
         }
         s.looks.borrow_mut().set(appearance, look);

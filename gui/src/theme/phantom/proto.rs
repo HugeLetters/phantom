@@ -303,6 +303,70 @@ pub fn hue(h: f32) -> Color {
     srgb(k(5.0), k(3.0), k(1.0))
 }
 
+/// OKLCH of `c` (its components are linear sRGB): lightness 0..1, chroma, hue 0..1.
+pub fn oklch(c: Color) -> (f32, f32, f32) {
+    let l = (0.412_221_47 * c.r + 0.536_332_55 * c.g + 0.051_445_995 * c.b).cbrt();
+    let m = (0.211_903_5 * c.r + 0.680_699_5 * c.g + 0.107_396_96 * c.b).cbrt();
+    let s = (0.088_302_46 * c.r + 0.281_718_85 * c.g + 0.629_978_7 * c.b).cbrt();
+    let (ll, a, b) = (
+        0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+        1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+        0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+    );
+    (ll, a.hypot(b), (b.atan2(a) / std::f32::consts::TAU).rem_euclid(1.0))
+}
+
+/// Linear sRGB of an OKLCH colour, or None when it's outside the sRGB gamut.
+fn from_oklch(ll: f32, ch: f32, h: f32) -> Option<Color> {
+    let (a, b) = (ch * (h * std::f32::consts::TAU).cos(), ch * (h * std::f32::consts::TAU).sin());
+    let l = (ll + 0.396_337_78 * a + 0.215_803_76 * b).powi(3);
+    let m = (ll - 0.105_561_346 * a - 0.063_854_17 * b).powi(3);
+    let s = (ll - 0.089_484_18 * a - 1.291_485_5 * b).powi(3);
+    let (r, g, bl) = (
+        4.076_741_7 * l - 3.307_711_6 * m + 0.230_969_94 * s,
+        -1.268_438 * l + 2.609_757_4 * m - 0.341_319_4 * s,
+        -0.004_196_086_3 * l - 0.703_418_6 * m + 1.707_614_7 * s,
+    );
+    let ok = |x: f32| (-0.000_5..=1.000_5).contains(&x);
+    (ok(r) && ok(g) && ok(bl)).then(|| Color { r: r.clamp(0.0, 1.0), g: g.clamp(0.0, 1.0), b: bl.clamp(0.0, 1.0), a: 1.0 })
+}
+
+/// The most chroma sRGB can show at lightness `l` and hue `h` (0..1).
+pub fn max_chroma(l: f32, h: f32) -> f32 {
+    let (mut lo, mut hi) = (0.0_f32, 0.4_f32);
+    for _ in 0..18 {
+        let mid = (lo + hi) / 2.0;
+        if from_oklch(l, mid, h).is_some() { lo = mid } else { hi = mid }
+    }
+    lo
+}
+
+/// The displayable colour nearest the OKLCH colour: chroma is clamped to the gamut.
+pub fn at_oklch(l: f32, ch: f32, h: f32) -> Color {
+    let l = l.clamp(0.0, 1.0);
+    from_oklch(l, ch.min(max_chroma(l, h)), h).unwrap_or(Color { r: l.powi(3), g: l.powi(3), b: l.powi(3), a: 1.0 })
+}
+
+/// Hue, saturation and lightness (0..1 each) of `c` in HSL (the plain-HSL comparison picker).
+pub fn hsl(c: Color) -> (f32, f32, f32) {
+    let (h, _, v) = hsv(c);
+    let (r, g, b) = (enc(c.r), enc(c.g), enc(c.b));
+    let min = r.min(g).min(b);
+    let l = (v + min) / 2.0;
+    let s = if l == 0.0 || l == 1.0 { 0.0 } else { (v - min) / (1.0 - (2.0 * l - 1.0).abs()) };
+    (h, s, l)
+}
+
+pub fn at_hsl(h: f32, s: f32, l: f32) -> Color {
+    let a = s * l.min(1.0 - l);
+    let x = h.rem_euclid(1.0) * 12.0;
+    let k = |n: f32| {
+        let k = (n + x) % 12.0;
+        l - a * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    };
+    srgb(k(0.0), k(8.0), k(4.0))
+}
+
 /// The editor card's width as last laid out; 0 before the first layout. Under [`NARROW`] the
 /// label column and its gap are tighter, and a segmented control that can't show all its
 /// labels in the room left becomes a dropdown.

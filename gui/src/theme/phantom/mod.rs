@@ -19,7 +19,6 @@ pub static PHANTOM: Phantom = Phantom;
 pub const TONE: &str = "tone";
 
 pub const CORNERS: &str = "corners";
-pub const DENSITY: &str = "density";
 pub const MOTION: &str = "motion";
 pub const EVERY: &str = "every_colour";
 
@@ -32,7 +31,7 @@ macro_rules! derived {
     ($($key:literal $label:literal),*) => { [$(Setting { key: $key, label: $label, kind: Kind::Colour { default: proto::FOLLOW } }),*] };
 }
 
-static SETTINGS: [Setting; 34] = {
+static SETTINGS: [Setting; 33] = {
     let d = derived!(
         "d_text_muted" "Muted text", "d_text_faint" "Faint text", "d_on_accent" "Text on Accent",
         "d_page" "Window", "d_sheet" "Sheet and dialog", "d_panel" "Panel", "d_raised" "Notice", "d_tooltip" "Tooltip",
@@ -61,14 +60,6 @@ static SETTINGS: [Setting; 34] = {
                     Choice { id: "round", label: "Round" },
                 ],
                 default: "small",
-            },
-        },
-        Setting {
-            key: DENSITY,
-            label: "Density",
-            kind: Kind::Choice {
-                choices: &[Choice { id: "compact", label: "Compact" }, Choice { id: "comfortable", label: "Comfortable" }],
-                default: "comfortable",
             },
         },
         Setting {
@@ -156,7 +147,6 @@ impl Theme for Phantom {
         }
         let corners = proto::env("corners").unwrap_or_else(|| choice(CORNERS));
         tokens.radius = proto::radius(&corners);
-        proto::set_compact(proto::env("density").unwrap_or_else(|| choice(DENSITY)) == "compact");
         let motion = !proto::motion_is_off(&proto::env("motion").unwrap_or_else(|| match choice(MOTION).as_str() {
             "" => "follow".into(),
             c => c.to_owned(),
