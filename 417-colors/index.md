@@ -13,3 +13,12 @@ Headless renders (re-rendered after review round 1: no subtitle under Colors; af
 - [themes-every-light.png](themes-every-light.png), [-dark](themes-every-dark.png): a different theme in each half (Phantom ☀, the stand-in ☾): Phantom's "Every color" opened from its chevron row, as with one theme.
 - [drag-before-light.gif](drag-before-light.gif), [drag-after-light.gif](drag-after-light.gif): the same script, before round 1 and now: opening the Accent's picker, dragging in the square, then the saturation bar; the color applies while dragging (1x, pointer shown). Before, the popup grows and jumps above its swatch when the warnings appear; now its top stays level with the swatch and it grows downward.
 - [drag-square-light.gif](drag-square-light.gif): the first version of the drag (the popup jumping), superseded by the pair above.
+
+## Fixes after the install review (branch 417-colors-fixes)
+
+The Active look's sheet now starts under the title band, so the traffic lights (drawn by macOS, not in headless renders; at x 7–67, y 17–31 pt) never sit on it. 2x, `--at 0.5`, data and downloads in temp dirs.
+
+- [fixes-before-narrow-sheet-light.png](fixes-before-narrow-sheet-light.png): before, at 640x600: the sheet's top-left corner 20 pt from the top, under the lights.
+- [fixes-sheet-light.png](fixes-sheet-light.png), [-dark](fixes-sheet-dark.png): after, 960x600.
+- [fixes-narrow-sheet-light.png](fixes-narrow-sheet-light.png), [-dark](fixes-narrow-sheet-dark.png): after, 640x600.
+- [fixes-min-sheet-light.png](fixes-min-sheet-light.png), [-dark](fixes-min-sheet-dark.png): after, at the 640x320 minimum.
