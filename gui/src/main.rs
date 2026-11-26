@@ -410,6 +410,7 @@ fn setup(s: &mut SettingsWindow, waker: Waker) {
         for (_, image) in &s.app_icon.images {
             let _ = image.wait();
         }
+        s.app_icon.proto_load();
     }
 }
 
@@ -1206,6 +1207,33 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 model::settings::add_image(s, &platform::app_icon::manifest_dir().join("../03-invisible-thief.png"));
                 let id = s.app_icon.added.last().cloned().unwrap_or_default();
                 model::settings::choose_chip(s, Some(&id), Some(preset::Appearance::Dark));
+            }),
+            // PROTOTYPE #417: the App icon row with Customize… (Phantom's icon); without (a custom picture).
+            ("settings-icon-customize-row", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                views::settings::PROTO.with(|p| p.borrow_mut().row_fake = true);
+            }),
+            ("settings-icon-customize-follow", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                views::settings::PROTO.with(|p| {
+                    *p.borrow_mut() =
+                        views::settings::Proto { open: true, row_fake: true, mode: [1, 1], joined: [true, true], ..Default::default() }
+                });
+            }),
+            ("settings-icon-customize-pick", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                views::settings::PROTO.with(|p| {
+                    *p.borrow_mut() =
+                        views::settings::Proto { open: true, row_fake: true, mode: [1, 2], tile: [0, 1], ..Default::default() }
+                });
+            }),
+            ("settings-icon-customize-other", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                stand_in_dark(s);
+                views::settings::PROTO.with(|p| {
+                    *p.borrow_mut() =
+                        views::settings::Proto { open: true, row_fake: true, mode: [1, 1], other: [false, true], ..Default::default() }
+                });
             }),
             ("settings-icon-row", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));

@@ -704,6 +704,29 @@ pub struct AppIcon {
     /// The kept images that couldn't be read: their halves follow the theme, as no step of the user's.
     gone: Vec<String>,
     show: Box<dyn FnMut(IconChange<'_>)>,
+    /// PROTOTYPE: pre-drawn pictures by file stem.
+    pub proto: Vec<(String, rune::Image)>,
+}
+
+impl AppIcon {
+    /// PROTOTYPE: decodes the PNGs in `$PHANTOM_PROTO_ICONS`, waiting for them.
+    pub fn proto_load(&mut self) {
+        let (Some(cache), Some(dir)) = (&self.cache, std::env::var_os("PHANTOM_PROTO_ICONS")) else { return };
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "png")
+                && let Ok(bytes) = std::fs::read(&path)
+            {
+                let image = cache.load(bytes);
+                let _ = image.wait();
+                self.proto.push((path.file_stem().unwrap().to_string_lossy().into_owned(), image));
+            }
+        }
+    }
+
+    pub fn proto_image(&self, stem: &str) -> Option<&rune::Image> {
+        self.proto.iter().find(|(n, _)| n == stem).map(|(_, i)| i)
+    }
 }
 
 /// What reading an image file came to ([`AppIcon::poll`]).
@@ -742,6 +765,7 @@ impl AppIcon {
             images: Vec::new(),
             added: Vec::new(),
             cache: None,
+            proto: Vec::new(),
             loader: Loader::now(),
             loading: Vec::new(),
             adding: Vec::new(),

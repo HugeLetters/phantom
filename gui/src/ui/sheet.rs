@@ -111,6 +111,21 @@ impl Ui {
         first_focus: bool,
         on_pick: impl Fn(&mut S, usize) + Clone + 'static,
     ) -> El {
+        self.choice_with(key, label, labels, selected, first_focus, None, on_pick)
+    }
+
+    /// [`Self::choice`] with segment `disabled` greyed out and not pressable.
+    #[allow(clippy::too_many_arguments)]
+    pub fn choice_with<S: 'static>(
+        &self,
+        key: String,
+        label: &str,
+        labels: &[&str],
+        selected: usize,
+        first_focus: bool,
+        disabled: Option<usize>,
+        on_pick: impl Fn(&mut S, usize) + Clone + 'static,
+    ) -> El {
         let k = &self.k;
         let c = &k.c;
         let n = labels.len().max(1);
@@ -137,9 +152,13 @@ impl Ui {
             .child(indicator);
         for (i, name) in labels.iter().enumerate() {
             let on = i == selected;
+            let off = disabled == Some(i);
             let ink = if on { c.text_base } else { c.text_muted };
             let mut label = text((*name).to_owned()).key("label").font(font).color(ink).truncate().a11y_hidden();
-            if !on {
+            if off {
+                label = label.opacity(0.4);
+            }
+            if !on && !off {
                 label = label.group_color(c.text_base);
             }
             let on_pick = on_pick.clone();
@@ -160,7 +179,7 @@ impl Ui {
                 .grid_cell(i)
                 .child(label)
                 .on_press(move |s: &mut S| on_pick(s, i));
-            if !on {
+            if !on && !off {
                 segment = segment.hover(c.hover).press(self.colours.pressed_over_hover);
             }
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });

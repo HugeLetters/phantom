@@ -94,6 +94,7 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     });
     let mut overlays = edit_sheet(s, sheet, ui);
     overlays.extend(icon_sheet(&s.app_icon, sheet, ui, appearance));
+    overlays.extend(customize_sheet(s, ui));
     ui.root(page, overlays)
 }
 
@@ -598,7 +599,21 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         true => vec![(icon.image(&light), None)],
         false => vec![(icon.image(&light), Some(false)), (icon.image(&dark), Some(true))],
     };
+    let fake = PROTO.with(|p| p.borrow().row_fake);
+    let shown: Vec<(Option<&rune::Image>, Option<bool>)> = match fake {
+        true => vec![(icon.proto_image("icon-B-today-light"), Some(false)), (icon.proto_image("icon-B-today-dark"), Some(true))],
+        false => shown,
+    };
     let preview = ui.icon_preview(&shown, chip_faces());
+    let customize = (icon.sides().is_some_and(|sides| sides.iter().any(|id| id == "phantom"))).then(|| {
+        ui.button("app-icon-customize", "Customize…")
+            .accessible("Customize the App icon")
+            .on_press(|s: &mut SettingsWindow| {
+                PROTO.with(|p| p.borrow_mut().open = true);
+                let _ = s;
+            })
+            .build()
+    });
     let edit = ui
         .button("app-icon-edit", "Edit…")
         .accessible("Edit the App icon")
@@ -607,7 +622,7 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         .build();
     // One line: the caption (whole on hover), the previews, Edit….
     let caption = ui.caption(icon_name(icon, icon.choice.as_ref())).key("app_icon-note").help(icon_full_name(icon, icon.choice.as_ref()));
-    let controls = row().gap(ui.spacing().s4).center_y().child(caption).child(preview).child(edit);
+    let controls = row().gap(ui.spacing().s4).center_y().child(caption).child(preview).children(customize).child(edit);
     ui.setting_row("app_icon", label, controls, Vec::new())
 }
 
@@ -717,4 +732,147 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appear
 /// Whether `setting`'s control takes focus as the sheet opens.
 fn first(sheet: &SettingsSheet, setting: &str) -> bool {
     sheet.focus == Some(setting)
+}
+
+// ---- PROTOTYPE: the Customize sheet. State is a thread-local; presses do nothing but close. ----
+
+/// Phantom's icon colour modes, as the Colors row lists them.
+const MODES: [&str; 3] = ["Original", "Follow the look", "Pick a color"];
+/// `(name, picture stem, colour)` of the Tile swatches.
+pub const TILES: [(&str, &str, u32); 3] = [("Blue", "today", 0x3f7ed0), ("Orange", "warm", 0xa75831), ("Purple", "bold", 0x6933c2)];
+
+#[derive(Default, Clone)]
+pub struct Proto {
+    pub open: bool,
+    pub row_fake: bool,
+    /// Per half, Light then Dark: the mode and the tile picked.
+    pub mode: [usize; 2],
+    pub tile: [usize; 2],
+    /// Whether Colors and Tile are joined.
+    pub joined: [bool; 2],
+    /// The halves' looks aren't Phantom: Follow the look is greyed.
+    pub other: [bool; 2],
+}
+
+thread_local! {
+    pub static PROTO: std::cell::RefCell<Proto> = std::cell::RefCell::new(Proto::default());
+}
+
+fn customize_sheet(s: &SettingsWindow, ui: &Ui) -> Vec<El> {
+    let p = PROTO.with(|p| p.borrow().clone());
+    if !p.open {
+        return Vec::new();
+    }
+    let looks = s.looks();
+    let [light, dark] = Appearance::BOTH.map(|a| looks.shown(a).clone());
+    let uis = [&light.ui, &dark.ui];
+    let icon = &s.app_icon;
+    // The mode each half really draws: Follow the look needs a Phantom look.
+    let mode = [0, 1].map(|h| if p.mode[h] == 1 && p.other[h] { 0 } else { p.mode[h] });
+    let stem = |h: usize| {
+        let tone = if h == 0 { "light" } else { "dark" };
+        match mode[h] {
+            0 => "icon-current".to_owned(),
+            1 => format!("icon-B-today-{tone}"),
+            _ => format!("icon-B-{}-{tone}", TILES[p.tile[h]].1),
+        }
+    };
+    let picture = |h: usize, ui: &Ui| {
+        let tile = rune::el().size(72.0, 72.0).radius(16.0);
+        let tile = match icon.proto_image(&stem(h)) {
+            Some(image) => tile.pixels(image.pixels()),
+            None => tile.fill(ui.tokens().c.layer_04),
+        };
+        row().key(format!("customize-preview-{h}")).py(ui.spacing().s3).child(tile)
+    };
+    let colors = |h: usize, ui: &Ui| {
+        let c = &ui.tokens().c;
+        let mut list = col().role("radiogroup").label("Colors").gap(ui.spacing().s1);
+        for (i, name) in MODES.iter().enumerate() {
+            let off = p.other[h] && i == 1;
+            let on = mode[h] == i;
+            let dot = rune::el()
+                .size(14.0, 14.0)
+                .radius(7.0)
+                .border(1.5, if on { c.text_base } else { c.border_strong })
+                .child(rune::el().absolute(3.5, 3.5).size(7.0, 7.0).radius(3.5).fill(if on { c.text_base } else { c.bg_base }))
+                .a11y_hidden();
+            let ink = if off { c.text_muted.alpha(0.5) } else { c.text_base };
+            list = list.child(
+                row()
+                    .key(format!("customize-colors-{h}-{i}"))
+                    .role("radio")
+                    .label((*name).to_owned())
+                    .gap(ui.spacing().s3)
+                    .center_y()
+                    .h(24.0)
+                    .child(dot)
+                    .child(rune::text((*name).to_owned()).font(ui.tokens().ty.ui).color(ink)),
+            );
+        }
+        let mut c = col().w_full().gap(ui.spacing().s1).py(ui.spacing().s3).child(list);
+        if p.other[h] {
+            let why = format!("Your {} look isn\u{2019}t Phantom", if h == 0 { "Light" } else { "Dark" });
+            c = c.child(ui.caption(&why).key(format!("customize-why-{h}")));
+        }
+        c
+    };
+    let tiles = |h: usize, ui: &Ui| {
+        let mut r = row().gap(ui.spacing().s3).center_y();
+        for (i, (name, _, rgb)) in TILES.iter().enumerate() {
+            let c = rune::color::hex(&format!("#{rgb:06x}")).expect("hex");
+            let on = p.tile[h] == i;
+            let dot = rune::el()
+                .key(format!("customize-tile-{h}-{i}"))
+                .size(24.0, 24.0)
+                .radius(12.0)
+                .fill(c)
+                .border(if on { 2.0 } else { 1.0 }, if on { ui.tokens().c.text_base } else { ui.tokens().c.border_weak })
+                .a11y_hidden()
+                .label((*name).to_owned());
+            r = r.child(dot);
+        }
+        r
+    };
+    let toggle = |key: &'static str, label: &str, joined: bool| {
+        uis[1].join_toggle(format!("customize-{key}-toggle"), if joined { "Split" } else { "Join" }, label, |_: &mut SettingsWindow| {})
+    };
+    let cells = |joined: bool, f: &dyn Fn(usize, &Ui) -> El| match joined {
+        true => Halves::Joined(f(0, uis[0])),
+        false => Halves::Split(Some(f(0, uis[0])), Some(f(1, uis[1]))),
+    };
+    let header = ui.halves_header(uis[0].half_heading(false), uis[1].half_heading(true), uis);
+    let preview =
+        ui.halves_row("customize-icon", "Icon", Halves::Split(Some(picture(0, uis[0])), Some(picture(1, uis[1]))), uis, None, Vec::new());
+    let mut lines = vec![header, preview];
+    let joined = p.joined[0] && !p.other[0] && !p.other[1] && p.mode[0] == p.mode[1];
+    lines.push(ui.halves_row(
+        "customize-colors",
+        "Colors",
+        cells(joined, &colors),
+        uis,
+        Some(toggle("colors", "Colors for each Appearance", joined)),
+        Vec::new(),
+    ));
+    if mode.contains(&2) {
+        let tile = |h: usize, ui: &Ui| if mode[h] == 2 { tiles(h, ui) } else { rune::el() };
+        let tj = p.joined[1] && mode == [2, 2] && p.tile[0] == p.tile[1];
+        lines.push(ui.halves_row(
+            "customize-tile",
+            "Tile",
+            cells(tj, &tile),
+            uis,
+            Some(toggle("tile", "Tile for each Appearance", tj)),
+            Vec::new(),
+        ));
+    }
+    let body = col().w_full().child(ui.halves_card(lines, uis));
+    ui.over_sheet(
+        "customize",
+        "Customize App icon",
+        body,
+        |_: &mut SettingsWindow| PROTO.with(|p| p.borrow_mut().open = false),
+        None,
+        |_: &mut SettingsWindow| PROTO.with(|p| p.borrow_mut().open = false),
+    )
 }
