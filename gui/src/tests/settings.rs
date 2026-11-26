@@ -4910,7 +4910,7 @@ fn tab_reaches_each_swatch_and_the_pickers_parts() {
         Some(keyed.to_owned())
     };
     let mut reached = Vec::new();
-    for _ in 0..120 {
+    for _ in 0..240 {
         tab(&mut d);
         reached.extend(focused(&d));
     }
@@ -4968,4 +4968,152 @@ fn the_sheet_is_clear_of_the_traffic_lights() {
             }
         }
     }
+}
+
+/// One round of Tab through Settings' sheet from where the focus is, with Full Keyboard Access
+/// `on` or off: the key of each stop, the nearest keyed element's (`edit-tone-light` for its
+/// selected segment).
+fn tab_round(d: &mut Desk, on: bool) -> Vec<String> {
+    d.settings.set_full_keyboard_access(on);
+    let mut paths: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        d.settings.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+        d.settle();
+        let path = super::focus_path(&d.settings).unwrap_or_default();
+        if paths.first() == Some(&path) {
+            break;
+        }
+        paths.push(path);
+    }
+    let keyed = |path: &String| path.split('/').rev().find(|p| p.starts_with("edit-")).unwrap_or(path).to_owned();
+    let mut keys: Vec<String> = paths.iter().map(keyed).collect();
+    // From the sheet's first control, as it reads.
+    let first = keys.iter().position(|k| ["edit-theme-both-trigger", "edit-theme-light-trigger"].contains(&k.as_str())).unwrap_or(0);
+    keys.rotate_left(first);
+    keys
+}
+
+/// The swatches and Join of each base color's row, split as they start.
+fn base_rows() -> Vec<String> {
+    crate::theme::phantom::palette::Base::ALL
+        .map(|b| b.key())
+        .iter()
+        .flat_map(|k| [format!("edit-{k}-light-swatch"), format!("edit-{k}-dark-swatch"), format!("edit-{k}-join")])
+        .collect()
+}
+
+/// With Full Keyboard Access off, as macOS has it by default, Tab reaches every control of the
+/// Look Preset's sheet, as it does with it on, in the order they read, top to bottom and left to
+/// right: one theme, its Theme joined, then split; a theme in each half, each column top to
+/// bottom, the Light's first; then Cancel and Done.
+#[test]
+fn tab_reaches_every_control_on_the_look_sheet() {
+    let strings = |keys: &[&str]| keys.iter().map(|k| (*k).to_owned()).collect::<Vec<_>>();
+    let shared = |theme: &[&str]| {
+        let mut want = strings(theme);
+        want.extend(strings(&[
+            "edit-tone-light",
+            "edit-tone-dark",
+            "edit-tone-join",
+            "edit-corners-both-trigger",
+            "edit-corners-split",
+            "edit-motion-both-trigger",
+            "edit-motion-split",
+        ]));
+        want.extend(base_rows());
+        want.extend(strings(&["edit-every-color-section", "edit-cancel", "edit-done"]));
+        want
+    };
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    let joined = shared(&["edit-theme-both-trigger", "edit-theme-split"]);
+    assert_eq!(tab_round(&mut d, true), joined, "with Full Keyboard Access, one theme");
+    assert_eq!(tab_round(&mut d, false), joined, "without, one theme");
+    press(&mut d, "edit-theme-split");
+    let split = shared(&["edit-theme-light-trigger", "edit-theme-dark-trigger", "edit-theme-join"]);
+    assert_eq!(tab_round(&mut d, true), split, "with Full Keyboard Access, Theme split");
+    assert_eq!(tab_round(&mut d, false), split, "without, Theme split");
+    let sample = crate::theme::themes().iter().position(|t| t.id() == "sample").expect("the tests' second theme");
+    press(&mut d, "edit-theme-dark-trigger");
+    press(&mut d, &format!("option{sample}"));
+    let mut apart = strings(&["edit-theme-light-trigger", "edit-tone-light", "edit-corners-light-trigger", "edit-motion-light-trigger"]);
+    apart.extend(crate::theme::phantom::palette::Base::ALL.map(|b| format!("edit-{}-light-swatch", b.key())));
+    apart.extend(strings(&[
+        "edit-every-color-light-section",
+        "edit-theme-dark-trigger",
+        "edit-pulse-dark",
+        "edit-shape-dark-trigger",
+        "edit-accent-dark-swatch",
+        "edit-cancel",
+        "edit-done",
+    ]));
+    assert_eq!(tab_round(&mut d, true), apart, "with Full Keyboard Access, a theme in each half");
+    assert_eq!(tab_round(&mut d, false), apart, "without, a theme in each half");
+}
+
+/// Tab until the key of the focused control, or the nearest keyed element it's in, is `key`.
+fn tab_to(d: &mut Desk, key: &str) {
+    for _ in 0..200 {
+        d.settings.key(KeyEvent { key: Key::Tab, mods: Mods::default() });
+        d.settle();
+        let path = super::focus_path(&d.settings).unwrap_or_default();
+        if path.split('/').any(|p| p == key) {
+            return;
+        }
+    }
+    panic!("Tab never reaches {key}");
+}
+
+/// With Full Keyboard Access off, Space presses the control Tab reached: Split and Join split
+/// and join their row, a swatch opens its picker, Cancel puts back what the sheet changed and
+/// Done closes it; the arrows pick a Tone. Escape closes an open picker first, then the sheet.
+#[test]
+fn space_presses_what_tab_reaches_on_the_look_sheet() {
+    let space = KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() };
+    let key = |d: &mut Desk, ev: KeyEvent| {
+        d.settings.key(ev);
+        d.settle();
+    };
+    let open = |d: &Desk| d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some();
+    let tone = |d: &Desk, half: Appearance| d.main.state.looks.borrow().preset().get(half).settings.get("tone");
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    d.settings.set_full_keyboard_access(false);
+    tab_to(&mut d, "edit-theme-split");
+    key(&mut d, space.clone());
+    assert!(d.settings.find("edit-theme-join").is_some(), "Space on Split splits Theme's row");
+    let before = tone(&d, Appearance::Light);
+    tab_to(&mut d, "edit-tone-light");
+    key(&mut d, KeyEvent { key: Key::Right, mods: Mods::default() });
+    assert_ne!(tone(&d, Appearance::Light), before, "the arrow picks Light's next Tone");
+    tab_to(&mut d, "edit-tone-join");
+    key(&mut d, space.clone());
+    assert!(d.settings.find("edit-tone-split").is_some(), "Space on Join joins Tone's row");
+    // In a color's picker, Escape closes it, then the sheet.
+    tab_to(&mut d, "edit-accent-both-swatch");
+    key(&mut d, space.clone());
+    assert!(d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.picker.is_some()), "Space opens the picker");
+    key(&mut d, KeyEvent { key: Key::Escape, mods: Mods::default() });
+    assert!(d.settings.state.sheet.as_ref().and_then(|s| s.editor()).is_some_and(|e| e.picker.is_none()), "Escape closes the picker");
+    assert!(open(&d), "and leaves the sheet open");
+    key(&mut d, KeyEvent { key: Key::Escape, mods: Mods::default() });
+    assert!(!open(&d), "a second Escape closes the sheet");
+    // Space on Cancel puts back what the sheet changed.
+    let looks = d.main.state.looks.borrow().preset().clone();
+    press(&mut d, "active-edit");
+    d.settings.set_full_keyboard_access(false);
+    let tone_key = if d.settings.find("edit-tone-both").is_some() { "edit-tone-both" } else { "edit-tone-light" };
+    tab_to(&mut d, tone_key);
+    key(&mut d, KeyEvent { key: Key::Right, mods: Mods::default() });
+    assert_ne!(*d.main.state.looks.borrow().preset(), looks, "the arrow picks the next Tone");
+    tab_to(&mut d, "edit-cancel");
+    key(&mut d, space.clone());
+    assert!(!open(&d), "Space on Cancel closes the sheet");
+    assert_eq!(*d.main.state.looks.borrow().preset(), looks, "and puts back what it changed");
+    // Space on Done closes it.
+    press(&mut d, "active-edit");
+    d.settings.set_full_keyboard_access(false);
+    tab_to(&mut d, "edit-done");
+    key(&mut d, space);
+    assert!(!open(&d), "Space on Done closes the sheet");
 }
