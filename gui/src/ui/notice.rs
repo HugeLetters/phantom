@@ -150,7 +150,13 @@ impl Ui {
 
     /// Builds a [`glyph_button`](Self::glyph_button), keyed.
     pub fn glyph(&self, key: impl Into<String>, button: rune_kit::IconButton) -> El {
-        super::keyed(key, super::ringed(button.build(&self.k), &self.k))
+        super::keyed(key, self.glyph_el(button))
+    }
+
+    /// Builds a [`glyph_button`](Self::glyph_button) without the key's wrapper, for handlers
+    /// (keys, hover) that must sit on the button itself, where the focus and the pointer are.
+    pub fn glyph_el(&self, button: rune_kit::IconButton) -> El {
+        super::ringed(button.build(&self.k), &self.k)
     }
 
     /// `trigger` (the bar's notice), with `content` above it while `open`: a raised panel attached

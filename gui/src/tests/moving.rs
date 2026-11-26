@@ -767,7 +767,7 @@ fn the_title_asks_with_a_counter_and_each_choice_says_what_it_does_on_hover() {
     assert_eq!(tooltip_on(&mut rt, "clash-rename"), ["Move it in under another name"]);
     assert_eq!(tooltip_on(&mut rt, "clash-title"), Vec::<String>::new(), "gone once the pointer leaves");
     let body = super::texts(&rt, "clash-body");
-    assert_eq!(body, ["/Films/A", "Reveal in Finder"], "the paths only");
+    assert_eq!(body, ["/Films/A"], "the paths only");
     press(&mut rt, "clash-replace");
     assert_eq!(super::texts(&rt, "clash-title"), ["B is already in Films · 2 of 3"]);
 
@@ -848,14 +848,11 @@ fn several_files_show_three_paths_then_how_many_more() {
     settle(&mut rt);
     assert_eq!(super::texts(&rt, "clash-title"), ["5 files of Album are already in Films"]);
     let files = super::texts(&rt, "clash-files");
-    assert_eq!(
-        files,
-        ["/Films/Album/00 Song.flac", "Reveal in Finder", "/Films/Album/01 Song.flac", "/Films/Album/02 Song.flac", "and 2 more"]
-    );
+    assert_eq!(files, ["/Films/Album/00 Song.flac", "/Films/Album/01 Song.flac", "/Films/Album/02 Song.flac", "and 2 more"]);
 
     rt.set_viewport((640.0, 320.0), 2.0);
     settle(&mut rt);
-    assert_eq!(super::texts(&rt, "clash-files"), ["/Films/Album/00 Song.flac", "Reveal in Finder", "and 4 more"]);
+    assert_eq!(super::texts(&rt, "clash-files"), ["/Films/Album/00 Song.flac", "and 4 more"]);
     let dialog = super::generated::rect_of(&rt, "clash-dialog").expect("the dialog");
     for choice in ["clash-use-existing", "clash-replace", "clash-rename", "clash-cancel"] {
         let at = super::generated::rect_of(&rt, choice).expect(choice);
@@ -1006,4 +1003,106 @@ fn a_clashing_path_too_long_for_a_line_wraps_whole() {
     let dialog = elements.iter().find(|e| e.key.as_deref() == Some("clash-dialog")).expect("the dialog");
     assert!(dialog.rect[0] >= 0.0 && dialog.rect[0] + dialog.rect[2] <= 960.0, "within the window: {:?}", dialog.rect);
     assert!(dialog.rect[1] >= 0.0 && dialog.rect[1] + dialog.rect[3] <= 540.0, "within the window: {:?}", dialog.rect);
+    let button = elements.iter().find(|e| e.key.as_deref() == Some("clash-reveal-0")).expect("its Reveal button");
+    assert!(button.rect[0] >= path.rect[0] + path.rect[2] - 1.0, "beside the path, not over it: {:?} {:?}", button.rect, path.rect);
+
+    // At the smallest window the path still wraps whole, its button within the dialog.
+    rt.set_viewport((640.0, 320.0), 2.0);
+    settle(&mut rt);
+    let elements = rt.elements();
+    let path =
+        elements.iter().filter(|e| e.text.as_deref().is_some_and(|t| t.starts_with("/Volumes"))).find(|e| !e.exiting).expect("the path");
+    assert!(path.text.as_deref().unwrap().starts_with(folder) && !path.text.as_deref().unwrap().contains('…'), "whole at 640");
+    let dialog = elements.iter().find(|e| e.key.as_deref() == Some("clash-dialog")).expect("the dialog");
+    let button = elements.iter().find(|e| e.key.as_deref() == Some("clash-reveal-0")).expect("its Reveal button");
+    assert!(
+        button.rect[0] + button.rect[2] <= dialog.rect[0] + dialog.rect[2],
+        "button inside the dialog: {:?} {:?}",
+        button.rect,
+        dialog.rect
+    );
+}
+
+/// A clash dialog of an album with `n` files, open.
+fn album_clash(n: usize) -> Runtime<Phantom> {
+    let file = |index| proto::File {
+        index,
+        path: format!("0{index} Song.flac").into(),
+        size_bytes: 1 << 20,
+        progress_bytes: 0,
+        priority: proto::Priority::Normal,
+        missing: false,
+        on_disk: false,
+    };
+    let service =
+        MemoryService::new().with_torrents(vec![torrent(0, "Album")]).with_files(0, (0..n).map(file).collect()).holding_all("/Films");
+    let mut rt = app(service);
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| crate::model::moving::start(s, vec![0], to("/Films")));
+    settle(&mut rt);
+    rt
+}
+
+/// Each shown path ends in its own Reveal in Finder icon button, named for its file to assistive
+/// technology and saying "Reveal in Finder" on hover; "and N more" has none. Pressing one shows
+/// that file, and the dialog stays open.
+#[test]
+fn each_path_has_a_reveal_button_naming_its_file() {
+    let mut rt = album_clash(5);
+    // The button is inside the keyed element that anchors its tooltip.
+    let label = |rt: &Runtime<Phantom>, key: &str| {
+        let elements = rt.elements();
+        let at = elements.iter().find(|e| e.key.as_deref() == Some(key) && !e.exiting)?.path.clone();
+        let inside = format!("{at}/");
+        elements.into_iter().find(|e| e.path.starts_with(&inside) && e.role == "button").map(|e| e.label.unwrap_or_default())
+    };
+    assert_eq!(label(&rt, "clash-reveal-0").as_deref(), Some("Reveal 00 Song.flac in Finder"));
+    assert_eq!(label(&rt, "clash-reveal-1").as_deref(), Some("Reveal 01 Song.flac in Finder"));
+    assert_eq!(label(&rt, "clash-reveal-2").as_deref(), Some("Reveal 02 Song.flac in Finder"));
+    assert_eq!(label(&rt, "clash-reveal-3"), None, "\"and 2 more\" has no button");
+    assert_eq!(tooltip_on(&mut rt, "clash-reveal-1"), ["Reveal in Finder"]);
+
+    let shown = super::finder(&mut rt);
+    press(&mut rt, "clash-reveal-1");
+    assert_eq!(shown.all(), [("/Films/Album/01 Song.flac".into(), crate::platform::Show::Reveal)]);
+    assert!(rt.state.clash.is_some(), "the dialog stays open");
+}
+
+/// Tab reaches each Reveal in Finder button, in the paths' order, and Space and Return press the
+/// one with the focus.
+#[test]
+fn the_reveal_buttons_take_tab_and_press_with_space_and_return() {
+    let mut rt = album_clash(2);
+    let shown = super::finder(&mut rt);
+    let key = |rt: &mut Runtime<Phantom>, key| {
+        rt.key(rune::KeyEvent { key, mods: rune::Mods::default() });
+        settle(rt);
+    };
+    // Which Reveal button holds the focus: the focused element is inside its keyed wrapper.
+    let focused = |rt: &Runtime<Phantom>| {
+        let elements = rt.elements();
+        let at = elements.iter().find(|e| e.focused && !e.exiting)?.path.clone();
+        ["clash-reveal-0", "clash-reveal-1"].into_iter().find(|k| {
+            elements.iter().any(|e| e.key.as_deref() == Some(k) && !e.exiting && (at == e.path || at.starts_with(&format!("{}/", e.path))))
+        })
+    };
+    let mut reached = Vec::new();
+    for _ in 0..8 {
+        key(&mut rt, Key::Tab);
+        reached.extend(focused(&rt));
+    }
+    assert_eq!(&reached[..2], ["clash-reveal-0", "clash-reveal-1"], "{reached:?}");
+    while focused(&rt) != Some("clash-reveal-1") {
+        key(&mut rt, Key::Tab);
+    }
+    key(&mut rt, Key::Enter);
+    key(&mut rt, Key::Text(" ".into()));
+    assert_eq!(
+        shown.all(),
+        [
+            ("/Films/Album/01 Song.flac".into(), crate::platform::Show::Reveal),
+            ("/Films/Album/01 Song.flac".into(), crate::platform::Show::Reveal)
+        ],
+        "Return and Space each reveal the focused button's file"
+    );
 }
