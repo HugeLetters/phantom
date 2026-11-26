@@ -46,15 +46,13 @@ impl Setting {
     }
 }
 
-/// A run of a theme's settings that Settings shows under one title: "Colors", with the line "The
-/// rest follow these.", or "Every color", which opens and closes.
+/// A run of a theme's settings that Settings shows under one title: "Colors", or "Every color",
+/// which opens and closes.
 #[derive(Debug, PartialEq)]
 pub struct Section {
     /// What its header is keyed by: `<key>-section`.
     pub key: &'static str,
     pub title: &'static str,
-    /// A line under the title.
-    pub hint: Option<&'static str>,
     /// Whether it starts closed, its header opening it.
     pub folds: bool,
 }
@@ -186,11 +184,12 @@ impl Value {
 
 /// What a theme works out of its settings for Settings to show: the color each color setting
 /// comes to, and the warnings about a setting's value ("Hard to read on Surface: 3.8:1 (needs
-/// 4.5:1).").
+/// 4.5:1)."), and the most warnings a setting could have, each as long as it could be.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Resolved {
     colors: Vec<(&'static str, Rgb)>,
     warnings: Vec<(&'static str, String)>,
+    room: Vec<(&'static str, String)>,
 }
 
 impl Resolved {
@@ -217,6 +216,16 @@ impl Resolved {
 
     pub fn warn(&mut self, key: &'static str, warning: String) {
         self.warnings.push((key, warning));
+    }
+
+    /// The warnings setting `key` could have at most, each as long as it could be, whatever it's
+    /// set to: the room its picker keeps for them, so it never grows while a drag goes.
+    pub fn room(&self, key: &str) -> Vec<&str> {
+        self.room.iter().filter(|(k, _)| *k == key).map(|(_, w)| w.as_str()).collect()
+    }
+
+    pub fn make_room(&mut self, key: &'static str, line: String) {
+        self.room.push((key, line));
     }
 }
 

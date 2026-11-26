@@ -30,7 +30,7 @@ pub const CORNERS: &str = "corners";
 pub const MOTION: &str = "motion";
 
 /// Corners and Motion's section.
-static LOOK: Section = Section { key: "look", title: "Look", hint: None, folds: false };
+static LOOK: Section = Section { key: "look", title: "Look", folds: false };
 
 /// Tone, then Look (Corners, Motion), then Colors: the bases, then every other color.
 static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {

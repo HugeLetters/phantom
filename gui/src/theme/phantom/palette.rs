@@ -13,10 +13,10 @@ use super::super::oklab::{self, contrast, ink_over, lerp_oklab, over};
 use super::super::setting::{Kind, Resolved, Rgb, Section, Setting, Value, Values};
 
 /// The base colors' section.
-pub static COLORS: Section = Section { key: "colors", title: "Colors", hint: Some("The rest follow these."), folds: false };
+pub static COLORS: Section = Section { key: "colors", title: "Colors", folds: false };
 
 /// Every other color, in groups, under a header that opens it.
-pub static EVERY_COLOR: Section = Section { key: "every-color", title: "Every color", hint: None, folds: true };
+pub static EVERY_COLOR: Section = Section { key: "every-color", title: "Every color", folds: true };
 
 /// A base color: the rest follow these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +333,9 @@ fn resolve(p: &Palette, today: &Palette, values: &Values, bases: &[Color; 8]) ->
     for (key, warning) in warnings(p, today) {
         resolved.warn(key, warning);
     }
+    for (key, line) in room() {
+        resolved.make_room(key, line);
+    }
     resolved
 }
 
@@ -342,30 +345,59 @@ fn resolve(p: &Palette, today: &Palette, values: &Values, bases: &[Color; 8]) ->
 /// as Phantom has it by default isn't warned about, though it may fall short (faint text in
 /// Light reads 3.8:1).
 fn warnings(p: &Palette, today: &Palette) -> Vec<(&'static str, String)> {
+    pairs()
+        .into_iter()
+        .filter(|pair| (pair.ink)(p) != (pair.ink)(today) || (pair.on)(p) != (pair.on)(today))
+        .filter_map(|pair| {
+            let ratio = contrast((pair.ink)(p), over((pair.on)(p), p.bg_base));
+            // One decimal, rounded down, so a pair just short never reads as enough.
+            let shown = (ratio * 10.0).floor() / 10.0;
+            (ratio < pair.needs).then(|| (pair.key, pair.line(shown)))
+        })
+        .collect()
+}
+
+/// Every warning there could be, each as long as it can be (its ratio "0.0"), about the setting
+/// whose popup shows it: what the popup keeps room for.
+fn room() -> Vec<(&'static str, String)> {
+    pairs().into_iter().map(|pair| (pair.key, pair.line(0.0))).collect()
+}
+
+/// A pair that needs contrast: `ink` on `on`, at `needs`:1, warned about in `key`'s popup.
+struct Pair {
+    key: &'static str,
+    verb: &'static str,
+    ink: fn(&Palette) -> Color,
+    name: &'static str,
+    on: fn(&Palette) -> Color,
+    needs: f32,
+}
+
+impl Pair {
+    fn line(&self, shown: f32) -> String {
+        let Pair { verb, name, needs, .. } = self;
+        format!("Hard to {verb} on {name}: {shown:.1}:1 (needs {needs}:1).")
+    }
+}
+
+/// The pairs Phantom draws that need contrast, as [`warnings`] has them.
+fn pairs() -> Vec<Pair> {
     type Get = fn(&Palette) -> Color;
     let (surface, background): (Get, Get) = (|p| p.bg_base, |p| p.page);
-    let mut pairs: Vec<(&'static str, &'static str, Get, &'static str, Get, f32)> = Vec::new();
+    let pair = |key, verb, ink: Get, name, on: Get, needs| Pair { key, verb, ink, name, on, needs };
+    let mut pairs = Vec::new();
     let texts: [(&'static str, Get); 3] =
         [(Base::Text.key(), |p| p.text_base), ("muted_text", |p| p.text_muted), ("faint_text", |p| p.text_faint)];
     for (key, ink) in texts {
-        pairs.push((key, "read", ink, "Surface", surface, 4.5));
-        pairs.push((key, "read", ink, "Background", background, 4.5));
+        pairs.push(pair(key, "read", ink, "Surface", surface, 4.5));
+        pairs.push(pair(key, "read", ink, "Background", background, 4.5));
     }
-    pairs.push((Base::Accent.key(), "see", |p| p.bg_accent, "Surface", surface, 3.0));
-    pairs.push((Base::Accent.key(), "see", |p| p.bg_accent, "Background", background, 3.0));
-    pairs.push((Base::Danger.key(), "read", |p| p.danger.fg, "Danger fill", |p| p.danger.bg, 4.5));
-    pairs.push((Base::Warning.key(), "read", |p| p.warning.fg, "Warning fill", |p| p.warning.bg, 4.5));
-    pairs.push((Base::Success.key(), "read", |p| p.success.fg, "Success fill", |p| p.success.bg, 4.5));
+    pairs.push(pair(Base::Accent.key(), "see", |p| p.bg_accent, "Surface", surface, 3.0));
+    pairs.push(pair(Base::Accent.key(), "see", |p| p.bg_accent, "Background", background, 3.0));
+    pairs.push(pair(Base::Danger.key(), "read", |p| p.danger.fg, "Danger fill", |p| p.danger.bg, 4.5));
+    pairs.push(pair(Base::Warning.key(), "read", |p| p.warning.fg, "Warning fill", |p| p.warning.bg, 4.5));
+    pairs.push(pair(Base::Success.key(), "read", |p| p.success.fg, "Success fill", |p| p.success.bg, 4.5));
     pairs
-        .into_iter()
-        .filter(|(_, _, ink, _, on, _)| ink(p) != ink(today) || on(p) != on(today))
-        .filter_map(|(key, verb, ink, name, on, needs)| {
-            let ratio = contrast(ink(p), over(on(p), p.bg_base));
-            // One decimal, rounded down, so a pair just short never reads as enough.
-            let shown = (ratio * 10.0).floor() / 10.0;
-            (ratio < needs).then(|| (key, format!("Hard to {verb} on {name}: {shown:.1}:1 (needs {needs}:1).")))
-        })
-        .collect()
 }
 
 #[cfg(test)]

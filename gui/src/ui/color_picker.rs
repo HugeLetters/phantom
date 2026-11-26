@@ -44,8 +44,11 @@ pub struct PopupParts {
     pub field: El,
     /// Follow <Base> or Reset.
     pub button: El,
-    /// Lines under them, each in its tone: the warnings, why the hex was refused.
+    /// Lines under them, each in its tone, and its key: the warnings.
     pub lines: Vec<(String, Tone, String)>,
+    /// The most lines there could be, each as long as it could be: the room kept under them, so
+    /// the popup's size and place stay the same whatever `lines` holds.
+    pub room: Vec<String>,
 }
 
 impl Ui {
@@ -170,7 +173,7 @@ impl Ui {
                 true
             })
             .child(mark(el().absolute(2.0, (1.0 - at.s) * h - 3.0).size(BAR - 4.0, 6.0).radius(3.0)));
-        let PopupParts { field, button, lines } = parts;
+        let PopupParts { field, button, lines, room } = parts;
         let mut body = col()
             .key(format!("{key}-content"))
             .w(POPUP_WIDTH)
@@ -178,8 +181,15 @@ impl Ui {
             .gap(GAP + 2.0)
             .child(row().gap(GAP + GAP).child(square).child(bar))
             .child(row().gap(GAP).items_stretch().child(field).child(button));
-        for (line, tone, line_key) in lines {
-            body = body.child(text(line).key(line_key).font(k.ty.text_small).color(self.tone_color(tone)).wrap());
+        if !room.is_empty() || !lines.is_empty() {
+            // The room the lines could take, unseen; the lines over it, from its top.
+            let ghost = |line: String| text(line).font(k.ty.text_small).color(rune::Color::TRANSPARENT).wrap();
+            let kept = col().gap(GAP + 2.0).children(room.into_iter().map(ghost)).a11y_hidden().inert();
+            let mut shown = col().absolute(0.0, 0.0).w_full().gap(GAP + 2.0);
+            for (line, tone, line_key) in lines {
+                shown = shown.child(text(line).key(line_key).font(k.ty.text_small).color(self.tone_color(tone)).wrap());
+            }
+            body = body.child(col().key(format!("{key}-lines")).w_full().child(kept).child(shown));
         }
         let surface = popover::raised(k, body, k.radius.md)
             .border(1.0, self.colors.border_on_page)
@@ -201,8 +211,7 @@ impl Ui {
 }
 
 /// Where the pointer is in the element as the press found it: where it went down plus how far
-/// it's travelled. The popup may move under it (a warning line appearing makes it taller, and it
-/// stays inside the window), and the pick mustn't jump with it.
+/// it's travelled, so the pick never jumps should the popup move under it.
 fn held(d: &Drag) -> (f32, f32) {
     (d.start_x + d.dx, d.start_y + d.dy)
 }

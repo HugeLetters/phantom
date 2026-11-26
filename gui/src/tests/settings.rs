@@ -2572,7 +2572,7 @@ fn open_folded(d: &mut Desk) {
         .into_iter()
         .filter(|e| !e.exiting)
         .filter_map(|e| e.key)
-        .find(|k| (k.ends_with("-section") || k.ends_with("-fold")) && !open.iter().any(|o| k.contains(o)));
+        .find(|k| k.ends_with("-section") && !open.iter().any(|o| k.contains(o)));
     if let Some(header) = header {
         press(d, &header);
     }
@@ -3602,8 +3602,8 @@ fn a_long_edit_keeps_the_older_changes() {
 
 /// The Theme row splits; a theme chosen for the Dark half makes each column its own list, its
 /// Theme pop-up then its own theme's settings (Tone only under ☀, Sample's three only under ☾),
-/// with no Join or Split anywhere. The same theme chosen again brings the shared rows back, each split where
-/// its values differ (#87).
+/// with no Join or Split anywhere; Phantom's "Every color" opens from its row there too. The same
+/// theme chosen again brings the shared rows back, each split where its values differ (#87).
 #[test]
 fn a_theme_in_each_half_has_its_own_column() {
     let mut d = appearance_tab();
@@ -3629,6 +3629,14 @@ fn a_theme_in_each_half_has_its_own_column() {
     let top = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).expect(key)[1];
     assert_eq!(top(&d, "edit-pulse-dark-row"), top(&d, "edit-tone-light-row"), "each list packed from the top");
     assert_eq!(crate::changes::menu_title(&d.main.state), "Undo Theme Change");
+    // Phantom's sections in its own list: "Every color" opens from its chevron row, as with one
+    // theme.
+    assert!(d.settings.find("edit-every-color-light-section").is_some(), "Every color's row under ☀");
+    assert!(d.settings.find("edit-faint_text-light-swatch").is_none(), "closed at first");
+    press(&mut d, "edit-every-color-light-section");
+    assert!(d.settings.find("edit-faint_text-light-swatch").is_some(), "open, its colors under ☀");
+    press(&mut d, "edit-every-color-light-section");
+    assert!(d.settings.find("edit-faint_text-light-swatch").is_none(), "closed again");
     // Phantom in the Dark half's pop-up: one theme, Tone split as its values differ.
     press(&mut d, "edit-theme-dark-trigger");
     press(&mut d, "option0");
@@ -4683,6 +4691,47 @@ fn a_drag_picks_and_follow_puts_it_back() {
     d.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
     d.settle();
     assert_eq!(color_of(&d, light, "faint_text"), before, "⌘Z again: the drag was one step");
+}
+
+/// The picker keeps room for every warning its color could have: a drag that brings warnings up
+/// neither grows the popup nor moves it, in a window short enough that a taller one would flip
+/// above its swatch; the color applies all the while.
+#[test]
+fn a_drag_that_brings_warnings_never_moves_the_picker() {
+    for width in [960.0, 640.0] {
+        let mut d = appearance_tab();
+        d.settings.set_viewport((width, 600.0), 2.0);
+        d.settle();
+        press(&mut d, "active-edit");
+        press(&mut d, "edit-accent-light-swatch");
+        let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key} at {width}"));
+        let warned = |d: &Desk| {
+            d.settings
+                .elements()
+                .into_iter()
+                .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("edit-accent-light-warning-")))
+                .count()
+        };
+        let popup = rect(&d, "edit-accent-light-popup");
+        assert_eq!(warned(&d), 0, "at {width} pt the default Accent has no warning");
+        let square = rect(&d, "edit-accent-light-square");
+        let (x, y) = (square[0] + square[2] / 2.0, square[1] + square[3] / 2.0);
+        d.settings.pointer_down(x, y);
+        let mut colors = Vec::new();
+        for i in 1..=10 {
+            let t = i as f32 / 10.0;
+            d.settings.pointer_move(x - 110.0 * t, y - 40.0 * t);
+            d.settle();
+            assert_eq!(rect(&d, "edit-accent-light-popup"), popup, "at {width} pt, step {i}: the popup stays");
+            colors.push(color_of(&d, Appearance::Light, "accent"));
+        }
+        assert!(warned(&d) > 0, "at {width} pt the drag ends on a light Accent, hard to see");
+        d.settings.pointer_up(x - 110.0, y - 40.0);
+        d.settle();
+        assert_eq!(rect(&d, "edit-accent-light-popup"), popup, "at {width} pt the popup stays as the drag ends");
+        colors.dedup();
+        assert!(colors.len() > 5, "at {width} pt the color applies as it moves: {colors:?}");
+    }
 }
 
 /// Reset on a changed base: the theme's own again, and Escape closes the picker, the sheet staying.

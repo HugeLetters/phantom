@@ -303,14 +303,9 @@ fn editor(
                     editor,
                     |section, open| {
                         let key = section.key;
-                        ui.section_header(
-                            &format!("{EDIT}-{key}"),
-                            section.title,
-                            section.hint,
-                            open,
-                            looks,
-                            move |s: &mut SettingsWindow| toggle_section(s, key),
-                        )
+                        ui.section_header(&format!("{EDIT}-{key}"), section.title, open, looks, move |s: &mut SettingsWindow| {
+                            toggle_section(s, key)
+                        })
                     },
                     |group| ui.group_header(&format!("{EDIT}-group-{}", group.to_lowercase()), group, looks),
                 );
@@ -340,18 +335,10 @@ fn editor(
                         editor,
                         |section, open| {
                             let key = section.key;
-                            let title = ui.heading(section.title).key(format!("{EDIT}-{key}-{}-title", side.key()));
-                            match open {
-                                Some(open) => {
-                                    let fold = ui
-                                        .button(format!("{EDIT}-{key}-{}-fold", side.key()), if open { "Hide" } else { "Show" })
-                                        .small()
-                                        .on_press(move |s: &mut SettingsWindow| toggle_section(s, key))
-                                        .build();
-                                    row().w_full().gap(ui.spacing().s4).center_y().child(title).child(fold)
-                                }
-                                None => title,
-                            }
+                            ui.section_title(&format!("{EDIT}-{key}-{}", side.key()), section.title, open, move |s: &mut SettingsWindow| {
+                                toggle_section(s, key)
+                            })
+                            .px(ui.spacing().s2)
                         },
                         |group| ui.caption(group),
                     );
@@ -603,7 +590,8 @@ fn theme_control(
                     .enumerate()
                     .map(|(i, w)| (w.to_owned(), Tone::Warning, format!("{control_key}-warning-{i}")))
                     .collect();
-                let parts = PopupParts { field, button, lines };
+                let room = half.resolved.room(key).into_iter().map(str::to_owned).collect();
+                let parts = PopupParts { field, button, lines, room };
                 ui.color_popup(
                     &control_key,
                     &swatch_key,

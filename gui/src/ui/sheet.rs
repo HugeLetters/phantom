@@ -521,45 +521,46 @@ impl Ui {
     }
 
     /// A section's header across both halves of the editor, each on its half's window color:
-    /// `title`, with `hint` under it, keyed `<key>-title`; one that folds (`open` is `Some`) has a
-    /// chevron and is pressed to open or close, keyed `<key>-section`.
+    /// [`Ui::section_title`] in the left half.
     pub fn section_header<S: 'static>(
         &self,
         key: &str,
         title: &str,
-        hint: Option<&str>,
         open: Option<bool>,
         looks: [&Ui; 2],
         on_press: impl Fn(&mut S) + 'static,
     ) -> El {
         let [light, dark] = looks;
-        let k = &light.k;
+        let left = light.section_title(key, title, open, on_press);
+        self.halves_line(&format!("{key}-header"), left, col().w_full(), [light.k.c.page, dark.k.c.page])
+    }
+
+    /// A section's title, keyed `<key>-title`; one that folds (`open` is `Some`) has a chevron and
+    /// is pressed to open or close, keyed `<key>-section`.
+    pub fn section_title<S: 'static>(&self, key: &str, title: &str, open: Option<bool>, on_press: impl Fn(&mut S) + 'static) -> El {
+        let k = &self.k;
         let mut head = row().gap(self.spacing.s3).center_y();
         if let Some(open) = open {
             let glyph = if open { k.glyph.chevron_down } else { k.glyph.caret_right };
             head = head.child(icon(glyph, 12.0).color(k.c.text_muted).a11y_hidden());
         }
         head = head.child(text(title.to_owned()).font(k.ty.ui_medium).color(k.c.text_base).wrap());
-        let mut left = col()
+        let left = col()
             .key(format!("{key}-{}", if open.is_some() { "section" } else { "title" }))
             .w_full()
             .pt(self.spacing.s6)
             .pb(self.spacing.s4)
-            .gap(self.spacing.s1)
             .child(head);
-        if let Some(hint) = hint {
-            left = left.child(text(hint.to_owned()).font(k.ty.text_small).color(k.c.text_muted).wrap());
-        }
-        if let Some(open) = open {
-            left = left
+        match open {
+            Some(open) => left
                 .role("button")
                 .label(title.to_owned())
                 .expanded(open)
                 .focusable(true)
                 .focus_ring(2.0, 1.0, k.c.border_focus)
-                .on_press(on_press);
+                .on_press(on_press),
+            None => left,
         }
-        self.halves_line(&format!("{key}-header"), left, col().w_full(), [light.k.c.page, dark.k.c.page])
     }
 
     /// A group's name inside a section ("Text", "Surfaces"), across both halves on their window
