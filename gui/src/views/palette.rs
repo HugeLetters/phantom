@@ -15,7 +15,8 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
     }
     let field = ui
         .text_field("palette-field", &s.palette.query, "Command")
-        .placeholder("Type a command")
+        // PROTOTYPE (#434): in a setting's choices, the field filters them.
+        .placeholder(if s.palette.sub.is_some() { "Choose" } else { "Type a command or setting" })
         .on_edit(|s: &mut Phantom| &mut s.palette.query)
         .on_submit(palette::run)
         .on_key(on_key)
@@ -26,7 +27,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         .map(|e| {
             let first = group != Some(e.group);
             group = Some(e.group);
-            PaletteRow { heading: first.then(|| heading(s, e.group)), label: e.label, hint: e.hint, icon: e.icon }
+            PaletteRow { heading: first.then(|| heading(s, e.group)), label: e.label, hint: e.hint, icon: e.icon, place: e.place }
         })
         .collect();
     ui.palette(
@@ -48,7 +49,9 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Up => palette::up(s, tx),
         Key::Down => palette::down(s, tx),
-        Key::Escape => palette::dismiss(s, tx),
+        // PROTOTYPE (#434)
+        Key::Escape => palette::back(s, tx),
+        Key::Enter if ev.mods.cmd => palette::show_highlighted(s, tx),
         _ => return false,
     }
     true

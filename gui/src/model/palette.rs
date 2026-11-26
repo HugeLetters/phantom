@@ -71,10 +71,17 @@ pub struct Palette {
     /// The command highlighted, as last arrowed to, clicked or opened on: the highlight follows it
     /// when rows come and go under it ([`highlighted`]). Meaningful only while `seen` is the text.
     on: Option<Pin>,
+    // PROTOTYPE (#434): the Choice setting whose choices the palette lists instead, and the text
+    // typed before it did.
+    pub sub: Option<&'static str>,
+    pub before_sub: String,
+    // PROTOTYPE (#434): Keep awake, faked here: the real one is the service's.
+    pub keep_awake: bool,
 }
 
 /// What identifies a listed command: the command, and for "Move to Films" its folder.
-type Pin = (Command, Option<proto::AbsolutePath>);
+// PROTOTYPE (#434): and a setting's or place's label.
+type Pin = (Command, Option<proto::AbsolutePath>, Option<String>);
 
 impl Palette {
     pub fn is_open(&self) -> bool {
@@ -107,9 +114,13 @@ impl Palette {
 /// What a command acts on: the palette lists them in this order, each under a heading naming it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Group {
+    // PROTOTYPE (#434)
+    Recent,
+    Choices,
     Torrents,
     Files,
     App,
+    Settings,
 }
 
 /// The heading over `group`'s commands, naming the actual selection: the torrent's name or "3
@@ -131,6 +142,9 @@ pub fn heading(s: &Phantom, group: Group) -> String {
             None => String::new(),
         },
         Group::App => "Phantom".to_owned(),
+        Group::Recent => "Recent".to_owned(),
+        Group::Settings => "Settings".to_owned(),
+        Group::Choices => s.palette.sub.and_then(|k| theme_setting(s, k)).map_or(String::new(), |(st, _)| st.label.to_owned()),
     }
 }
 
@@ -145,11 +159,14 @@ pub struct Entry {
     pub icon: Option<Icon>,
     /// A folder Move to ▸ offers (#87), for "Move to Films": it moves there with no picker.
     pub to: Option<proto::AbsolutePath>,
+    // PROTOTYPE (#434): where it lives ("Appearance ▸ Edit… ▸ Look"), and what it is.
+    pub place: Option<String>,
+    pub proto: Option<Proto>,
 }
 
 impl Entry {
     fn pin(&self) -> Pin {
-        (self.command, self.to.clone())
+        (self.command, self.to.clone(), self.proto.as_ref().map(|_| self.label.clone()))
     }
 }
 
@@ -168,7 +185,12 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
         hint: command.spec().hint(),
         icon: command.spec().icon,
         to: None,
+        place: None,
+        proto: None,
     };
+    if s.palette.sub.is_some() {
+        return choices(s);
+    }
     let mut entries = Vec::new();
     for c in offered {
         entries.push(entry(Command::Torrents(c), Group::Torrents, c.wording(n, can_delete)));
@@ -186,8 +208,189 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
     // Worded as the file menu words them, but for the priorities ([`label_of`]).
     entries.extend(on_files(s).into_iter().map(|c| entry(Command::Files(c), Group::Files, label_of(c))));
     entries.extend(InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| entry(Command::App(c), Group::App, c.wording(s))));
+    let settings = settings_entries(s);
+    if s.palette.query.text.trim().is_empty() {
+        // PROTOTYPE (#434): a fixed "recent" list, where the real one keeps what was last picked.
+        let recent: Vec<Entry> = ["Corners", "Keep awake", "Tone"]
+            .iter()
+            .filter_map(|l| settings.iter().find(|e| e.label == *l).cloned())
+            .map(|e| Entry { group: Group::Recent, ..e })
+            .collect();
+        entries.splice(0..0, recent);
+    } else {
+        entries.extend(settings);
+    }
     entries
 }
+
+// ---- PROTOTYPE (#434) from here to the end of `settings_entries`: not for merge. ----
+
+/// What a settings entry is, and so what picking it does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Proto {
+    /// A place: Settings, a tab, a sheet. Picking opens it.
+    Place(Option<crate::model::settings::Tab>, bool),
+    /// A service setting shown as a switch: picking flips it.
+    Switch(crate::model::settings::Switch),
+    /// A service setting with a field or a button: picking shows it in Settings.
+    Service(&'static str),
+    /// A theme setting, by key: a Choice opens its choices, a Toggle flips, a Color shows it.
+    Theme(&'static str),
+    /// One of the choices of a Choice setting.
+    Choice(&'static str, &'static str),
+    /// The setting in Settings, its control focused.
+    Show(&'static str),
+}
+
+/// The theme setting `key` as the Active look declares it, and its value in Light.
+fn theme_setting(s: &Phantom, key: &str) -> Option<(&'static crate::theme::setting::Setting, crate::theme::setting::Value)> {
+    s.looks.borrow().preset().get(crate::theme::preset::Appearance::Light).settings.iter().find(|(st, _)| st.key == key)
+}
+
+fn plain(label: impl Into<String>, group: Group, place: Option<String>, hint: Option<String>, proto: Proto) -> Entry {
+    Entry { command: Command::App(InApp::Palette), group, label: label.into(), hint, icon: None, to: None, place, proto: Some(proto) }
+}
+
+/// The choices of the setting the palette is in, the current one ticked, then Show in Settings.
+fn choices(s: &Phantom) -> Vec<Entry> {
+    use crate::theme::setting::{Kind, Value};
+    let Some(key) = s.palette.sub else { return Vec::new() };
+    let Some((setting, value)) = theme_setting(s, key) else { return Vec::new() };
+    let Kind::Choice { choices, .. } = &setting.kind else { return Vec::new() };
+    let mut out: Vec<Entry> = choices
+        .iter()
+        .map(|c| {
+            let tick = (value == Value::Choice(c.id)).then(|| "✓".to_owned());
+            plain(c.label, Group::Choices, None, tick, Proto::Choice(key, c.id))
+        })
+        .collect();
+    out.push(plain("Show in Settings", Group::Choices, None, Some("⌘↩".into()), Proto::Show(key)));
+    out
+}
+
+/// Settings' places and every setting: the service's, then the theme's, read from what the
+/// Active look's theme declares.
+fn settings_entries(s: &Phantom) -> Vec<Entry> {
+    use crate::model::settings::{Switch, Tab};
+    use crate::theme::setting::{Kind, Value};
+    let g = Group::Settings;
+    let on_off = |on: bool| Some(if on { "On" } else { "Off" }.to_owned());
+    let mut out = vec![
+        plain("Settings…", g, None, Some("⌘,".into()), Proto::Place(None, false)),
+        plain("General", g, Some("Settings".into()), None, Proto::Place(Some(Tab::General), false)),
+        plain("Network", g, Some("Settings".into()), None, Proto::Place(Some(Tab::Network), false)),
+        plain("Appearance", g, Some("Settings".into()), None, Proto::Place(Some(Tab::Appearance), false)),
+        plain("Edit…", g, Some("Settings ▸ Appearance ▸ Look".into()), None, Proto::Place(Some(Tab::Appearance), true)),
+        plain("Default download folder", g, Some("General".into()), None, Proto::Service("default_destination")),
+        plain("Keep awake", g, Some("General".into()), on_off(s.palette.keep_awake), Proto::Switch(Switch::KeepAwake)),
+        plain("Stop seeding at ratio", g, Some("General".into()), None, Proto::Service("seed_ratio")),
+        plain("Stop seeding after", g, Some("General".into()), None, Proto::Service("seed_time")),
+        plain("Listening port", g, Some("Network".into()), None, Proto::Service("listen_port")),
+        plain("UPnP", g, Some("Network".into()), on_off(true), Proto::Switch(Switch::Upnp)),
+        plain("Download limit", g, Some("Network".into()), None, Proto::Service("download_limit")),
+        plain("Upload limit", g, Some("Network".into()), None, Proto::Service("upload_limit")),
+    ];
+    let declared = s.looks.borrow().preset().get(crate::theme::preset::Appearance::Light).settings.iter().collect::<Vec<_>>();
+    for (setting, value) in declared {
+        let place = match setting.section {
+            Some(section) => format!("Appearance ▸ Edit… ▸ {}", section.title),
+            None => "Appearance ▸ Edit…".to_owned(),
+        };
+        let hint = match (&setting.kind, value) {
+            (Kind::Choice { choices, .. }, Value::Choice(id)) => choices.iter().find(|c| c.id == id).map(|c| format!("{} ›", c.label)),
+            (Kind::Toggle { .. }, Value::Toggle(on)) => on_off(on),
+            _ => None,
+        };
+        out.push(plain(setting.label, g, Some(place), hint, Proto::Theme(setting.key)));
+    }
+    out
+}
+
+/// What picking a settings entry does.
+fn run_proto(s: &mut Phantom, entry: Entry, proto: Proto, tx: &mut Tx) {
+    use crate::model::settings::{self as st, Side, Tab};
+    use crate::theme::setting::{Kind, Value};
+    match proto {
+        Proto::Theme(key) => {
+            let Some((setting, value)) = theme_setting(s, key) else { return };
+            match (&setting.kind, value) {
+                (Kind::Choice { .. }, _) => {
+                    s.palette.before_sub = s.palette.query.text.clone();
+                    s.palette.sub = Some(key);
+                    s.palette.query = TextEdit::new("");
+                    s.palette.query.focused = true;
+                    // The highlight starts on the current choice.
+                    let list = listed(s);
+                    let at = list.iter().position(|e| e.hint.as_deref() == Some("✓")).unwrap_or(0);
+                    s.palette.state = State::Open { at };
+                    s.palette.seen = String::new();
+                    s.palette.on = list.get(at).map(Entry::pin);
+                    return;
+                }
+                (Kind::Toggle { .. }, Value::Toggle(on)) => {
+                    dismiss(s, tx);
+                    set_theme(s, key, Value::Toggle(!on));
+                }
+                _ => return show(s, key, tx),
+            }
+        }
+        Proto::Choice(key, id) => {
+            dismiss(s, tx);
+            set_theme(s, key, Value::Choice(id));
+            let label = theme_setting(s, key).map_or("", |(st, _)| st.label);
+            s.bar.tell(crate::notice::Notice::new(format!("{label}: {}", entry.label)).brief());
+        }
+        Proto::Show(key) => show(s, key, tx),
+        Proto::Switch(switch) => {
+            dismiss(s, tx);
+            s.palette.keep_awake = !s.palette.keep_awake;
+            let _ = switch;
+            let word = if s.palette.keep_awake { "On" } else { "Off" };
+            s.bar.tell(crate::notice::Notice::new(format!("Keep awake: {word}")).brief());
+        }
+        Proto::Service(key) => {
+            dismiss(s, tx);
+            s.settings.post(move |w, tx| st::show_setting(w, key, Some(tx)));
+        }
+        Proto::Place(tab, edit) => {
+            dismiss(s, tx);
+            s.settings.post(move |w, _| {
+                st::open(w);
+                st::show_tab(w, tab.unwrap_or(Tab::General));
+                if edit {
+                    st::presets::edit_active(w);
+                }
+            });
+        }
+    }
+    let _ = Side::Both;
+}
+
+/// The theme setting `key` in Settings: Appearance, the Active look's sheet open, its control focused.
+fn show(s: &mut Phantom, key: &'static str, tx: &mut Tx) {
+    use crate::model::settings::{self as st, Side, Tab};
+    dismiss(s, tx);
+    s.settings.post(move |w, _| {
+        st::open(w);
+        st::show_tab(w, Tab::Appearance);
+        st::presets::edit_active(w);
+        if let Some(edit) = w.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) {
+            edit.focus = Some((key, Side::Both));
+        }
+    });
+}
+
+/// Sets a theme setting in both halves of the Active look. The real one is one step of Undo.
+fn set_theme(s: &mut Phantom, key: &str, value: crate::theme::setting::Value) {
+    use crate::theme::preset::Appearance;
+    for a in Appearance::BOTH {
+        let mut look = s.looks.borrow().preset().get(a).clone();
+        look.settings.set(key, value);
+        s.looks.borrow_mut().set(a, look);
+    }
+}
+
+// ---- end of PROTOTYPE ----
 
 /// A file command's label in the palette: the priorities say what they set, as the file menu's
 /// title does over them.
@@ -206,7 +409,14 @@ pub fn listed(s: &Phantom) -> Vec<Entry> {
     let query = s.palette.query.text.trim();
     let mut scored: Vec<(i32, usize, Entry)> =
         offered(s).into_iter().enumerate().filter_map(|(i, e)| score(query, &e.label).map(|score| (score, i, e))).collect();
-    scored.sort_by_key(|(score, i, e)| (e.group, -score, *i));
+    // PROTOTYPE (#434): while typing, the group with the best match first.
+    let best = |g: Group| scored.iter().filter(|(_, _, e)| e.group == g).map(|(sc, _, _)| *sc).max().unwrap_or(0);
+    let bests: Vec<(Group, i32)> = [Group::Recent, Group::Choices, Group::Torrents, Group::Files, Group::App, Group::Settings]
+        .into_iter()
+        .map(|g| (g, best(g)))
+        .collect();
+    let rank = |g: Group| if query.is_empty() { 0 } else { -bests.iter().find(|(x, _)| *x == g).map_or(0, |(_, b)| *b) };
+    scored.sort_by_key(|(score, i, e)| (rank(e.group), e.group, -score, *i));
     scored.into_iter().map(|(_, _, e)| e).collect()
 }
 
@@ -266,6 +476,7 @@ pub fn dismiss(s: &mut Phantom, tx: &mut Tx) {
 
 /// [`dismiss`]ed, a command picked, or another overlay opening.
 pub fn close(s: &mut Phantom) {
+    s.palette.sub = None;
     s.palette.then(Event::Close);
     s.palette.query = TextEdit::default();
 }
@@ -313,6 +524,9 @@ pub fn down(s: &mut Phantom, tx: &mut Tx) {
 pub fn run(s: &mut Phantom, tx: &mut Tx) {
     let at = highlighted(s);
     let Some(entry) = listed(s).into_iter().nth(at) else { return };
+    if let Some(proto) = entry.proto.clone() {
+        return run_proto(s, entry, proto, tx);
+    }
     dismiss(s, tx);
     if let Some(to) = entry.to {
         return super::moving::move_selection_to(s, to);
@@ -321,6 +535,30 @@ pub fn run(s: &mut Phantom, tx: &mut Tx) {
         Command::Torrents(c) => crate::commands::run_on_torrents(s, c, tx),
         Command::App(c) => crate::commands::run_in_app(s, c, tx),
         Command::Files(c) => crate::views::file_menu::run(s, c),
+    }
+}
+
+// PROTOTYPE (#434): ⌘Return shows the highlighted setting in Settings; Escape in a setting's
+// choices goes back to the list.
+pub fn show_highlighted(s: &mut Phantom, tx: &mut Tx) {
+    let at = highlighted(s);
+    let Some(entry) = listed(s).into_iter().nth(at) else { return };
+    match entry.proto.clone() {
+        Some(Proto::Theme(key) | Proto::Show(key) | Proto::Choice(key, _)) => show(s, key, tx),
+        Some(p @ (Proto::Service(_) | Proto::Place(..) | Proto::Switch(_))) => run_proto(s, entry, p, tx),
+        _ => {}
+    }
+}
+
+pub fn back(s: &mut Phantom, tx: &mut Tx) {
+    match s.palette.sub.take() {
+        Some(_) => {
+            s.palette.query = TextEdit::new(std::mem::take(&mut s.palette.before_sub));
+            s.palette.query.focused = true;
+            s.palette.state = State::Open { at: 0 };
+            s.palette.seen = String::new();
+        }
+        None => dismiss(s, tx),
     }
 }
 

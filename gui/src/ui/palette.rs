@@ -15,6 +15,8 @@ pub struct PaletteRow {
     pub hint: Option<String>,
     /// None: an empty slot, so every label starts at the same x.
     pub icon: Option<Icon>,
+    // PROTOTYPE (#434): where a setting lives, muted after its label.
+    pub place: Option<String>,
 }
 
 /// The narrowest the panel is, however short its commands: it's placed so that, at this width, it's
@@ -102,7 +104,16 @@ impl Ui {
                     // An empty slot the icon's size.
                     None => el().w(14.0).h(14.0),
                 })
-                .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().grow(1.0).shrink())
+                .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().shrink())
+                .child(
+                    text(r.place.unwrap_or_default())
+                        .key("place")
+                        .font(k.ty.small_medium)
+                        .color(c.text_faint)
+                        .truncate()
+                        .grow(1.0)
+                        .shrink(),
+                )
                 .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx));
             if let Some(hint) = r.hint {
                 item = item
@@ -161,7 +172,8 @@ impl Ui {
                 // The row's padding (10 a side), icon slot and gap (14 and 10), the key and its gap,
                 // the list's padding (4 a side).
                 let hint = r.hint.as_deref().map_or(0.0, |h| 10.0 + rune::text::measure(h, &[], hint_style, None).0);
-                8.0 + 20.0 + 14.0 + 10.0 + self.label_width(&r.label) + hint
+                let place = r.place.as_deref().map_or(0.0, |p| 10.0 + self.label_width(p));
+                8.0 + 20.0 + 14.0 + 10.0 + self.label_width(&r.label) + hint + place
             })
             .fold(0.0, f32::max)
             .ceil()
