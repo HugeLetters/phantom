@@ -499,3 +499,178 @@ pub fn env(name: &str) -> Option<String> {
     let all = std::env::var("PHANTOM_PROTO").ok()?;
     all.split(';').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('=').map(str::to_owned))
 }
+
+// Okhsl: hue, saturation and lightness on OKLab with a corrected lightness (the "toe") and a
+// saturation relative to the sRGB gamut, so every (h, s, l) is displayable and a picker built on
+// it has no crease where chroma would clip. Ported from Björn Ottosson's reference code
+// (https://bottosson.github.io/posts/colorpicker/, colorconversion.js), MIT licensed:
+// Copyright (c) 2021 Björn Ottosson. Permission is hereby granted, free of charge, to any person
+// obtaining a copy of this software, to deal in it without restriction, subject to the notice and
+// the MIT license's warranty disclaimer.
+
+fn toe(x: f64) -> f64 {
+    let (k1, k2) = (0.206, 0.03);
+    let k3 = (1.0 + k1) / (1.0 + k2);
+    0.5 * (k3 * x - k1 + ((k3 * x - k1) * (k3 * x - k1) + 4.0 * k2 * k3 * x).sqrt())
+}
+
+fn toe_inv(x: f64) -> f64 {
+    let (k1, k2) = (0.206, 0.03);
+    let k3 = (1.0 + k1) / (1.0 + k2);
+    (x * x + k1 * x) / (k3 * (x + k2))
+}
+
+fn lab_to_linear(l: f64, a: f64, b: f64) -> [f64; 3] {
+    let l_ = (l + 0.3963377774 * a + 0.2158037573 * b).powi(3);
+    let m_ = (l - 0.1055613458 * a - 0.0638541728 * b).powi(3);
+    let s_ = (l - 0.0894841775 * a - 1.2914855480 * b).powi(3);
+    [
+        4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_,
+        -1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_,
+        -0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_,
+    ]
+}
+
+/// Max S = C/L in gamut for the hue (a, b unit).
+fn max_saturation(a: f64, b: f64) -> f64 {
+    let (k, w): ([f64; 5], [f64; 3]) = if -1.88170328 * a - 0.80936493 * b > 1.0 {
+        ([1.19086277, 1.76576728, 0.59662641, 0.75515197, 0.56771245], [4.0767416621, -3.3077115913, 0.2309699292])
+    } else if 1.81444104 * a - 1.19445276 * b > 1.0 {
+        ([0.73956515, -0.45954404, 0.08285427, 0.12541070, 0.14503204], [-1.2684380046, 2.6097574011, -0.3413193965])
+    } else {
+        ([1.35733652, -0.00915799, -1.15130210, -0.50559606, 0.00692167], [-0.0041960863, -0.7034186147, 1.7076147010])
+    };
+    let s = k[0] + k[1] * a + k[2] * b + k[3] * a * a + k[4] * a * b;
+    let kl = 0.3963377774 * a + 0.2158037573 * b;
+    let km = -0.1055613458 * a - 0.0638541728 * b;
+    let ks = -0.0894841775 * a - 1.2914855480 * b;
+    let (l_, m_, s_) = (1.0 + s * kl, 1.0 + s * km, 1.0 + s * ks);
+    let (l, m, ss) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let (l1, m1, s1) = (3.0 * kl * l_ * l_, 3.0 * km * m_ * m_, 3.0 * ks * s_ * s_);
+    let (l2, m2, s2) = (6.0 * kl * kl * l_, 6.0 * km * km * m_, 6.0 * ks * ks * s_);
+    let f = w[0] * l + w[1] * m + w[2] * ss;
+    let f1 = w[0] * l1 + w[1] * m1 + w[2] * s1;
+    let f2 = w[0] * l2 + w[1] * m2 + w[2] * s2;
+    s - f * f1 / (f1 * f1 - 0.5 * f * f2)
+}
+
+fn cusp(a: f64, b: f64) -> (f64, f64) {
+    let s = max_saturation(a, b);
+    let rgb = lab_to_linear(1.0, s * a, s * b);
+    let l = (1.0 / rgb[0].max(rgb[1]).max(rgb[2])).cbrt();
+    (l, l * s)
+}
+
+fn gamut_intersection(a: f64, b: f64, l1: f64, c1: f64, l0: f64, cusp: (f64, f64)) -> f64 {
+    if (l1 - l0) * cusp.1 - (cusp.0 - l0) * c1 <= 0.0 {
+        return cusp.1 * l0 / (c1 * cusp.0 + cusp.1 * (l0 - l1));
+    }
+    let mut t = cusp.1 * (l0 - 1.0) / (c1 * (cusp.0 - 1.0) + cusp.1 * (l0 - l1));
+    let (dl, dc) = (l1 - l0, c1);
+    let kl = 0.3963377774 * a + 0.2158037573 * b;
+    let km = -0.1055613458 * a - 0.0638541728 * b;
+    let ks = -0.0894841775 * a - 1.2914855480 * b;
+    let (ldt, mdt, sdt) = (dl + dc * kl, dl + dc * km, dl + dc * ks);
+    let (ll, cc) = (l0 * (1.0 - t) + t * l1, t * c1);
+    let (l_, m_, s_) = (ll + cc * kl, ll + cc * km, ll + cc * ks);
+    let (l, m, s) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let (ld, md, sd) = (3.0 * ldt * l_ * l_, 3.0 * mdt * m_ * m_, 3.0 * sdt * s_ * s_);
+    let (ld2, md2, sd2) = (6.0 * ldt * ldt * l_, 6.0 * mdt * mdt * m_, 6.0 * sdt * sdt * s_);
+    let step = |w: [f64; 3]| {
+        let r = w[0] * l + w[1] * m + w[2] * s - 1.0;
+        let r1 = w[0] * ld + w[1] * md + w[2] * sd;
+        let r2 = w[0] * ld2 + w[1] * md2 + w[2] * sd2;
+        let u = r1 / (r1 * r1 - 0.5 * r * r2);
+        if u >= 0.0 { -r * u } else { 10e5 }
+    };
+    t += step([4.0767416621, -3.3077115913, 0.2309699292]).min(step([-1.2684380046, 2.6097574011, -0.3413193965])).min(step([
+        -0.0041960863,
+        -0.7034186147,
+        1.7076147010,
+    ]));
+    t
+}
+
+/// The chromas for lightness `l`: [C_0, C_mid, C_max].
+fn okhsl_cs(l: f64, a: f64, b: f64) -> [f64; 3] {
+    let cu = cusp(a, b);
+    let c_max = gamut_intersection(a, b, l, 1.0, l, cu);
+    let (smax, tmax) = (cu.1 / cu.0, cu.1 / (1.0 - cu.0));
+    let k = c_max / (l * smax).min((1.0 - l) * tmax);
+    let s_mid = 0.11516993
+        + 1.0
+            / (7.44778970
+                + 4.15901240 * b
+                + a * (-2.19557347
+                    + 1.75198401 * b
+                    + a * (-2.13704948 - 10.02301043 * b + a * (-4.24894561 + 5.38770819 * b + 4.69891013 * a))));
+    let t_mid = 0.11239642
+        + 1.0
+            / (1.61320320 - 0.68124379 * b
+                + a * (0.40370612
+                    + 0.90148123 * b
+                    + a * (-0.27087943 + 0.61223990 * b + a * (0.00299215 - 0.45399568 * b - 0.14661872 * a))));
+    let (ca, cb) = (l * s_mid, (1.0 - l) * t_mid);
+    let c_mid = 0.9 * k * (1.0 / (1.0 / ca.powi(4) + 1.0 / cb.powi(4))).sqrt().sqrt();
+    let (ca, cb) = (l * 0.4, (1.0 - l) * 0.8);
+    let c_0 = (1.0 / (1.0 / (ca * ca) + 1.0 / (cb * cb))).sqrt();
+    [c_0, c_mid, c_max]
+}
+
+/// The colour of Okhsl (h, s, l), each 0..1. Always displayable.
+pub fn okhsl(h: f32, s: f32, l: f32) -> Color {
+    let (h, s, l) = (h as f64, (s as f64).clamp(0.0, 1.0), (l as f64).clamp(0.0, 1.0));
+    if l >= 1.0 {
+        return Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    }
+    if l <= 0.0 {
+        return Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+    }
+    let (a, b) = ((std::f64::consts::TAU * h).cos(), (std::f64::consts::TAU * h).sin());
+    let big_l = toe_inv(l);
+    let [c0, cmid, cmax] = okhsl_cs(big_l, a, b);
+    let (t, k0, k1, k2) = if s < 0.8 {
+        let k1 = 0.8 * c0;
+        (1.25 * s, 0.0, k1, 1.0 - k1 / cmid)
+    } else {
+        let k1 = 0.2 * cmid * cmid * 1.25 * 1.25 / c0;
+        (5.0 * (s - 0.8), cmid, k1, 1.0 - k1 / (cmax - cmid))
+    };
+    let c = k0 + t * k1 / (1.0 - k2 * t);
+    let rgb = lab_to_linear(big_l, c * a, c * b);
+    let f = |x: f64| x.clamp(0.0, 1.0) as f32;
+    Color { r: f(rgb[0]), g: f(rgb[1]), b: f(rgb[2]), a: 1.0 }
+}
+
+/// Okhsl (h, s, l) of `c`.
+pub fn to_okhsl(c: Color) -> (f32, f32, f32) {
+    let (l, a, b) = {
+        let (r, g, bl) = (c.r as f64, c.g as f64, c.b as f64);
+        let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * bl).cbrt();
+        let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * bl).cbrt();
+        let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * bl).cbrt();
+        (
+            0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+        )
+    };
+    let ch = a.hypot(b);
+    if ch < 1e-6 {
+        return (0.0, 0.0, toe(l) as f32);
+    }
+    let (a_, b_) = (a / ch, b / ch);
+    let h = 0.5 + 0.5 * (-b).atan2(-a) / std::f64::consts::PI;
+    let [c0, cmid, cmax] = okhsl_cs(l, a_, b_);
+    let s = if ch < cmid {
+        let k1 = 0.8 * c0;
+        let k2 = 1.0 - k1 / cmid;
+        0.8 * (ch / (k1 + k2 * ch))
+    } else {
+        let k1 = 0.2 * cmid * cmid * 1.25 * 1.25 / c0;
+        let k2 = 1.0 - k1 / (cmax - cmid);
+        let t = (ch - cmid) / (k1 + k2 * (ch - cmid));
+        0.8 + 0.2 * t
+    };
+    (h as f32, s as f32, toe(l) as f32)
+}

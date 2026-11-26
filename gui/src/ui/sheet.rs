@@ -540,44 +540,22 @@ impl Ui {
         use crate::theme::phantom::proto;
         let k = &self.k;
         let variant = proto::env("picker");
-        let hsl = variant.as_deref() == Some("hsl");
-        // `oklch-l`: the square is hue × chroma, the bar lightness.
-        let light_bar = variant.as_deref() == Some("oklch-l");
+        // Okhsl (OKLab hue, saturation relative to the gamut, lightness with a toe): no pixel is
+        // out of gamut, so no crease. `lightness-bar`: the square is hue × saturation and the bar
+        // lightness; the default has hue × lightness in the square and the saturation bar.
+        let light_bar = matches!(variant.as_deref(), Some("lightness-bar" | "oklch-l"));
         let (w, ht, strip) = (312.0_f32, 140.0_f32, 16.0_f32);
-        let (h, c0, l0, bar_at) = if hsl {
-            let (h, s, l) = proto::hsl(now);
-            (h, s, l, s)
-        } else {
-            let (l, c, h) = proto::oklch(now);
-            (h, c, l, c / proto::max_chroma(l, h).max(1e-4))
-        };
-        // The colour of a cell: hue `x`, lightness `l`, at the picked colour's chroma/saturation.
-        // In `oklch-l` the row's `l` is the chroma fraction (1 = full for that hue) at the picked lightness.
-        let at = |x: f32, l: f32| {
-            if hsl {
-                proto::at_hsl(x, c0, l)
-            } else if light_bar {
-                proto::at_oklch(l0, l * proto::max_chroma(l0, x), x)
-            } else {
-                proto::at_oklch(l, c0, x)
-            }
-        };
-        let (mark_y, bar_at) = if light_bar { (c0 / proto::max_chroma(l0, h).max(1e-4), l0) } else { (l0, bar_at) };
+        let (h, s0, l0) = proto::to_okhsl(now);
+        // The colour at hue `x` and `y` (0 bottom .. 1 top) on the square's vertical axis.
+        let at = |x: f32, y: f32| if light_bar { proto::okhsl(x, y, l0) } else { proto::okhsl(x, s0, y) };
+        let (mark_y, bar_at) = if light_bar { (s0, l0) } else { (l0, s0) };
         // The square and bar are generated images at 2x their size, computed per pixel, and kept
         // until their inputs change (a per-row gradient showed stripes).
         const SCALE: u32 = 2;
-        let tag = format!("{variant:?}-{:x}-{:x}-{:x}", c0.to_bits(), l0.to_bits(), h.to_bits());
+        let tag = format!("{light_bar}-{:x}-{:x}-{:x}", s0.to_bits(), l0.to_bits(), h.to_bits());
         let square_px = picker_image(&format!("sq-{tag}"), (w as u32 * SCALE, ht as u32 * SCALE), |fx, fy| at(fx, 1.0 - fy));
-        let top = if hsl { 1.0 } else { proto::max_chroma(l0, h) };
         let bar_px = picker_image(&format!("bar-{tag}"), (strip as u32 * SCALE, ht as u32 * SCALE), |_, fy| {
-            let t = 1.0 - fy;
-            if hsl {
-                proto::at_hsl(h, t * top, l0)
-            } else if light_bar {
-                proto::at_oklch(t, c0, h)
-            } else {
-                proto::at_oklch(l0, t * top, h)
-            }
+            if light_bar { proto::okhsl(h, s0, 1.0 - fy) } else { proto::okhsl(h, 1.0 - fy, l0) }
         });
         let square = el()
             .key(format!("{key}-square"))
@@ -603,6 +581,11 @@ impl Ui {
             .label(if light_bar { "Lightness" } else { "Saturation" }.to_owned())
             .child(ring(el().absolute(2.0, (1.0 - bar_at.clamp(0.0, 1.0)) * ht - 3.0).size(strip - 4.0, 6.0).radius(3.0)));
         let mut body = col().w(w + strip + 8.0 + 24.0).gap(10.0).px(12.0).py(12.0).child(row().gap(8.0).child(square).child(bar));
+        // A caption for the stills: which axis the bar carries.
+        if proto::env("caption").is_some() {
+            let said = if light_bar { "Bar: lightness (square: hue × saturation)" } else { "Bar: saturation (square: hue × lightness)" };
+            body = body.child(text(said.to_owned()).font(k.ty.text_small).color(k.c.text_muted).a11y_hidden());
+        }
         for b in below {
             body = body.child(b);
         }
