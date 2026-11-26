@@ -33,7 +33,7 @@ pub fn gone() -> BTreeMap<usize, Gone> {
 
 pub fn found(index: usize, at: Option<Stamp>) -> (usize, Found) {
     let file = Expected { index, path: PathBuf::from(format!("/x/{index}")), size_bytes: 10, progress_bytes: 5 };
-    (index, Found { file, at })
+    (index, Found::of(file, at))
 }
 
 pub fn disk(files: impl IntoIterator<Item = (usize, Option<Stamp>)>) -> Disk {

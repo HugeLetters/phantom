@@ -26,8 +26,8 @@
 //!   can be reached then. Code past that never checks it again.
 //! - Before its files, a torrent's destination: [`unavailable`] says why it can't be reached (a
 //!   drive not connected, a folder gone, no permission). Its files are then not missing, just out of reach.
-//!   [`Guard`] keeps librqbit from creating the files of a torrent whose destination is unavailable,
-//!   even one that goes while librqbit creates them. It also keeps librqbit off a torrent's files
+//!   [`Guard`] keeps librqbit off the files of a torrent whose destination is unavailable, even one
+//!   that goes while its storage opens them (it makes none, #374). It also keeps librqbit off a torrent's files
 //!   once its Delete begins, through the storage librqbit already has too: a file in the Trash
 //!   stays as it went, so Undo can tell it's the one.
 
@@ -56,9 +56,17 @@ pub use lifecycle::disk::{Disk, Expected, Found, Gone, Seen, Stamp};
 pub use super::trashed::At;
 use super::trashed::{Layout, Trashed};
 
-/// Size-checks `files` now: each, and what's at its path.
-pub fn disk_of(files: &[Expected]) -> Disk {
-    Disk { files: files.iter().map(|f| (f.index, Found { file: f.clone(), at: stamp(&f.path) })).collect() }
+/// Size-checks `files` now: each, and what's at its path; `open`, those Phantom has open for writing.
+pub fn disk_of(files: &[Expected], open: &BTreeSet<usize>) -> Disk {
+    Disk { files: files.iter().map(|f| (f.index, found(f, open.contains(&f.index)))).collect() }
+}
+
+/// What's at `file`'s path: the file there, its names, or something else.
+fn found(file: &Expected, open: bool) -> Found {
+    let meta = std::fs::symlink_metadata(&file.path).ok();
+    let at = meta.as_ref().filter(|m| m.is_file()).map(|m| Stamp { inode: m.ino(), len: m.len(), modified: m.modified().ok() });
+    let links = meta.as_ref().map_or(1, |m| m.nlink());
+    Found { file: file.clone(), at, links, taken: meta.is_some_and(|m| !m.is_file()), open }
 }
 
 /// What `look` finds of the files, if the destination is still reachable after it: one that goes
@@ -147,12 +155,10 @@ fn drive(path: &Path) -> Option<(String, bool)> {
 /// Phantom's storage for librqbit ([`Files`]), each add's ([`Guard::for_add`]), which knows the
 /// torrent's destination, its folder and its priorities: those set Off aren't made (#67, #158).
 /// A torrent whose destination can't be reached when librqbit creates its storage gets storage that
-/// touches nothing on disk: librqbit creates a torrent's files, and the folders up to them,
-/// whenever it adds one, and for a drive that isn't connected that would be a folder of its name on
-/// the internal disk. Reading and writing fail, so a torrent added that way has nothing until it's
-/// checked again, once its destination is back. The destination can still go between then and
-/// librqbit creating the files: [`init_in`] takes out what librqbit made again, and the storage
-/// then touches nothing either.
+/// touches nothing on disk: for a drive that isn't connected a file made would be a folder of its
+/// name on the internal disk. Reading and writing fail, so a torrent added that way has nothing
+/// until it's checked again, once its destination is back. The destination can still go while the
+/// storage opens the files ([`init_in`]): the storage then touches nothing either.
 #[derive(Clone)]
 pub struct Guard {
     /// Whether each torrent's storage touches nothing, wherever its destination: one a Delete is
@@ -502,33 +508,17 @@ impl TorrentStorage for Guarded {
     }
 }
 
-/// Runs librqbit's `init`, which creates the torrent's files under `destination` and every folder
-/// up to them, the destination too. If the destination isn't the folder it was just before, it
-/// went, and `init` made it again ([`made_again`]): what's there is taken out (the files `init`
-/// creates are empty, and only empty files and folders are removed). Whether the files are in the
-/// destination.
+/// Runs the storage's `init`, which opens the torrent's files under `destination` (and makes
+/// nothing, #374). If the destination isn't the folder it was just before ([`made_again`]), it went
+/// meanwhile: the files opened aren't in it, and the storage touches nothing. Whether the files are
+/// in the destination.
 pub fn init_in(destination: &Path, init: &mut dyn FnMut() -> Result<()>) -> Result<bool> {
     let Some(before) = folder(destination) else { return Ok(false) };
     let made = init();
     if made_again(before, folder(destination), || drive(destination).is_some_and(|(_, mounted)| mounted)) {
-        take_out_empty(destination);
         return Ok(false);
     }
     made.map(|()| true)
-}
-
-/// Removes the empty files under `dir`, then the folders left empty, `dir` too.
-fn take_out_empty(dir: &Path) {
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        match entry.metadata() {
-            Ok(m) if m.is_dir() => take_out_empty(&entry.path()),
-            Ok(m) if m.is_file() && m.len() == 0 => {
-                let _ = std::fs::remove_file(entry.path());
-            }
-            _ => {}
-        }
-    }
-    let _ = std::fs::remove_dir(dir);
 }
 
 /// A folder, by its device and inode.
@@ -666,7 +656,7 @@ mod tests {
     }
 
     fn found(path: PathBuf, size_bytes: u64, progress_bytes: u64) -> Found {
-        disk_of(&[expected(path, size_bytes, progress_bytes)]).files.remove(&0).unwrap()
+        disk_of(&[expected(path, size_bytes, progress_bytes)], &BTreeSet::new()).files.remove(&0).unwrap()
     }
 
     #[test]
@@ -678,7 +668,8 @@ mod tests {
         assert!(!found(path.clone(), 200, 50).is_missing(), "partly downloaded, written up to 100");
         assert!(found(path.clone(), 50, 0).is_missing(), "larger than it can be");
         assert!(found(path.clone(), 200, 150).is_missing(), "shorter than what librqbit has of it");
-        assert!(found(dir.path().join("b.bin"), 100, 0).is_missing(), "gone, though nothing was downloaded");
+        assert!(!found(dir.path().join("b.bin"), 100, 0).is_missing(), "gone, but nothing was downloaded: made as it starts");
+        assert!(found(dir.path().join("b.bin"), 100, 1).is_missing(), "gone");
         assert!(found(dir.path().to_owned(), 100, 0).is_missing(), "a folder in its place");
     }
 
@@ -712,12 +703,12 @@ mod tests {
         std::fs::write(&path, [0; 100]).unwrap();
         let (dest, files) = (abs(&destination), [expected(path, 100, 100)]);
 
-        let disk = seen(&dest, || disk_of(&files)).unwrap();
+        let disk = seen(&dest, || disk_of(&files, &BTreeSet::new())).unwrap();
         assert!(!disk.files[&0].is_missing(), "there all along");
 
         let away = dir.path().join("away");
         let gone = seen(&dest, || {
-            let disk = disk_of(&files);
+            let disk = disk_of(&files, &BTreeSet::new());
             std::fs::rename(&destination, &away).unwrap();
             disk
         });

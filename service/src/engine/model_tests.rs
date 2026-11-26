@@ -378,6 +378,11 @@ struct Pack {
     letting_go: bool,
     /// In a Move to Trash's entry: the files it let go of, whose undo checks the torrent (#328).
     let_go: [bool; FILES],
+    /// The files Phantom let librqbit write as it let it run (#374), made then if they weren't there:
+    /// one gone from its path since went. None until it runs after it was added (again).
+    granted: [bool; FILES],
+    /// The files whose pieces it let go of since it was added.
+    let_go_since: [bool; FILES],
 }
 
 /// A pack as its first Delete found it, which its Undo brings back.
@@ -403,9 +408,11 @@ struct Gone {
 impl Pack {
     /// File `f` is let go of: librqbit's handle is closed, and none of its pieces are had.
     fn lets_go(&mut self, f: usize) {
+        self.let_go_since[f] |= self.have[f];
         self.letting_go |= self.have[f];
         self.have[f] = false;
         self.open[f] = None;
+        self.granted[f] = false;
     }
 
     fn complete(&self) -> bool {
@@ -444,13 +451,14 @@ impl Pack {
         }
     }
 
-    /// Taken out of librqbit and added again: it creates every file it gets that isn't there and
-    /// checks them all, once the checks' gate is open, `held` or not; `returning` are the missing
+    /// Taken out of librqbit and added again: it checks them all, making nothing (#374), once the checks' gate is open, `held` or not; `returning` are the missing
     /// files put back. Those in the Trash for an undo it reads as they went (`away`).
     fn check(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool, held: bool, returning: BTreeMap<usize, Gone>, away: Away) {
+        let _ = folder;
+        // Added again: every file closed until it's let run.
+        self.granted = [false; FILES];
         self.reopens = true;
         self.letting_go = false;
-        self.make_absent(disk, folder);
         self.unchecked = false;
         self.uncounted.extend(std::mem::take(&mut self.missing).into_keys());
         if held {
@@ -478,16 +486,20 @@ impl Pack {
         self.missing = returning.into_iter().map(|(f, g)| (f, Gone { back: false, ..g })).collect();
     }
 
-    /// librqbit adding the torrent, or restoring it at start, creates every file it gets that
-    /// isn't there, empty, never one set Off (#67, #158).
-    fn make_absent(&self, disk: &mut [OnDisk; FILES], folder: &mut bool) {
-        for (f, on_disk) in disk.iter_mut().enumerate() {
-            if !self.off[f] && *on_disk == OnDisk::Absent {
+    /// Let run, Phantom grants every file it gets, making each that isn't there, empty, never one set
+    /// Off (#67, #158, #374): which it made.
+    fn make_absent(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool) -> Vec<usize> {
+        let mut made = Vec::new();
+        for (f, on_disk) in disk.iter_mut().enumerate().filter(|(f, _)| !self.off[*f]) {
+            self.granted[f] = true;
+            if *on_disk == OnDisk::Absent {
                 *on_disk = OnDisk::Sparse;
-                // Its storage makes the folder with the file, if a Move to Trash took it (#212).
+                // Made with its folders, if a Move to Trash took them (#212).
                 *folder = true;
+                made.push(f);
             }
         }
+        made
     }
 
     /// The engine's size check: a file it gets that's gone makes it Missing files; once
@@ -498,7 +510,9 @@ impl Pack {
         if self.checking.is_some() || self.unchecked {
             return;
         }
-        let gone: Vec<usize> = (0..FILES).filter(|&f| !self.off[f] && disk[f] == OnDisk::Absent).collect();
+        // One never had nor made isn't missing: it's made as it's let run (#374).
+        let gone: Vec<usize> =
+            (0..FILES).filter(|&f| !self.off[f] && disk[f] == OnDisk::Absent && (self.have[f] || self.granted[f])).collect();
         if self.missing.is_empty() {
             if !gone.is_empty() {
                 self.missing = gone.into_iter().map(|f| (f, Gone { had: self.have[f], back: false })).collect();
@@ -583,10 +597,11 @@ impl Model {
                     reopens: false,
                     letting_go: false,
                     let_go: [false; FILES],
+                    granted: [false; FILES],
+                    let_go_since: [false; FILES],
                 };
+                // Its folder is made with its files, once it's let run (#374).
                 p.check(&mut self.disk[pack], &mut self.folder[pack], self.checks_held, BTreeMap::new(), [None; FILES]);
-                // librqbit makes its folder for the files it makes.
-                self.folder[pack] = true;
                 Torrent::Pack(p)
             }
         };
@@ -678,12 +693,10 @@ impl Model {
                 } else {
                     // Asked for again after a Move to Trash took it: made afresh.
                     self.moved.remove(&(pack, *file));
-                    // Not at its path, it's made there and downloaded from nothing (#276): not
+                    // Not at its path, it's downloaded from nothing (#276), made as it's let run: not
                     // Missing files, which is for a file it gets that vanished.
                     if disk[pack][*file] == OnDisk::Absent && !p.unavailable && !p.missing.contains_key(file) {
-                        disk[pack][*file] = OnDisk::Sparse;
-                        folder[pack] = true;
-                        if in_trash[*file] || p.have[*file] {
+                        if in_trash[*file] || p.have[*file] || p.granted[*file] {
                             p.lets_go(*file);
                         }
                     }
@@ -1103,8 +1116,6 @@ impl Model {
                     };
                     let made_again = (0..FILES).any(|f| p.have[f] && disk[f] == OnDisk::Absent && unread(f));
                     let changed = undo.kept.is_some_and(|kept| kept != std::array::from_fn(|f| (disk[f], writes[f])));
-                    // Its folder is made with the first file it gets: none, none made.
-                    p.make_absent(disk, &mut self.folder[p.pack]);
                     self.moved.retain(|(k, _)| *k != p.pack);
                     // Unchecked, as at a restart: it comes back so, whatever librqbit samples; but
                     // one that said Missing files comes back as any torrent does.
@@ -1181,8 +1192,9 @@ impl Model {
         // (#268): the undo's check reads it, and finds it whole only if it was written back as it
         // was (#328).
         let Torrent::Pack(before) = &undo.back else { unreachable!("a Move to Trash's torrent never leaves") };
+        // Not one let go of since (set Normal while it was there, #276): nothing of it is had.
         for (f, on_disk) in items.iter().flat_map(|t| t.files.iter().copied()) {
-            p.have[f] = before.have[f] && on_disk == OnDisk::Valid;
+            p.have[f] = before.have[f] && on_disk == OnDisk::Valid && (p.have[f] || !p.let_go_since[f]);
         }
         for &(f, off, moved_as) in previous {
             // A file that was moved and didn't come back stays Off.
@@ -1485,6 +1497,7 @@ impl Model {
             p.uncounted.clear();
             // Not in librqbit while it's Missing files, not checked or away.
             p.open = [None; FILES];
+            p.granted = [false; FILES];
             p.reopens = p.missing.is_empty() && !p.unchecked;
             p.letting_go = false;
             // Away, or partly in the Trash (its error comes back with it): nothing is known of what
@@ -2345,6 +2358,7 @@ impl Model {
                 (p.letting_go, p.reopens) = (false, true);
             }
             if std::mem::take(&mut p.reopens) {
+                p.granted = [false; FILES];
                 p.open = std::array::from_fn(|f| match disk[f] {
                     OnDisk::Absent => {
                         let item = self.in_trash.iter().rev().find(|t| t.pack == p.pack && away[f].is_some() && t.item == Item::File(f));
@@ -2355,6 +2369,18 @@ impl Model {
             }
             for f in p.missing.keys().copied().filter(|&f| disk[f] == OnDisk::Absent) {
                 p.open[f] = None;
+            }
+        }
+        // Let run, its files are granted, those not there made (#374).
+        for t in self.torrents.values_mut() {
+            let Torrent::Pack(p) = t else { continue };
+            if !matches!(p.status(), Status::Seeding | Status::Downloading) || p.letting_go || p.deleting || p.delete_failed {
+                continue;
+            }
+            for f in p.make_absent(&mut self.disk[p.pack], &mut self.folder[p.pack]) {
+                self.last_inode += 1;
+                self.inodes[p.pack][f] = self.last_inode;
+                p.open[f] = Some(self.last_inode);
             }
         }
     }

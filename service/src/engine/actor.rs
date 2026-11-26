@@ -68,6 +68,7 @@ use super::held::Held;
 use super::machine::add;
 use super::machine::lib::{self, Librqbit};
 use super::machine::{self, Broke, Event, Observation, Phase, Refusal, State, Wants, decide, seeding};
+use super::slots::{Refused, Want};
 use super::snapshot::{Published, Snapshot};
 use super::space;
 use super::store::{Gets, Info, Record, Store};
@@ -1065,6 +1066,10 @@ impl Actor {
                 (lib::Do::Start, Some(_)) if self.any_impossible(id) => return Ok(()),
                 (lib::Do::Priorities, Some(handle)) if handle.live().is_some() && self.any_impossible(id) => return Ok(()),
                 (lib::Do::Start, Some(handle)) => {
+                    let normal = self.torrents[&id].record.normal();
+                    if !self.grant(id, &handle, &normal).await? {
+                        return Ok(());
+                    }
                     self.ask_for_all_not_had(&handle).await?;
                     self.session.unpause(&handle).await?;
                     // librqbit's upload counter starts again with the torrent.
@@ -1078,6 +1083,10 @@ impl Actor {
                 }
                 (lib::Do::Stop, Some(handle)) => self.session.pause(&handle).await?,
                 (lib::Do::Priorities, Some(handle)) => {
+                    // A file it's to get as it runs is let write first.
+                    if handle.live().is_some() && !self.grant(id, &handle, &self.torrents[&id].record.normal()).await? {
+                        return Ok(());
+                    }
                     let normal = self.torrents[&id].record.normal().into_iter().collect();
                     #[cfg(test)]
                     if handle.live().is_some() {
@@ -1089,6 +1098,68 @@ impl Actor {
             }
         }
         Ok(())
+    }
+
+    /// Lets librqbit write the files `files` of torrent `id` (those it's to get), each if it's still the
+    /// file its check read ([`Trashed::grant`](super::trashed::Trashed::grant)), off the actor. Whether
+    /// every one may be: if not, another file at a path makes the check due again (it's added again),
+    /// and one that isn't the torrent's to write is size-checked, which finds it Missing files; one that
+    /// can't be opened is an Error.
+    async fn grant(&mut self, id: TorrentId, handle: &Held, files: &BTreeSet<usize>) -> Result<bool, Failure> {
+        let Some(torrent) = self.torrents.get(&id) else { return Ok(false) };
+        let Some(info) = &torrent.record.info else { return Ok(true) };
+        let progress = handle.stats().file_progress;
+        let destination = torrent.record.destination.to_path_buf();
+        let wants: Vec<(usize, Want)> = files
+            .iter()
+            .filter_map(|&i| Some((i, info.files.get(i).filter(|f| !f.padding)?)))
+            .map(|(i, f)| {
+                (i, Want { size: f.len, complete: progress.get(i).is_some_and(|had| *had >= f.len), destination: destination.clone() })
+            })
+            .collect();
+        let (trashed, hash) = (self.guard.trashed().clone(), torrent.record.info_hash.clone());
+        let refused = tokio::task::spawn_blocking(move || {
+            wants.iter().filter_map(|(i, want)| trashed.grant(&hash, *i, want).err()).collect::<Vec<Refused>>()
+        })
+        .await
+        .map_err(|e| anyhow!("granting its files: {e}"))?;
+        if !refused.is_empty() {
+            warn!(id, ?refused, "its files aren't the ones its check read, or not its own to write");
+        }
+        if let Some(detail) = refused.iter().find_map(|r| match r {
+            Refused::Failed(detail) => Some(detail.clone()),
+            Refused::Changed | Refused::NotItsOwn | Refused::Busy => None,
+        }) {
+            let torrent = self.torrents.get_mut(&id).expect("just found");
+            let failed = Event::Observed(Observation::Failed(broke(&detail)));
+            torrent.lifecycle = decide(&torrent.lifecycle, &failed).expect("never refused");
+            return Ok(false);
+        }
+        if refused.contains(&Refused::Changed) {
+            self.take_out(id).await?;
+            self.add_to_librqbit(id, true).await?;
+            return Ok(false);
+        }
+        if refused.contains(&Refused::NotItsOwn) {
+            if let Some(inbox) = self.inbox.upgrade() {
+                let _ = inbox.try_send(Message::FilesChanged(vec![destination]));
+            }
+        }
+        // One busy is granted at the next event: the size checks' come every few seconds.
+        Ok(refused.is_empty())
+    }
+
+    /// Grants torrent `id`'s files it gets now, on the actor, as its start does: whether every one was.
+    #[cfg(test)]
+    pub(super) fn grant_now(&self, id: TorrentId) -> bool {
+        let Some(torrent) = self.torrents.get(&id) else { return false };
+        let (Some(info), Some(handle)) = (&torrent.record.info, torrent.lib.torrent()) else { return false };
+        let progress = handle.stats().file_progress;
+        let destination = torrent.record.destination.to_path_buf();
+        torrent.record.normal().into_iter().filter_map(|i| Some((i, info.files.get(i).filter(|f| !f.padding)?))).all(|(i, f)| {
+            let want = Want { size: f.len, complete: progress.get(i).is_some_and(|had| *had >= f.len), destination: destination.clone() };
+            self.guard.trashed().grant(&torrent.record.info_hash, i, &want).is_ok()
+        })
     }
 
     /// Has librqbit, stopped, ask its peers for every piece it doesn't have of the files it gets.
@@ -1335,7 +1406,13 @@ impl Actor {
             return None;
         }
         // Gone while its files were looked at, every one seemed missing: it's the destination that is.
-        Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent))) {
+        // Open for writing, one gone from its path went; not one let go of, which is got from nothing.
+        let letting_go: BTreeSet<usize> = match &torrent.record.letting_go {
+            machine::letgo::State::Holding => BTreeSet::new(),
+            machine::letgo::State::Gone { pieces } | machine::letgo::State::Stashed { pieces, .. } => pieces.keys().copied().collect(),
+        };
+        let open: BTreeSet<usize> = self.guard.trashed().writable(&torrent.record.info_hash).difference(&letting_go).copied().collect();
+        Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent), &open)) {
             Ok(disk) => Observation::Files(disk),
             Err(reason) => Observation::DestinationGone { reason },
         })
@@ -1791,10 +1868,10 @@ impl Actor {
     /// downloaded from nothing, not Missing files, which is for a file it gets that vanished.
     /// librqbit's pieces of each are let go of, as they're of a file that's elsewhere (in the Trash
     /// for an undo, `in_trash`, which it reads there) or gone. So is one it has open with none had
-    /// (#402), or it would be downloaded into where it went, not at its path. Each is made at its path,
-    /// as an add makes a file a torrent gets, so the size check finds it there, and librqbit, added
-    /// back, opens it there. Not one just put `back` by an undo, nor one missing already: that one
-    /// vanished while it was Normal.
+    /// (#402), or it would be downloaded into where it went, not at its path. Each is made at its path
+    /// as the torrent is let run (its grant, #374), and the size check doesn't find it missing
+    /// meanwhile, none of it had. Not one just put `back` by an undo, nor one missing already: that
+    /// one vanished while it was Normal.
     fn normal_again(&mut self, id: TorrentId, indices: &[usize], in_trash: &BTreeSet<usize>, back: &BTreeSet<usize>) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(info) = &torrent.record.info else { return };
@@ -1818,18 +1895,11 @@ impl Actor {
             .filter(|i| in_trash.contains(i) || open.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
             .map(|&i| (i, (info.files[i].pieces.start, info.files[i].pieces.end)))
             .collect();
-        let made: Vec<(usize, PathBuf, u64)> = again.iter().map(|&i| (i, paths[i].clone(), info.files[i].len)).collect();
-        let destination = torrent.record.destination.to_path_buf();
         if !gone.is_empty() {
             let closing = gone.keys().copied().collect();
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
             self.guard.trashed().let_go(&hash, &closing);
-        }
-        for (i, path, len) in made {
-            if let Err(e) = super::trashed::make_again(&destination, &path, len) {
-                warn!(id, file = i, error = %e, "couldn't make a file set Normal again at its path");
-            }
         }
         self.look_at_files(id, None);
     }
@@ -2278,7 +2348,7 @@ mod uncounted_tests {
     #[test]
     fn an_error_without_a_check_ending_keeps_the_files_uncounted() {
         let expected = files::Expected { index: 0, path: "/gone/b.bin".into(), size_bytes: 10, progress_bytes: 10 };
-        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected]).files[&0]))]);
+        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected], &BTreeSet::new()).files[&0]))]);
         let error = Phase::Error { failure: Broke::Librqbit { detail: "drive gone".into() } };
         let away =
             Phase::DestinationUnavailable { reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() } };

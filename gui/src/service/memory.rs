@@ -973,7 +973,9 @@ impl MemoryService {
         }
         let found = files.iter().filter(|f| f.priority == Priority::Normal).map(|f| {
             let file = Expected { index: f.index, path: f.path.clone(), size_bytes: f.size_bytes, progress_bytes: f.progress_bytes };
-            (f.index, lifecycle::disk::Found { file, at: m.on_disk.get(&f.index).copied().flatten() })
+            // One the pretend disk had is the torrent's, open for writing as the engine's are.
+            let found = lifecycle::disk::Found::of(file, m.on_disk.get(&f.index).copied().flatten());
+            (f.index, lifecycle::disk::Found { open: m.on_disk.contains_key(&f.index), ..found })
         });
         Some(Observation::Files(Found { files: found.collect() }))
     }

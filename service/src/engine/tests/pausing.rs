@@ -20,7 +20,7 @@ async fn finishes(ends_first: bool) {
     let engine = engine_gated(dir.path(), &gate).await;
     let _opens = Opens(gate.clone());
     let downloads = dir.path().join("downloads");
-    let id = add(&engine, &downloads, AddSource::TorrentFile(torrent), true).await.unwrap().id;
+    let id = add_made(&engine, &downloads, AddSource::TorrentFile(torrent), true).await.unwrap().id;
     wait_for(&engine, id, Status::Paused).await;
     let off = index_of(&engine, id, "b.bin").await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![off], priority: Priority::Off }).await.unwrap();

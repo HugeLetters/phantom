@@ -76,6 +76,24 @@ async fn add(engine: &Engine, download_dir: &Path, source: AddSource, paused: bo
     add_to(engine, source, paused, download_dir).await
 }
 
+/// [`add`], its files on disk as once it has started (#374): one added stopped has none until then.
+async fn add_made(engine: &Engine, download_dir: &Path, source: AddSource, paused: bool) -> Result<Added, Failure> {
+    let added = add(engine, download_dir, source, paused).await?;
+    granted(engine, added.id).await;
+    Ok(added)
+}
+
+/// Torrent `id`'s files made and let write, as its start does (#374).
+async fn granted(engine: &Engine, id: u64) {
+    for _ in 0..1000 {
+        if engine.inspect(move |actor| actor.grant_now(id)).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("torrent {id}'s files were never granted");
+}
+
 async fn add_to(engine: &Engine, source: AddSource, paused: bool, destination: &Path) -> Result<Added, Failure> {
     let file = matches!(source, AddSource::TorrentFile(_));
     let added = engine.add(super::fetched(source).await?, paused, parsed(destination)).await?;
@@ -283,7 +301,7 @@ async fn a_paused_incomplete_torrent_is_paused_not_done() {
 async fn delete_removes_the_torrent_and_its_files() {
     let dir = temp();
     let engine = engine(dir.path()).await;
-    let added = add(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
+    let added = add_made(&engine, &dir.path().join("downloads"), torrent_file("a.bin"), false).await.unwrap();
     let file = dir.path().join("downloads/a.bin");
     assert!(file.exists(), "adding creates the file");
     engine.command(added.id, TorrentCommand::Delete).await.unwrap();
@@ -301,7 +319,7 @@ async fn a_partial_delete_comes_back_after_a_restart_and_can_be_tried_again() {
     let refusing = Arc::new(Mutex::new(Vec::new()));
     let start = || engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), Default::default());
     let engine = start().await;
-    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    let added = add_made(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
     let (a, b, mine) = (downloads.join("pack/a.bin"), downloads.join("pack/b.bin"), downloads.join("pack/mine.txt"));
     assert!(a.exists() && b.exists(), "adding creates the files");
     // So each file goes on its own, and `a` is locked.
@@ -377,7 +395,7 @@ async fn a_stop_waits_for_the_trashing_and_keeps_how_it_went() {
     let _opens = Opens(gate.clone());
     let start = || engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), gate.clone());
     let engine = start().await;
-    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    let added = add_made(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
     // Added paused, librqbit checks it first (nothing on disk): how it was is what's left once
     // that's over, not the Checking a loaded machine may still be showing.
     until(&engine, added.id, |s| *s != Status::Checking).await;
@@ -418,8 +436,8 @@ async fn a_slow_delete_holds_up_nothing_else() {
     }
     let _opens = Opens(gate.clone());
     let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
-    let slow = add(&engine, &downloads, torrent_file("slow.bin"), true).await.unwrap();
-    let other = add(&engine, &downloads, torrent_file("other.bin"), true).await.unwrap();
+    let slow = add_made(&engine, &downloads, torrent_file("slow.bin"), true).await.unwrap();
+    let other = add_made(&engine, &downloads, torrent_file("other.bin"), true).await.unwrap();
     super::trash::hold(&gate, true);
     let deleting = tokio::spawn(engine.command_later(slow.id, TorrentCommand::Delete));
     held_at_the_gate(&gate).await;
@@ -451,7 +469,7 @@ async fn trashing_files_sets_them_off_before_any_moves_and_holds_the_torrents_ot
     let gate = super::trash::Gate::default();
     let _opens = OpensTrash(gate.clone());
     let engine = engine_with(dir.path(), Duration::from_millis(20), Default::default(), gate.clone()).await;
-    let id = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
+    let id = add_made(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
     let priorities = || async { engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect::<Vec<Priority>>() };
     for chosen in 1u8..8 {
         let files: Vec<usize> = (0..3).filter(|f| chosen & (1 << f) != 0).collect();
@@ -537,7 +555,7 @@ async fn stack(engine: &Engine) -> Vec<proto::UndoAction> {
 async fn gated_pack(dir: &Path) -> (Engine, super::trash::Gate, u64) {
     let gate = super::trash::Gate::default();
     let engine = engine_with(dir, Duration::from_millis(20), Default::default(), gate.clone()).await;
-    let id = add(&engine, &dir.join("downloads"), multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
+    let id = add_made(&engine, &dir.join("downloads"), multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
     (engine, gate, id)
 }
 
@@ -549,7 +567,7 @@ async fn another_torrents_remove_during_a_move_to_trash_is_done_at_once_and_stac
     let dir = temp();
     let (engine, gate, id) = gated_pack(dir.path()).await;
     let _opens = OpensTrash(gate.clone());
-    let other = add(&engine, &dir.path().join("downloads"), torrent_file("other.bin"), true).await.unwrap().id;
+    let other = add_made(&engine, &dir.path().join("downloads"), torrent_file("other.bin"), true).await.unwrap().id;
     super::trash::hold(&gate, true);
     let trashing = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![0] }));
     held_at_the_gate(&gate).await;
@@ -797,7 +815,7 @@ async fn a_move_to_trash_asked_during_another_torrents_delete_runs_beside_it_and
     let (engine, gate, id) = gated_pack(dir.path()).await;
     let _opens = OpensTrash(gate.clone());
     let downloads = dir.path().join("downloads");
-    let other = add(&engine, &downloads, torrent_file("other.bin"), true).await.unwrap().id;
+    let other = add_made(&engine, &downloads, torrent_file("other.bin"), true).await.unwrap().id;
     super::trash::hold_under(&gate, &downloads.join("other.bin"));
     let delete = tokio::spawn(engine.command_later(other, TorrentCommand::Delete));
     held_at_the_gate(&gate).await;
@@ -3255,7 +3273,7 @@ async fn a_delete_that_takes_a_partial_ones_place_leaves_it_absorbed() {
     let refusing = Arc::new(Mutex::new(Vec::new()));
     let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), Default::default()).await;
     let downloads = dir.path().join("downloads");
-    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    let added = add_made(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
     std::fs::write(downloads.join("pack/mine.txt"), b"mine").unwrap();
     *refusing.lock().unwrap() = vec![downloads.join("pack/a.bin")];
     refusal(engine.command(added.id, TorrentCommand::Delete).await);
@@ -3279,7 +3297,7 @@ async fn undo_of_a_running_delete_takes_back_its_torrents_partial_delete_with_it
     let gate = super::trash::Gate::default();
     let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, refusing.clone(), gate.clone()).await;
     let downloads = dir.path().join("downloads");
-    let added = add(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
+    let added = add_made(&engine, &downloads, multi_file_torrent(&["a.bin", "b.bin"]), true).await.unwrap();
     // Added paused, librqbit checks it first, and creates its files and sets their length as it
     // does: what's on disk, and the Status the Deletes find, are settled once that's over.
     until(&engine, added.id, |s| *s != Status::Checking).await;
@@ -3963,7 +3981,7 @@ async fn listed_now(engine: &Engine) -> Vec<u64> {
 async fn two_torrents(dir: &Path) -> (Engine, super::trash::Gate, u64, u64) {
     let (engine, gate, a) = gated_pack(dir).await;
     engine.command(a, TorrentCommand::SetPriority { files: vec![2], priority: Priority::Off }).await.unwrap();
-    let b = add(&engine, &dir.join("downloads"), torrent_file("other.bin"), true).await.unwrap().id;
+    let b = add_made(&engine, &dir.join("downloads"), torrent_file("other.bin"), true).await.unwrap().id;
     (engine, gate, a, b)
 }
 
@@ -4142,7 +4160,7 @@ async fn cmd_z_stops_a_running_delete_or_move_to_trash_after_the_item_in_flight(
         let _opens = OpensTrash(gate.clone());
         let (engine, takes) = engine_counting(dir.path(), &gate).await;
         let pack = dir.path().join("downloads/pack");
-        let id = add(&engine, &dir.path().join("downloads"), multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
+        let id = add_made(&engine, &dir.path().join("downloads"), multi_file_torrent(&["a.bin", "b.bin", "c.bin"]), true).await.unwrap().id;
         // A file of the user's beside them: a Delete takes them one by one.
         std::fs::write(pack.join("mine.txt"), b"mine").unwrap();
         let start = at_rest(&engine, dir.path()).await;
@@ -4242,7 +4260,7 @@ async fn a_restart_for_new_settings_runs_what_waits_on_a_lane() {
     let dir = temp();
     let (engine, gate, id) = gated_pack(dir.path()).await;
     let _opens = OpensTrash(gate.clone());
-    let other = add(&engine, &dir.path().join("downloads"), torrent_file("other.bin"), false).await.unwrap().id;
+    let other = add_made(&engine, &dir.path().join("downloads"), torrent_file("other.bin"), false).await.unwrap().id;
     let engine = Arc::new(engine);
     super::trash::hold(&gate, true);
     let moving = engine.sent(id, TorrentCommand::TrashFiles { files: vec![0] }).await;
@@ -4316,7 +4334,7 @@ async fn a_selections_move_to_trash_cut_short_by_a_crash_ends_each_part_with_wha
     let (a, b) = {
         let (engine, gate, a) = gated_pack(dir.path()).await;
         std::fs::create_dir_all(dir.path().join("downloads2")).unwrap();
-        let b = add_to(&engine, multi_file_torrent(&["d.bin", "e.bin"]), true, &dir.path().join("downloads2")).await.unwrap().id;
+        let b = add_made(&engine, &dir.path().join("downloads2"), multi_file_torrent(&["d.bin", "e.bin"]), true).await.unwrap().id;
         super::trash::hold(&gate, true);
         let trashing = tokio::spawn(engine.sent_all(vec![a, b], TorrentCommand::TrashFiles { files: vec![0, 1] }).await);
         // Both parts at the gate, each with its first file moved.
@@ -4930,57 +4948,6 @@ async fn a_file_in_the_trash_set_normal_again_is_got_again_at_its_path() {
     }
     assert_eq!(std::fs::read(&first).ok(), Some(before), "got again at its path");
     wait_for(&engine, id, Status::Seeding).await;
-    engine.stop().await;
-}
-
-/// S3 of #217's fifth review: a Move to Trash never moves a file while librqbit sets its length.
-/// librqbit's check ends setting each file's length, held here once the storage found the file in
-/// place: the move waits for it, and the file moves as it then is, so its undo finds it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_move_to_trash_waits_for_a_length_librqbit_is_setting() {
-    let dir = temp();
-    let gate = Arc::new(super::files::Gate::default());
-    let _opens = Opens(gate.clone());
-    let config = Config {
-        data_dir: dir.path().join("data"),
-        download_dir: dir.path().join("downloads"),
-        listen_port: 0,
-        upnp: false,
-        offline: true,
-        size_check_every: SIZE_CHECK_EVERY,
-        poll_every: super::POLL_EVERY,
-        trash: super::trash::into(dir.path().join("trash"), Default::default(), Default::default()),
-        speed_limits: Default::default(),
-        seeding: Default::default(),
-    };
-    let add_into: super::actor::AddInto = Arc::new(|session, id, add, destination, download_dir, guard| {
-        Box::pin(super::actor::add_into(session, id, add, destination, download_dir, guard))
-    });
-    let guard = super::files::Guard::default().with_gate(super::files::At::Length, gate.clone());
-    let engine = Engine::start_with(config, add_into, guard, super::Looks::real()).await.unwrap();
-    let source = valid_pack(dir.path()).await;
-    let id = add(&engine, &dir.path().join("downloads"), source, false).await.unwrap().id;
-    wait_for(&engine, id, Status::Seeding).await;
-    gate.hold(true);
-    engine.command(id, TorrentCommand::Check).await.unwrap();
-    // The check's end waits at the gate, setting a length.
-    for _ in 0..500 {
-        if gate.waiting() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(gate.waiting(), "a length set waits at the gate");
-    let moving = engine.sent(id, TorrentCommand::TrashFiles { files: vec![0, 1] }).await;
-    let moving = tokio::spawn(moving);
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!moving.is_finished(), "the move waits for the length being set");
-    gate.hold(false);
-    tokio::time::timeout(Duration::from_secs(5), moving).await.expect("then it moves").unwrap().unwrap();
-    until(&engine, id, |s| !matches!(s, Status::Checking)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let undone = tokio::time::timeout(Duration::from_secs(5), engine.undo()).await.expect("answered");
-    assert!(undone.is_ok(), "the move is undone: {undone:?}");
     engine.stop().await;
 }
 
