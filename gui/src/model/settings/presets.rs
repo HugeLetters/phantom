@@ -150,6 +150,9 @@ fn open_sheet(s: &mut SettingsWindow, target: Target) {
     let opened = Presets::of(&s.looks.borrow(), &s.saved);
     let Some(sheet) = &mut s.sheet else { return };
     sheet.edit = Some(EditSheet { target, editor: Default::default(), opened, focus: None });
+    // What it changes is shown, and kept once Done.
+    s.looks.borrow_mut().hold();
+    s.saved.hold();
     s.main.post(|s, _| crate::changes::sheet_opened(s, crate::changes::session::Sheet::Editor));
     looks_changed(s);
 }
@@ -168,6 +171,8 @@ pub fn cancel(s: &mut SettingsWindow) {
         if Presets::of(&s.looks.borrow(), &s.saved) != opened {
             super::restore(s, opened);
         }
+        s.looks.borrow_mut().release();
+        s.saved.release();
         None
     });
 }
@@ -199,6 +204,9 @@ pub fn close(s: &mut SettingsWindow) {
     preview(s);
     // What's left of the visit once a ⌘Z pressed just before has taken its step.
     super::end_sheet(s, move |s| {
+        // Done keeps it: written once.
+        s.looks.borrow_mut().release();
+        s.saved.release();
         (Presets::of(&s.looks.borrow(), &s.saved) != edit.opened)
             .then(|| (crate::changes::machine::AppSetting::Edit, Was::Edit(edit.opened, edit.target)))
     });

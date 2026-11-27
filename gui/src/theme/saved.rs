@@ -144,11 +144,30 @@ fn reset_parts(name: &str) -> Option<(Option<String>, Option<String>)> {
 pub struct Saved {
     list: Vec<SavedPreset>,
     keep: Box<dyn FnMut(&[SavedPreset])>,
+    /// The list as it was last kept, which [`Self::release`] compares with.
+    kept: Vec<SavedPreset>,
+    /// How many sheets are open over the list: while any is, a change is shown but not kept.
+    held: usize,
 }
 
 impl Saved {
     pub fn new(list: Vec<SavedPreset>, keep: impl FnMut(&[SavedPreset]) + 'static) -> Saved {
-        Saved { list, keep: Box::new(keep) }
+        Saved { kept: list.clone(), list, keep: Box::new(keep), held: 0 }
+    }
+
+    /// A sheet opens over the list: what it changes is kept only once [`Self::release`] ends the
+    /// last sheet open.
+    pub fn hold(&mut self) {
+        self.held += 1;
+    }
+
+    /// A sheet closed. With none left open, the list is kept if it isn't what was kept last.
+    pub fn release(&mut self) {
+        self.held = self.held.saturating_sub(1);
+        if self.held == 0 && self.list != self.kept {
+            self.kept = self.list.clone();
+            (self.keep)(&self.list);
+        }
     }
 
     pub fn list(&self) -> &[SavedPreset] {
@@ -173,7 +192,10 @@ impl Saved {
     pub fn set(&mut self, list: Vec<SavedPreset>) {
         if list != self.list {
             self.list = list;
-            (self.keep)(&self.list);
+            if self.held == 0 {
+                self.kept = self.list.clone();
+                (self.keep)(&self.list);
+            }
         }
     }
 }
