@@ -862,6 +862,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cases"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "proptest-state-machine",
+]
+
+[[package]]
 name = "cc"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1937,6 +1945,7 @@ name = "gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cases",
  "client",
  "lifecycle",
  "machine",
@@ -5475,6 +5484,7 @@ name = "service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cases",
  "client",
  "libc",
  "librqbit",

@@ -391,8 +391,7 @@ async fn a_clean_stop_forgets_what_was_seen_at_a_missing_path() {
     let dir = dir.path();
     let engine = engine(dir).await;
     let (_, b) = missing_b(&engine, dir).await;
-    // A size check has looked at the path by now.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    size_checks(&engine, 2).await;
     engine
         .inspect(move |a| assert_ne!(a.torrents.values().next().unwrap().record.missing[&b].seen, super::super::files::Seen::NotYet))
         .await;
@@ -451,7 +450,7 @@ async fn moved_missing(then: MovedThen) {
     wait_for(&engine, id, Status::MissingFiles).await;
     std::fs::write(&b, other()).unwrap();
     // Looked at, and told not to be the one that went.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    size_checks(&engine, 2).await;
     wait_for(&engine, id, Status::MissingFiles).await;
     let elsewhere = dir.join("elsewhere/pack");
     std::fs::create_dir_all(&elsewhere).unwrap();
@@ -526,7 +525,7 @@ async fn moved_missing(then: MovedThen) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_that_uses_a_file_there_is_still_missing_another() {
-    for then in [
+    let thens = [
         MovedThen::Copied,
         MovedThen::Restart,
         MovedThen::Crash,
@@ -534,8 +533,6 @@ async fn a_move_that_uses_a_file_there_is_still_missing_another() {
         MovedThen::MovedAgain,
         MovedThen::OwnBack,
         MovedThen::SetOff,
-    ] {
-        println!("{then:?}");
-        moved_missing(then).await;
-    }
+    ];
+    side_by_side(WIDTH, thens, moved_missing).await;
 }

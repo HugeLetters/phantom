@@ -4,7 +4,9 @@ A macOS BitTorrent client: a background service plus GUI and CLI clients, in Rus
 [ARCHITECTURE.md](ARCHITECTURE.md); use the words in [GLOSSARY.md](GLOSSARY.md)
 and in the `GLOSSARY.md` of the domain you touch ([gui](gui/GLOSSARY.md), [service](service/GLOSSARY.md)).
 
-- `cargo test` runs everything. GUI tests run headless against an in-memory service.
+- `cargo nextest run --workspace` plus `cargo test -p gui --test appkit` runs everything
+  ([docs/agent-workflow.md](docs/agent-workflow.md) step 4). GUI tests run headless against an
+  in-memory service.
 - Anything that starts a real service sets `PHANTOM_DATA_DIR` and `PHANTOM_DOWNLOAD_DIR` to a
   temp dir, so the user's own torrents stay untouched.
 - No migration code: a change to stored data (the record, `undo.json`, `gui.json`, settings)

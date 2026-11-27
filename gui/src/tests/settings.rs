@@ -64,7 +64,7 @@ use std::path::PathBuf;
 use client::setting;
 use proptest::prelude::*;
 use proptest::test_runner::Config;
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
+use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 use proto::{Direction, ListenPort, SeedingLimit, SeedingLimits, SettingName, SpeedLimits, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
@@ -2758,7 +2758,7 @@ fn text<S: 'static>(rt: &Runtime<S>, key: &str) -> String {
     rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.text).unwrap_or_default()
 }
 
-proptest! {
+cases::proptest! {
     #![proptest_config(Config { cases: 16, ..Config::default() })]
 
     /// Every text field Settings draws, found in what's drawn rather than listed, is in
@@ -3256,7 +3256,7 @@ fn config() -> Config {
     Config { cases, max_shrink_iters: 1024, ..Config::default() }
 }
 
-prop_state_machine! {
+cases::prop_state_machine! {
     #![proptest_config(config())]
 
     #[test]

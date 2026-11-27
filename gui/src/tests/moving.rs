@@ -220,7 +220,7 @@ fn answer() -> impl Strategy<Value = Answer> {
     (pick, any::<bool>()).prop_map(|(choice, rest)| Answer { choice, rest })
 }
 
-proptest! {
+cases::proptest! {
     /// Over any number of torrents that all clash, some with another listed torrent's files, and
     /// any answers to their dialogs: each dialog asks about the next torrent in the list's order,
     /// counting those still to ask, and offers Replace and Use existing only for files that aren't

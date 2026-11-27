@@ -1516,9 +1516,9 @@ fn mixed() -> impl Strategy<Value = Case> {
 }
 
 /// Why `case` fails, if it does.
-async fn fails(peers: &Arc<Peers>, case: &Case) -> Result<Power, String> {
+async fn fails(peers: &Arc<Peers>, case: &Case, strict: bool) -> Result<Power, String> {
     let (peers, case) = (peers.clone(), case.clone());
-    let failed = tokio::spawn(async move { World::run(&peers, &case, false).await }).await;
+    let failed = tokio::spawn(async move { World::run(&peers, &case, strict).await }).await;
     failed.map_err(|e| match e.into_panic().downcast::<String>() {
         Ok(text) => *text,
         Err(other) => other.downcast_ref::<&str>().map_or_else(|| "it panicked".into(), |s| (*s).into()),
@@ -1540,7 +1540,7 @@ async fn a_persons_bytes_stay_and_a_torrents_own_files_work() {
             let (peers, width, case) = (peers.clone(), width.clone(), tree.current());
             running.spawn(async move {
                 let _turn = width.acquire().await.unwrap();
-                (n, fails(&peers, &case).await)
+                (n, fails(&peers, &case, false).await)
             });
             trees.insert(n, tree);
         }
@@ -1580,7 +1580,7 @@ async fn a_persons_bytes_stay_and_a_torrents_own_files_work() {
     let mut more = tree.simplify();
     while more && std::time::Instant::now() < until {
         let case = tree.current();
-        more = match fails(&peers, &case).await {
+        more = match fails(&peers, &case, false).await {
             Err(now) => {
                 (least, why) = (case, now);
                 tree.simplify()
@@ -1707,11 +1707,12 @@ async fn a_hard_link_to_its_own_bytes_completes_once_checked() {
 /// #402: gone by hand, or to the Trash: it's downloaded again, not zeros shown as had.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_off_and_gone_set_normal_while_stopped_is_downloaded() {
-    let peers = Peers::start().await;
-    for gone in [vec![Step::Do(Do::Off { file: B }), Step::By(By::TakeAway { file: B })], vec![Step::Do(Do::TrashFile { file: B })]] {
+    let gone = [vec![Step::Do(Do::Off { file: B }), Step::By(By::TakeAway { file: B })], vec![Step::Do(Do::TrashFile { file: B })]];
+    strictly(gone.map(|gone| {
         let steps = [vec![Step::Do(Do::Pause)], gone, vec![Step::Settle, Step::Do(Do::Normal { file: B })]].concat();
-        World::run(&peers, &Case { start: Start::Half, peer: false, paused: false, before: None, steps }, true).await;
-    }
+        Case { start: Start::Half, peer: false, paused: false, before: None, steps }
+    }))
+    .await;
 }
 
 /// Moved without a file that was gone, using another that was there: the answer is no refusal, and
@@ -1727,23 +1728,35 @@ async fn a_move_without_a_missing_file_takes_the_choice_it_was_sent_with() {
 /// #406: a Move that uses one file there leaves the person's where another was missing as it is.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_that_uses_a_file_there_leaves_one_where_a_file_was_missing() {
-    let peers = Peers::start().await;
-    for kind in [Same, Shorter, Empty, OnePiece, Cut, HardLink, Edit, Longer] {
-        for peer in [false, true] {
+    let cases = [Same, Shorter, Empty, OnePiece, Cut, HardLink, Edit, Longer].into_iter().flat_map(|kind| {
+        [false, true].map(|peer| {
             let gone = [Step::Settle, Step::By(By::TakeAway { file: B }), Step::Settle, put(kind)];
             let used = Step::By(By::PutAtTarget { file: 0, kind: Same });
             let steps = [gone.to_vec(), vec![used, Step::Do(Do::Move { replace: false }), Step::Settle]].concat();
-            World::run(&peers, &Case { start: Start::Whole, peer, paused: false, before: None, steps }, true).await;
+            Case { start: Start::Whole, peer, paused: false, before: None, steps }
+        })
+    });
+    strictly(cases).await;
+}
+
+/// Runs each of `cases` strictly, `WIDTH` at a time as the generated ones are: each takes seconds,
+/// most of them waiting. A failing one fails the test, named.
+async fn strictly(cases: impl IntoIterator<Item = Case>) {
+    let peers = Arc::new(Peers::start().await);
+    super::side_by_side(WIDTH, cases, move |case| {
+        let peers = peers.clone();
+        async move {
+            if let Err(why) = fails(&peers, &case, true).await {
+                panic!("{why}\ncase: {case:?}");
+            }
         }
-    }
+    })
+    .await;
 }
 
 /// One that depends on when its steps come: some runs of it pass.
 async fn often(steps: Vec<Step>) {
-    let peers = Peers::start().await;
-    for _ in 0..20 {
-        World::run(&peers, &Case { start: Start::Whole, peer: true, paused: false, before: None, steps: steps.clone() }, true).await;
-    }
+    strictly(vec![Case { start: Start::Whole, peer: true, paused: false, before: None, steps }; 20]).await;
 }
 
 /// #375: a piece being put back as the torrent is paused isn't lost.

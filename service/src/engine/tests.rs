@@ -165,6 +165,45 @@ async fn wait_for(engine: &Engine, id: u64, status: Status) {
     panic!("torrent {id} is {:?}, not {status:?}", find(engine, id).await.status);
 }
 
+/// Waits for the engine's next `n` size checks, each whole after this call: what one sees, and what
+/// it starts, has been seen and started by then, however loaded the machine. Wait on this, or on a
+/// status ([`until`], [`wait_for`]), never for a time.
+async fn size_checks(engine: &Engine, n: u64) {
+    let done = engine.inspect(|a| a.size_checks).await;
+    for _ in 0..2000 {
+        if engine.inspect(move |a| a.size_checks >= done + n).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the engine did no {n} size checks in 10 s");
+}
+
+/// Runs `run` of each of `cases` side by side, `width` at a time: each in its own temp dir with its
+/// own engine, most of its time waiting (every engine's stop alone takes librqbit's 1 s). The
+/// first case to panic fails the test with its panic.
+async fn side_by_side<C, F>(width: usize, cases: impl IntoIterator<Item = C>, run: impl Fn(C) -> F)
+where
+    C: Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
+    let width = Arc::new(tokio::sync::Semaphore::new(width));
+    let mut running = tokio::task::JoinSet::new();
+    for case in cases {
+        let (width, case) = (width.clone(), run(case));
+        running.spawn(async move {
+            let _turn = width.acquire().await.unwrap();
+            case.await
+        });
+    }
+    while let Some(done) = running.join_next().await {
+        if let Err(failed) = done {
+            running.shutdown().await;
+            std::panic::resume_unwind(failed.into_panic());
+        }
+    }
+}
+
 /// A bare info hash, as the client sends it: the magnet link of it, which librqbit takes.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_info_hash_on_its_own_is_added() {
@@ -1523,7 +1562,7 @@ async fn the_watcher_sees_a_torrent_folder_go_without_waiting_for_the_regular_lo
     wait_for(&engine, id, Status::Seeding).await;
     // The first size check, at start, ran before the torrent was added; this one watches its destination.
     engine.inspect(|actor| actor.watch_destinations()).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    size_checks(&engine, 2).await;
 
     std::fs::remove_dir_all(dir.path().join("downloads/pack")).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
@@ -2595,7 +2634,7 @@ mod limits {
         std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(16)
     }
 
-    proptest! {
+    cases::proptest! {
         #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
 
         /// The running session's limits are the ones last set, from the start and across restarts.
@@ -4991,7 +5030,7 @@ mod restore {
         TrashFiles(Vec<usize>),
     }
 
-    proptest! {
+    cases::proptest! {
         #![proptest_config(ProptestConfig {
             cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).map_or(16, |c: u32| c / 4).max(4),
             ..Default::default()
@@ -5603,10 +5642,7 @@ async fn a_check_clears_the_let_go_of_a_missing_file_set_off_and_put_back() {
     std::fs::remove_file(&path).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
     // Right after a size check, so the next look comes only after the check below starts.
-    let checks = engine.inspect(|a| a.size_checks).await;
-    while engine.inspect(|a| a.size_checks).await == checks {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    size_checks(&engine, 1).await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
     assert!(matches!(letting, super::machine::letgo::State::Gone { .. }), "to be let go of: {letting:?}");

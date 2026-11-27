@@ -1565,7 +1565,7 @@ fn config() -> Config {
     Config { cases, max_shrink_iters: 256, ..Config::default() }
 }
 
-proptest! {
+cases::proptest! {
     #![proptest_config(config())]
 
     #[test]

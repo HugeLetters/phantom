@@ -39,6 +39,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }
 machine = { workspace = true, features = ["harness"] }
+cases.workspace = true
 proptest = "1.12"
 proptest-state-machine = "0.9"
 client.workspace = true

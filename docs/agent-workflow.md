@@ -30,26 +30,45 @@
 
    **UI wording (Apple's rule):** "…" ends a command's label only when it needs more input before
    acting (Edit…, Save as…, Add…, Move to…), never on one that acts at once (Apply, Delete).
-4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and `cargo test` green.
+4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and the default suite
+   green: `cargo nextest run --workspace`, then `cargo test -p gui --test appkit` (its own
+   harness, which nextest can't list; seconds).
    Run them in the foreground with a long timeout: a background job can't wake you, so a turn
    that ends while one runs leaves the work unfinished. Wrap long runs in
    `scripts/with-timeout.sh <seconds> <command>` (macOS has no `timeout`): it kills the whole
    process group and leaves nothing behind. A home-made wrapper with a background `sleep` as its
    watchdog can orphan that sleep, which keeps a `| grep` hanging long after the tests finished.
 
-   **How long a run, when** (long property runs were two thirds of agents' command time):
-   - *While changing code:* the default `cargo test` (16–32 generated cases per property) plus
-     the specific test you're working on.
-   - *Once, when the PR goes up for review:* the long runs for the areas it touches,
-     `PROPTEST_CASES=256` for the engine model, race and lifecycle tests, `500` for the GUI.
-     Give each long run its own command, so its time isn't put down to another.
-     A review-fix round reruns long only the area its fixes touched; a reviewer reuses the
-     author's long results unless a finding calls them into question.
+   **How long a run, when:**
+   - *While changing code:* the default suite (16–32 generated cases per property) plus the
+     specific test you're working on.
+   - *Once, when the PR goes up for review:* the default suite, plus the long runs for the areas
+     it touches: `PROPTEST_CASES=256` for the engine model, race, oracle and lifecycle tests,
+     `500` for the GUI. Give each long run its own command, so its time isn't put down to
+     another. A review-fix round reruns long only the area its fixes touched; a reviewer reuses
+     the author's long results unless a finding calls them into question.
    - *After a rebase:* if it only brought in master's changes (no conflicts in logic), the
-     default `cargo test` is enough. Real conflicts in logic rerun long the touched area only.
+     default suite is enough. Real conflicts in logic rerun long the touched area only.
+   - *After each merge to master* the coordinator runs every long run in the background, from
+     the main checkout. It blocks nothing: a failure becomes an issue, with its seed or shrunk
+     case.
    - *Flake hunts* use heavy load on purpose (parallel runs plus CPU burners), but never while
      another agent has a check run going: that load makes its unrelated timing-sensitive tests
-     fail falsely. Check `pgrep -fl 'cargo test'` for other worktrees first.
+     fail falsely. Check `pgrep -fl 'cargo|nextest'` for other worktrees first.
+
+   **Keep tests fast.** A test's budget is 20 s on an idle machine: nextest flags one past it SLOW,
+   and `cargo nextest run --workspace --profile budget` fails it, unless `.config/nextest.toml`
+   lists it as slow, with why. Most of a test's time is waiting, so:
+   - Wait on what happens, never for a time: a status (`until`, `wait_for`), the engine's next size
+     checks (`size_checks(engine, n)`), a gate's `waiting()`. A fixed `sleep` "long enough for
+     it to happen" is slower than needed on an idle machine and too short on a loaded one.
+   - A test's independent cases, each with its own temp dir and engine, run side by side
+     (`side_by_side(width, cases, run)` in the engine tests), not in a loop: each engine's stop
+     alone waits librqbit's 1 s.
+   - A property test whose cases start an engine or render the GUI uses `cases::proptest!` or
+     `cases::prop_state_machine!` (same form as proptest's): its cases run on several runners.
+   - Use the existing small fixtures (`complete_torrent`, `multi_file_torrent`, 16 KiB pieces)
+     rather than new large files.
 
    **What to test:** what the app does, not what it doesn't. Don't add a test that a removed or
    never-built feature stays absent (such as "an error never opens the popover"): the model-based

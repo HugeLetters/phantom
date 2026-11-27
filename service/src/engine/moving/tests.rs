@@ -122,7 +122,7 @@ fn all_bytes(dir: &Path) -> Vec<Vec<u8>> {
     found
 }
 
-proptest! {
+cases::proptest! {
     #![proptest_config(ProptestConfig {
         cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(64),
         ..ProptestConfig::default()

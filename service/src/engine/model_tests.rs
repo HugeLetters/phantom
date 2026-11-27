@@ -60,7 +60,7 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 use proptest::test_runner::Config;
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
+use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, TorrentId, Unavailable};
 use tempfile::TempDir;
 
@@ -3099,7 +3099,7 @@ fn config() -> Config {
     Config { cases, max_shrink_iters: 256, ..Config::default() }
 }
 
-prop_state_machine! {
+cases::prop_state_machine! {
     #![proptest_config(config())]
 
     #[test]

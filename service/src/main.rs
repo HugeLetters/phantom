@@ -717,7 +717,7 @@ mod set_tests {
         ]
     }
 
-    proptest! {
+    cases::proptest! {
         #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
 
         /// What's saved is what's applied: a change refused (the service stopping, a value out of

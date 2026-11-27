@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use proptest::prelude::*;
 use proptest::test_runner::Config;
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
+use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 use proto::{Action as Do, Status, TorrentId, TorrentInfo, Unavailable};
 use rune::{Key, KeyEvent, Mods, Runtime};
 
@@ -2087,7 +2087,7 @@ fn config() -> Config {
     Config { cases, max_shrink_iters: 1024, ..Config::default() }
 }
 
-prop_state_machine! {
+cases::prop_state_machine! {
     #![proptest_config(config())]
 
     #[test]

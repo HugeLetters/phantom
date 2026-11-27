@@ -29,10 +29,7 @@ fn still_a_link(dir: &Path, target: &Path) {
 /// found it missing, if it was to be.
 async fn settled(engine: &Engine, id: u64) -> Status {
     until(engine, id, |s| !matches!(s, Status::Checking { .. } | Status::FetchingInfo)).await;
-    let checks = engine.inspect(|a| a.size_checks).await;
-    while engine.inspect(|a| a.size_checks).await < checks + 2 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    size_checks(engine, 2).await;
     find(engine, id).await.status
 }
 
