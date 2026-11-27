@@ -1620,7 +1620,11 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
                 Target::Saved(name) => (display::of_a_saved_preset(&theme_named(label, side)), Some(name.as_str().to_owned())),
             };
             presets::show_setting(s, target, key, side, tx);
-            let told = Notice::setting_undone(&named, &undone, &back);
+            // A restore changed many settings: nothing one value tells.
+            let told = match key {
+                RESTORE => Notice::new(display::setting_undone_short(&named)).brief(),
+                _ => Notice::setting_undone(&named, &undone, &back),
+            };
             match of {
                 Some(preset) => {
                     Notice { more: told.more.map(|list| list.then(vec![crate::notice::Line::Muted(format!("In {preset}"))])), ..told }
@@ -1807,11 +1811,7 @@ pub fn with_theme(mut preset: LookPreset, side: Side, id: &str) -> LookPreset {
         if preset.get(appearance).theme.id() == theme.id() {
             continue;
         }
-        let settings = match fresh.get(appearance) {
-            look if look.theme.id() == theme.id() => look.settings.clone(),
-            _ => crate::theme::setting::Values::defaults(theme.settings()),
-        };
-        *preset.get_mut(appearance) = crate::theme::ThemeLook { theme, settings };
+        *preset.get_mut(appearance) = crate::theme::ThemeLook { theme, settings: default_settings(&fresh, appearance, theme) };
     }
     preset
 }
@@ -2148,6 +2148,50 @@ fn change_theme_id(s: &mut SettingsWindow, target: Target, side: Side, id: &str)
         editor.split.insert(THEME);
     }
     edited(s, was, target, side, THEME, THEME_LABEL);
+}
+
+/// `theme`'s settings as a fresh install has them for `appearance`: its default look's where that
+/// half shows `theme`, else the theme's defaults.
+fn default_settings(fresh: &LookPreset, appearance: Appearance, theme: &'static dyn crate::theme::Theme) -> crate::theme::setting::Values {
+    match fresh.get(appearance) {
+        look if look.theme.id() == theme.id() => look.settings.clone(),
+        _ => crate::theme::setting::Values::defaults(theme.settings()),
+    }
+}
+
+/// The key a Restore Defaults is undone by, and its name.
+pub const RESTORE: &str = "restore";
+pub const RESTORE_LABEL: &str = "Restore Defaults";
+
+/// Whether Restore Defaults on `side` has anything to change in `preset`: a setting of a half
+/// there that isn't at its theme's default.
+pub fn restorable(preset: &LookPreset, side: Side) -> bool {
+    let fresh = LookPreset::fresh();
+    side.appearances().iter().any(|&a| {
+        let look = preset.get(a);
+        look.settings != default_settings(&fresh, a, look.theme)
+    })
+}
+
+/// Every setting of the theme in each half of `side` back to its default, whatever the theme (the
+/// theme itself stays), a change ⌘Z takes back as one step. Which rows are split stays as it was.
+pub fn restore_defaults(s: &mut SettingsWindow, side: Side) {
+    follow_focus(s);
+    close_menu(s);
+    let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
+    let was = Presets::of(&s.looks.borrow(), &s.saved);
+    let Some(mut preset) = was.get(&target).cloned() else { return };
+    let fresh = LookPreset::fresh();
+    for &appearance in side.appearances() {
+        let look = preset.get_mut(appearance);
+        look.settings = default_settings(&fresh, appearance, look.theme);
+    }
+    keep_edited(s, &target, preset);
+    if let Some(editor) = s.sheet.as_mut().and_then(|sheet| sheet.editor_mut()) {
+        // The pickers show what they held.
+        editor.picker = None;
+    }
+    edited(s, was, target, side, RESTORE, RESTORE_LABEL);
 }
 
 /// Why a color isn't one.

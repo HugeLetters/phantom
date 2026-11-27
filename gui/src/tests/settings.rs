@@ -5329,4 +5329,5 @@ fn return_presses_done_on_the_app_icons_sheet() {
 
 mod customize;
 mod fit;
+mod restore;
 mod saves;

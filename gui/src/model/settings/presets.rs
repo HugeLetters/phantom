@@ -251,9 +251,10 @@ pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, s
     edit.focus = None;
     edit.editor.menu = None;
     // Its row as it was set: joined, or split.
-    match side {
-        Side::Both => edit.editor.split.remove(key),
-        Side::Only(_) => edit.editor.split.insert(key),
+    match (side, key) {
+        (_, super::RESTORE) => false,
+        (Side::Both, _) => edit.editor.split.remove(key),
+        (Side::Only(_), _) => edit.editor.split.insert(key),
     };
     looks_changed(s);
     let Some(edit) = s.sheet.as_mut().and_then(|sheet| sheet.edit.as_mut()) else { return };
@@ -294,6 +295,9 @@ pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, s
         None => {
             edit.focus = Some((key, side));
             tx.blur();
+            if key == super::RESTORE {
+                tx.focus("edit-restore", true);
+            }
             if std::mem::take(&mut edit.editor.refocus) {
                 refocus(s, key, side, tx);
             }
