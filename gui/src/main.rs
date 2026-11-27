@@ -44,6 +44,7 @@ use model::{Phantom, add};
 use notice::Notice;
 use platform::app_icon::{Icons, Manifest};
 use service::{AddRequest, Connection, DiskChange, Incoming, MemoryService, Service, SocketService};
+use theme::icon::Tint;
 use theme::preset::{self, LookPreset, Looks};
 use theme::saved::{self, Saved};
 use windows::{Inbox, Which, Window};
@@ -406,8 +407,9 @@ fn setup(s: &mut SettingsWindow, waker: Waker) {
     s.app_icon.load_images(Rc::new(ImageCache::new(waker)));
     s.app_icon.load();
     model::settings::poll_icons(s);
+    s.app_icon.redraw(&s.looks.borrow());
     if headless {
-        for (_, image) in &s.app_icon.images {
+        for image in s.app_icon.images.iter().map(|(_, image)| image).chain(s.app_icon.drawn_images()) {
             let _ = image.wait();
         }
     }
@@ -421,21 +423,26 @@ fn app_icon(theme: Icons) -> AppIcon {
     }
     let choice = settings::file::read(platform::app_icon::SETTING);
     let added: Vec<String> = settings::file::read(platform::app_icon::ADDED).unwrap_or_default();
+    let tints = settings::file::read(theme::icon::SETTING).unwrap_or_default();
     #[cfg(target_os = "macos")]
     return AppIcon::new(manifest, choice, theme, |change| match change {
         IconChange::Chose(choice) => platform::app_icon::appkit::choose(choice),
         IconChange::Theme(theme) => platform::app_icon::appkit::follow(theme),
         IconChange::Added(added) => settings::file::keep(platform::app_icon::ADDED, Some(&added)),
         IconChange::Loaded(icon) => platform::app_icon::appkit::loaded(icon),
-    })
-    .with_added(added);
-    #[cfg(not(target_os = "macos"))]
-    AppIcon::new(manifest, choice, theme, |change| {
-        if let IconChange::Added(added) = change {
-            settings::file::keep(platform::app_icon::ADDED, Some(&added));
-        }
+        // The Dock and the bundle still show the shipped picture (#70, #71).
+        IconChange::Tints(tints) => settings::file::keep(theme::icon::SETTING, Some(tints)),
     })
     .with_added(added)
+    .with_tints(tints);
+    #[cfg(not(target_os = "macos"))]
+    AppIcon::new(manifest, choice, theme, |change| match change {
+        IconChange::Added(added) => settings::file::keep(platform::app_icon::ADDED, Some(&added)),
+        IconChange::Tints(tints) => settings::file::keep(theme::icon::SETTING, Some(tints)),
+        _ => {}
+    })
+    .with_added(added)
+    .with_tints(tints)
 }
 
 /// The Active Look Preset kept in `gui.json` (repaired already), each change kept there;
@@ -1216,6 +1223,21 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 model::settings::presets::edit_active(s);
                 model::settings::toggle_section(s, "every-color");
             }),
+            // The picker on a hand-set Faint text in Dark's half: two warnings under it (#417).
+            ("settings-faint-picker", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "faint_text", "#a3a6ab"), (preset::Appearance::Dark, "faint_text", "#5f656f")]);
+                model::settings::presets::edit_active(s);
+                model::settings::toggle_section(s, "every-color");
+                model::settings::open_picker(s, model::settings::Side::Only(preset::Appearance::Dark), "faint_text");
+            }),
+            // The same, the picker still closed: for a script to scroll to the swatch and open it.
+            ("settings-faint-sheet", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "faint_text", "#a3a6ab"), (preset::Appearance::Dark, "faint_text", "#5f656f")]);
+                model::settings::presets::edit_active(s);
+                model::settings::toggle_section(s, "every-color");
+            }),
             ("settings-accent-set", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 set_colors(s, &[(preset::Appearance::Light, "accent", "#6526d4")]);
@@ -1262,6 +1284,57 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 s.app_icon.choice = Some(platform::app_icon::Icons::One { icon: "full-moon".into() });
             }),
+            // Phantom's icon customized (#417): the row with its Customize…, Light following the
+            // look, Dark a blue tile set by hand.
+            ("settings-icon-row-tinted", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                tint(s, &[(preset::Appearance::Light, Tint::Follow), (preset::Appearance::Dark, Tint::Color(BLUE))]);
+            }),
+            // The Customize sheet as it first opens: Original in both halves.
+            ("settings-customize", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                model::settings::customize::open(s);
+            }),
+            // Its picker open on Light's Tile.
+            ("settings-customize-picker", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                model::settings::customize::open(s);
+                model::settings::customize::open_picker(s, preset::Appearance::Light, "tile");
+            }),
+            // Light following the look, Dark a blue set by hand, its picker open.
+            ("settings-customize-follow", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                tint(s, &[(preset::Appearance::Light, Tint::Follow), (preset::Appearance::Dark, Tint::Color(BLUE))]);
+                model::settings::customize::open(s);
+                model::settings::customize::open_picker(s, preset::Appearance::Dark, "tile");
+            }),
+            // The Dark look another theme's: Dark's Follow the look is off (why on hover).
+            ("settings-customize-other", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                stand_in_dark(s);
+                tint(s, &[(preset::Appearance::Light, Tint::Follow)]);
+                model::settings::customize::open(s);
+                model::settings::customize::open_picker(s, preset::Appearance::Dark, "tile");
+            }),
+            // The tile in a few colors set by hand, the same in both halves.
+            ("settings-customize-orange", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                let c = Tint::Color(theme::setting::Rgb([0xa7, 0x58, 0x31]));
+                tint(s, &[(preset::Appearance::Light, c), (preset::Appearance::Dark, c)]);
+                model::settings::customize::open(s);
+            }),
+            ("settings-customize-purple", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                let c = Tint::Color(theme::setting::Rgb([0x69, 0x33, 0xc2]));
+                tint(s, &[(preset::Appearance::Light, c), (preset::Appearance::Dark, c)]);
+                model::settings::customize::open(s);
+            }),
+            ("settings-customize-green", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                let c = Tint::Color(theme::setting::Rgb([0x2f, 0x9e, 0x6a]));
+                tint(s, &[(preset::Appearance::Light, c), (preset::Appearance::Dark, c)]);
+                model::settings::customize::open(s);
+            }),
         ],
         families: FAMILIES,
         ..AppSpec::new("Settings", SETTINGS_SIZE, SettingsWindow::detached, views::settings::view)
@@ -1278,6 +1351,17 @@ fn set_colors(s: &mut SettingsWindow, colors: &[(preset::Appearance, &str, &str)
         s.looks.borrow_mut().set(*half, look);
     }
 }
+
+/// Phantom's Tile as `tints` set it in each half, drawn (#417).
+fn tint(s: &mut SettingsWindow, tints: &[(preset::Appearance, Tint)]) {
+    for (half, tint) in tints {
+        s.app_icon.set_tint("phantom", *half, theme::phantom::app_icon::TILE, *tint);
+    }
+    s.app_icon.redraw(&s.looks.borrow());
+}
+
+/// A blue for the scenes' Tile set by hand.
+const BLUE: theme::setting::Rgb = theme::setting::Rgb([0x3f, 0x7e, 0xd0]);
 
 fn stand_in_dark(s: &mut SettingsWindow) {
     if let Some(theme) = theme::find("stand-in") {

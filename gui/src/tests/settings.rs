@@ -4629,21 +4629,105 @@ fn the_colors_names_are_never_cut() {
     }
 }
 
+/// Everything in the popup keyed `popup` (the square, the bar, the hex field, the buttons, the
+/// warnings) lies inside the popup's own frame: nothing is cut or spills.
+pub(super) fn popup_holds_its_parts(d: &Desk, popup: &str, width: f32) {
+    let all = d.settings.elements();
+    let frame = super::generated::rect_of(&d.settings, popup).unwrap_or_else(|| panic!("{popup} at {width}"));
+    let mut parts = 0;
+    for e in all.iter().filter(|e| !e.exiting && e.path.split('/').any(|p| p == popup) && e.key.as_deref() != Some(popup)) {
+        parts += 1;
+        let r = e.rect;
+        assert!(
+            r[0] >= frame[0] - 0.5
+                && r[1] >= frame[1] - 0.5
+                && r[0] + r[2] <= frame[0] + frame[2] + 0.5
+                && r[1] + r[3] <= frame[1] + frame[3] + 0.5,
+            "at {width} pt {:?} {r:?} spills out of {popup} {frame:?}",
+            e.key
+        );
+    }
+    assert!(parts >= 4, "the parts of {popup} were found");
+}
+
+/// Scrolls the sheet over Settings until the centre of the element keyed `key` is at about `y` (as
+/// far as the sheet scrolls), and presses it.
+pub(super) fn press_at(d: &mut Desk, key: &str, y: f32) {
+    d.front(Which::Settings);
+    for _ in 0..30 {
+        let (Some((_, now)), Some((bx, by))) = (d.settings.find(key), d.settings.find("body")) else { break };
+        if (now - y).abs() < 4.0 {
+            break;
+        }
+        d.settings.wheel(bx, by, (y - now).clamp(-200.0, 200.0));
+        d.settings.frame(FRAME);
+    }
+    let (x, y) = d.settings.find(key).unwrap_or_else(|| panic!("no {key:?}"));
+    d.settings.pointer_down(x, y);
+    d.settings.pointer_up(x, y);
+    d.settle();
+}
+
+/// At the 640x320 minimum, with the swatch near the top, the middle and the bottom of the visible
+/// sheet, every part of the picker lies inside the popup and inside the window.
+pub(super) fn minimum_window_holds_the_popup(open: impl Fn(f32) -> (Desk, String)) {
+    for y in [110.0, 170.0, 235.0] {
+        let (d, popup) = open(y);
+        let frame = super::generated::rect_of(&d.settings, &popup).unwrap_or_else(|| panic!("{popup}"));
+        assert!(
+            frame[0] >= -0.5 && frame[1] >= -0.5 && frame[0] + frame[2] <= 640.5 && frame[1] + frame[3] <= 320.5,
+            "swatch at {y}: {popup} {frame:?} is inside the 640x320 window"
+        );
+        popup_holds_its_parts(&d, &popup, 640.0);
+    }
+}
+
+/// Colors' picker at the 640x320 minimum, in either half.
+#[test]
+fn the_colors_picker_fits_the_minimum_window() {
+    for (swatch, field) in [
+        ("edit-accent-light-swatch", "edit-accent-light"),
+        ("edit-accent-dark-swatch", "edit-accent-dark"),
+        ("edit-faint_text-light-swatch", "edit-faint_text-light"),
+        ("edit-faint_text-dark-swatch", "edit-faint_text-dark"),
+    ] {
+        minimum_window_holds_the_popup(|y| {
+            let mut d = colors_sheet(640.0);
+            // Hard to read in both halves: the popup shows its warnings.
+            if swatch.starts_with("edit-faint_text") {
+                for (half, hex) in [(Appearance::Light, "#a3a6ab"), (Appearance::Dark, "#5f656f")] {
+                    let mut look = d.main.state.looks.borrow().preset().get(half).clone();
+                    look.settings.set("faint_text", Value::Color(Rgb::parse(hex)));
+                    d.main.state.looks.borrow_mut().set(half, look);
+                }
+                d.settle();
+            }
+            d.settings.set_viewport((640.0, 320.0), 2.0);
+            d.settle();
+            press_at(&mut d, swatch, y);
+            (d, format!("{field}-popup"))
+        });
+    }
+}
+
 /// A swatch's picker opens beside it, inside the window, at both widths, wherever its swatch is:
 /// the square, the bar, the hex field and the button, each named for screen readers.
 #[test]
 fn the_picker_opens_inside_the_window() {
     for width in [960.0, 640.0] {
         // Light and Dark's colors differ: each row is split, a swatch in each half.
-        for (swatch, field) in
-            [("edit-accent-dark-swatch", "edit-accent-dark"), ("edit-success_edge-dark-swatch", "edit-success_edge-dark")]
-        {
+        for (swatch, field) in [
+            ("edit-accent-light-swatch", "edit-accent-light"),
+            ("edit-accent-dark-swatch", "edit-accent-dark"),
+            ("edit-success_edge-dark-swatch", "edit-success_edge-dark"),
+        ] {
             let mut d = colors_sheet(width);
             press(&mut d, swatch);
             let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key} at {width}"));
             let popup = rect(&d, &format!("{field}-popup"));
             assert!(popup[0] >= 0.0 && popup[1] >= 0.0, "at {width} pt {popup:?} inside");
             assert!(popup[0] + popup[2] <= width + 0.5 && popup[1] + popup[3] <= 900.5, "at {width} pt {popup:?} inside");
+            popup_holds_its_parts(&d, &format!("{field}-popup"), width);
             let label = |key: &str| d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.label);
             assert_eq!(label(&format!("{field}-square")).as_deref(), Some("Hue and lightness"));
             assert_eq!(label(&format!("{field}-bar")).as_deref(), Some("Saturation"));
@@ -5227,3 +5311,5 @@ fn return_presses_done_on_the_app_icons_sheet() {
         assert!(!icons(&d), "Return presses Done (focus in the sheet: {tab})");
     }
 }
+
+mod customize;

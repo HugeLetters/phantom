@@ -14,6 +14,7 @@
 //! [ADR 0011]: ../../../docs/adr/0011-look-presets.md
 
 mod colors;
+pub mod icon;
 pub(crate) mod oklab;
 pub mod phantom;
 pub mod preset;
@@ -50,6 +51,10 @@ pub trait Theme: Sync {
     /// [`settings`](Self::settings). The blocks and screens it draws are closures, which keep
     /// whatever they need of these settings and of what the theme resolves from them.
     fn build(&self, settings: &Values) -> Built;
+    /// The App icons it draws from settings of their own (#417); most draw none.
+    fn icons(&self) -> &'static [icon::ThemeIcon] {
+        &[]
+    }
 }
 
 /// What a theme builds from a Theme Look's settings.
@@ -165,6 +170,8 @@ impl ThemeLook {
 
 /// A Theme Look resolved: what the views draw with.
 pub struct Look {
+    /// The id of the theme it's of.
+    pub theme: &'static str,
     pub ui: Ui,
     pub screens: Screens,
     /// As [`Built::app_icon`].
@@ -188,7 +195,7 @@ impl Look {
         let base = (Blocks::phantom(phantom::icon), Screens::phantom());
         let (blocks, screens) = chain.iter().rev().fold(base, |(blocks, screens), (b, s)| (blocks.over(b), screens.over(s)));
         let ui = Ui::new(built.tokens, built.colors, built.spacing, blocks, built.motion);
-        Look { ui, screens, app_icon: built.app_icon, resolved: built.resolved }
+        Look { theme: look.theme.id(), ui, screens, app_icon: built.app_icon, resolved: built.resolved }
     }
 }
 

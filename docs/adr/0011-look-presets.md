@@ -18,7 +18,7 @@ The **App icon** is not part of a Look Preset. It is one global setting, one ico
 
 ## Stored data
 
-In `gui.json`, with no migration: an older file may be reset, and an older build drops what it doesn't know. `app_icon` may hold `{"icon": id}` or `{"dark": id, "light": id}`, where either half may be `"theme"` (follow the theme alone) or a `file:/path` id; a new key, `app_icon_images`, lists the added images' `file:` ids in the order they were added. The Look Preset's shape is unchanged.
+In `gui.json`, with no migration: an older file may be reset, and an older build drops what it doesn't know. `app_icon` may hold `{"icon": id}` or `{"dark": id, "light": id}`, where either half may be `"theme"` (follow the theme alone) or a `file:/path` id; a new key, `app_icon_images`, lists the added images' `file:` ids in the order they were added. `app_icon_settings` holds the settings of the icons a theme draws, by icon id and half, only those not at their default: `{"phantom": {"light": {"tile": "follow"}, "dark": {"tile": "#3f7ed0"}}}`, a color being `"original"`, `"follow"` or `"#rrggbb"`; anything invalid resets the key, named in the settings-reset notice. The Look Preset's shape is unchanged.
 
 ## Considered options
 
