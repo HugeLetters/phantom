@@ -14,7 +14,7 @@ use crate::theme::oklab::Okhsl;
 use crate::theme::setting::Rgb;
 
 /// How big a swatch is, and its ring's width and its gap off the swatch.
-const SWATCH: f32 = 22.0;
+pub(super) const SWATCH: f32 = 22.0;
 const RING: f32 = 1.5;
 const RING_GAP: f32 = 2.0;
 

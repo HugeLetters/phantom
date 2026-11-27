@@ -1,0 +1,159 @@
+//! Settings' rows fit the window (#425, #457): a label or a value is never cut, and a row's
+//! controls sit beside its label where they fit whole, else on a line of their own under it.
+
+use super::*;
+
+/// The widths checked: the widest the Look sheet gets, two in between, and Settings' minimum.
+const WIDTHS: [f32; 4] = [960.0, 640.0, 560.0, 480.0];
+
+/// Every text Settings shows (the Look sheet's, while it's open) is whole: not cut or shortened,
+/// as wide as it needs, inside the window and, in the Look sheet, inside its half. `at` names
+/// the case.
+fn texts_whole(d: &Desk, width: f32, at: &str) {
+    let elements = d.settings.elements();
+    let sheet = elements.iter().any(|e| e.key.as_deref() == Some("edit-sheet") && !e.exiting);
+    let half_of = |path: &str| {
+        elements.iter().filter(|e| !e.exiting && path.starts_with(&e.path)).find(|e| {
+            let key = e.key.as_deref().unwrap_or("");
+            key.starts_with("edit-") && (key.ends_with("-left") || key.ends_with("-right"))
+        })
+    };
+    let mut seen = 0;
+    for e in elements.iter().filter(|e| !e.exiting && e.opacity > 0.0) {
+        let Some(text) = e.text.as_deref().filter(|t| !t.trim().is_empty()) else { continue };
+        if sheet && !e.path.contains("edit-sheet") {
+            continue;
+        }
+        seen += 1;
+        let [x, _, w, _] = e.rect;
+        // Rune keeps the whole text here; `text_cut` says whether it drew it shortened.
+        assert!(!e.text_cut, "{at}: {text:?} is cut");
+        if let Some([needs, _]) = e.text_size {
+            assert!(needs <= w + 0.5, "{at}: {text:?} needs {needs} but is {w} wide");
+        }
+        assert!(x >= -0.5 && x + w <= width + 0.5, "{at}: {text:?} at {:?} spills out of the window", e.rect);
+        if let Some(half) = half_of(&e.path) {
+            let [hx, _, hw, _] = half.rect;
+            assert!(x >= hx - 0.5 && x + w <= hx + hw + 0.5, "{at}: {text:?} at {:?} spills out of its half {:?}", e.rect, half.rect);
+        }
+    }
+    assert!(seen >= 6, "{at}: the texts were found");
+}
+
+/// The Look sheet's rows, one theme in both halves: each row's control cell and its half.
+/// Whether a row is stacked: its control is on a line under its label, not beside it.
+fn stacked_rows(d: &Desk) -> Vec<(String, bool)> {
+    let elements = d.settings.elements();
+    let rect = |key: &str| elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some(key)).map(|e| e.rect);
+    let mut rows = Vec::new();
+    for e in elements.iter().filter(|e| !e.exiting) {
+        let Some(key) = e.key.as_deref() else { continue };
+        let Some(row) = key.strip_suffix("-both-cell").or_else(|| key.strip_suffix("-light-cell")) else { continue };
+        let half = rect(&format!("{row}-left")).unwrap_or_else(|| panic!("{row}'s left half"));
+        let dark = rect(&format!("{row}-dark-cell")).unwrap_or_else(|| panic!("{row}'s dark cell"));
+        let stacked = e.rect[1] - half[1] > 1.0;
+        assert_eq!(stacked, dark[1] - half[1] > 1.0, "{row}: both halves stack together");
+        assert!((e.rect[1] - dark[1]).abs() < 0.5, "{row}: the halves' controls are on one line");
+        rows.push((row.to_owned(), stacked));
+    }
+    rows
+}
+
+/// The Look sheet at `width`, in `dark`; `split`, its Theme, Tone, Corners and Motion each split,
+/// else each joined.
+fn look_sheet(width: f32, dark: bool, split: bool) -> Desk {
+    let mut d = appearance_tab();
+    d.settings.set_system_dark(dark);
+    d.settings.set_viewport((width, 900.0), 2.0);
+    d.settle();
+    press(&mut d, "active-edit");
+    for key in ["theme", "tone", "corners", "motion"] {
+        let (now, want) = if split { ("split", "join") } else { ("join", "split") };
+        if d.settings.find(&format!("edit-{key}-{now}")).is_some() && d.settings.find(&format!("edit-{key}-{want}")).is_none() {
+            press(&mut d, &format!("edit-{key}-{now}"));
+        }
+    }
+    d
+}
+
+/// Every label and value in the Look sheet is whole at every width, both Tones, joined and split;
+/// at 960 and 640 every row is as before, its controls beside its label; at 480 those that don't
+/// fit there (Tone's segments in Light's half, Motion's dropdown) are on a line of their own,
+/// Tone's still segments.
+#[test]
+fn the_look_sheets_rows_show_every_label_and_value_whole() {
+    for dark in [false, true] {
+        for width in WIDTHS {
+            for split in [false, true] {
+                let d = look_sheet(width, dark, split);
+                let at = format!("at {width} pt, dark {dark}, split {split}");
+                texts_whole(&d, width, &at);
+                let rows = stacked_rows(&d);
+                assert!(rows.len() >= 6, "{at}: the rows were found: {rows:?}");
+                let stacked = |row: &str| rows.iter().find(|(r, _)| r == row).unwrap_or_else(|| panic!("{at}: no {row}")).1;
+                if width >= 640.0 {
+                    assert!(rows.iter().all(|(_, s)| !s), "{at}: every row inline, as before: {rows:?}");
+                }
+                if width == 480.0 {
+                    assert!(stacked("edit-tone") && stacked("edit-motion"), "{at}: Tone and Motion stacked: {rows:?}");
+                    assert!(!stacked("edit-corners"), "{at}: Corners fits beside its label: {rows:?}");
+                }
+                let side = if split { "light" } else { "both" };
+                assert!(d.settings.find(&format!("edit-tone-{side}/#0/segment1")).is_some(), "{at}: Tone's segments whole, still segments");
+            }
+        }
+    }
+}
+
+/// With a theme in each half, each column's rows show their labels and values whole at every
+/// width: a control that doesn't fit beside its label goes under it.
+#[test]
+fn a_theme_in_each_half_shows_every_label_and_value_whole() {
+    for dark in [false, true] {
+        for width in WIDTHS {
+            let mut d = look_sheet(width, dark, true);
+            let sample = crate::theme::themes().iter().position(|t| t.id() == "sample").expect("the tests' second theme");
+            press(&mut d, "edit-theme-dark-trigger");
+            press(&mut d, &format!("option{sample}"));
+            assert!(d.settings.find("halves-columns").is_some(), "a column for each theme");
+            texts_whole(&d, width, &format!("apart at {width} pt, dark {dark}"));
+        }
+    }
+}
+
+/// General's and Network's rows show their labels and values whole at every width.
+#[test]
+fn the_service_tabs_show_every_label_and_value_whole() {
+    for tab in [Tab::General, Tab::Network] {
+        for width in WIDTHS {
+            let mut d = appearance_tab();
+            d.settings.set_viewport((width, 900.0), 2.0);
+            d.settle();
+            press(&mut d, &format!("settings-tabs/#0/segment{}", Tab::ALL.iter().position(|t| *t == tab).unwrap()));
+            texts_whole(&d, width, &format!("{} at {width} pt", tab.label()));
+        }
+    }
+}
+
+/// Dragging the window from 960 to 480 and back, the rows follow the width and settle at each
+/// step: the same at a width on the way down as on the way up, and every text whole.
+#[test]
+fn dragging_the_window_moves_rows_without_jitter() {
+    let mut d = look_sheet(960.0, false, true);
+    let widths: Vec<f32> = (0..=24).map(|i| 960.0 - 20.0 * i as f32).collect();
+    let mut down = Vec::new();
+    for &width in &widths {
+        d.settings.set_viewport((width, 900.0), 2.0);
+        d.settle();
+        texts_whole(&d, width, &format!("down at {width} pt"));
+        down.push(stacked_rows(&d));
+    }
+    for (&width, down) in widths.iter().zip(down).rev() {
+        d.settings.set_viewport((width, 900.0), 2.0);
+        d.settle();
+        let rows = stacked_rows(&d);
+        d.settle();
+        assert_eq!(rows, stacked_rows(&d), "settled at {width} pt");
+        assert_eq!(rows, down, "the same at {width} pt both ways");
+    }
+}
