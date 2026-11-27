@@ -154,7 +154,7 @@ fn a_pick_sets_the_tile_by_hand_and_it_sticks() {
     assert_eq!(kept.len(), 1, "kept once, by Done");
     assert_eq!(
         serde_json::to_value(&kept[0]).unwrap(),
-        serde_json::json!({"phantom": {"light": {"tile": rgb.hex()}, "dark": {"tile": "#6933c2"}}})
+        serde_json::json!({"phantom": {"light": {"tile": rgb.0}, "dark": {"tile": [0x69, 0x33, 0xc2]}}})
     );
 }
 

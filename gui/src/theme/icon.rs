@@ -16,7 +16,7 @@ use super::{Look, Theme};
 pub const SETTING: &str = "app_icon_settings";
 
 /// What an icon's color setting holds in one half: the icon's own colors, the colors of the look
-/// that half shows, or one set by hand. Kept as `"original"`, `"follow"` or `"#rrggbb"`.
+/// that half shows, or one set by hand. Kept as `"original"`, `"follow"` or `[r, g, b]`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tint {
     #[default]
@@ -30,21 +30,24 @@ impl Serialize for Tint {
         match self {
             Tint::Original => s.serialize_str("original"),
             Tint::Follow => s.serialize_str("follow"),
-            Tint::Color(rgb) => s.serialize_str(&rgb.hex()),
+            Tint::Color(rgb) => rgb.serialize(s),
         }
     }
 }
 
 impl<'de> Deserialize<'de> for Tint {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Tint, D::Error> {
-        let text = String::deserialize(d)?;
-        match text.as_str() {
-            "original" => Ok(Tint::Original),
-            "follow" => Ok(Tint::Follow),
-            hex => Rgb::parse(hex)
-                .filter(|_| hex.len() == 7)
-                .map(Tint::Color)
-                .ok_or_else(|| serde::de::Error::custom(format!("{text:?} is no tint: \"original\", \"follow\" or \"#rrggbb\""))),
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Word(String),
+            Color(Rgb),
+        }
+        match Stored::deserialize(d)? {
+            Stored::Word(word) if word == "original" => Ok(Tint::Original),
+            Stored::Word(word) if word == "follow" => Ok(Tint::Follow),
+            Stored::Word(word) => Err(serde::de::Error::custom(format!("{word:?} is no tint: \"original\", \"follow\" or [r, g, b]"))),
+            Stored::Color(rgb) => Ok(Tint::Color(rgb)),
         }
     }
 }
@@ -143,14 +146,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_tint_is_kept_as_a_word_or_a_hex() {
+    fn a_tint_is_kept_as_a_word_or_three_numbers() {
         for (tint, json) in
-            [(Tint::Original, "\"original\""), (Tint::Follow, "\"follow\""), (Tint::Color(Rgb([0x3f, 0x7e, 0xd0])), "\"#3f7ed0\"")]
+            [(Tint::Original, "\"original\""), (Tint::Follow, "\"follow\""), (Tint::Color(Rgb([0x3f, 0x7e, 0xd0])), "[63,126,208]")]
         {
             assert_eq!(serde_json::to_string(&tint).unwrap(), json);
             assert_eq!(serde_json::from_str::<Tint>(json).unwrap(), tint);
         }
-        for bad in ["\"blue\"", "\"#3f7ed\"", "\"#3f7ed0ff\"", "7", "\" #3f7ed0\""] {
+        for bad in ["\"blue\"", "\"#3f7ed0\"", "[63,126,256]", "[63,126]", "[63,126,208,1]", "7"] {
             assert!(serde_json::from_str::<Tint>(bad).is_err(), "{bad} is refused");
         }
     }
