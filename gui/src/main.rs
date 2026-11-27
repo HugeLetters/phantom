@@ -1221,6 +1221,11 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 set_colors(s, &[(preset::Appearance::Light, "accent", "#c2410c"), (preset::Appearance::Dark, "accent", "#c2410c")]);
                 model::settings::presets::edit_active(s);
             }),
+            // Everything at its defaults: Restore Defaults greyed.
+            ("settings-restore-defaults", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                model::settings::presets::edit_active(s);
+            }),
             ("settings-restore-menu", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 set_colors(s, &[(preset::Appearance::Light, "accent", "#c2410c")]);
