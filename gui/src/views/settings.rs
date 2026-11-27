@@ -96,12 +96,33 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
             close(s)
         }
     });
-    let mut overlays = edit_sheet(s, sheet, ui);
+    // What the Look Preset's editor has room for: its halves' width, or each column's row's.
+    // Stacking a row doesn't change them, so a row's layout never feeds back into it.
+    let room = Room {
+        half: cx.layout_with(&format!("{EDIT}-theme-left"), floor_width).map(|w| w as f32),
+        columns: Appearance::BOTH
+            .map(|a| cx.layout_with(&format!("{EDIT}-theme-{}-row", Side::Only(a).key()), floor_width).map(|w| w as f32)),
+    };
+    let mut overlays = edit_sheet(s, sheet, ui, room);
     overlays.extend(icon_sheet(&s.app_icon, sheet, ui, appearance));
     if let Some(open) = &sheet.customize {
         overlays.extend(customize::sheet(s, open, ui));
     }
     ui.root(page, overlays)
+}
+
+/// How wide the Look Preset's editor is, as laid out last: its halves ([`Ui::halves_row`]) while
+/// one theme is in both, else each column's [`Ui::setting_row`] (Light's, then Dark's). `None`
+/// before the first layout.
+#[derive(Clone, Copy, Default)]
+struct Room {
+    half: Option<f32>,
+    columns: [Option<f32>; 2],
+}
+
+/// A laid-out rect's width, in whole points down.
+fn floor_width(rect: [f32; 4]) -> i32 {
+    rect[2].floor() as i32
 }
 
 fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: Appearance) -> El {
@@ -253,6 +274,7 @@ fn editor(
     sheet: &SettingsSheet,
     ui: &Ui,
     halves: [Half; 2],
+    room: Room,
     first: bool,
     focus: Option<(&str, Side)>,
     layer: &mut Vec<El>,
@@ -268,7 +290,7 @@ fn editor(
     let themes = crate::theme::themes();
     let names: Vec<&str> = themes.iter().map(|t| t.name()).collect();
     // A Theme pop-up of `side`, in the look `ui`.
-    let pop_up = |side: Side, ui: &Ui, layer: &mut Vec<El>| {
+    let pop_up = |side: Side, ui: &Ui, max: Option<f32>, layer: &mut Vec<El>| {
         let theme = preset.get(side.appearances()[0]).theme;
         let current = themes.iter().position(|t| t.id() == theme.id()).unwrap_or(0);
         ui.popup_button(
@@ -281,6 +303,7 @@ fn editor(
             move |s: &mut SettingsWindow| toggle_menu(s, THEME, side),
             close_menu,
             move |s: &mut SettingsWindow, i| choose_theme(s, side, crate::theme::themes()[i].id()),
+            max,
             layer,
         )
     };
@@ -288,15 +311,18 @@ fn editor(
     let page = col().w_full().gap(ui.spacing().s2);
     match rows {
         ThemeRows::Same { rows, .. } => {
+            let needs = looks.map(|l| l.dropdown_width(&names));
+            let fit = ui.halves_fit(room.half, "Theme", if theme_joined { [needs[0], 0.0] } else { needs }, true);
+            let max = |right| ui.halves_room(room.half, "Theme", fit, right);
             let theme = match theme_joined {
-                true => Halves::Joined(pop_up(Side::Both, looks[0], layer)),
+                true => Halves::Joined(pop_up(Side::Both, looks[0], max(false), layer)),
                 false => Halves::Split(
-                    Some(pop_up(Side::Only(Appearance::Light), looks[0], layer)),
-                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], layer)),
+                    Some(pop_up(Side::Only(Appearance::Light), looks[0], max(false), layer)),
+                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], max(true), layer)),
                 ),
             };
             let toggle = join_control(looks[1], THEME, "Theme", theme_joined);
-            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new());
+            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new(), fit);
             let header = ui.halves_header(looks[0].half_heading(false), looks[1].half_heading(true), looks);
             let mut lines = vec![(header, false), (theme, false)];
             let of = preset.light.theme.settings();
@@ -320,17 +346,22 @@ fn editor(
                 }
                 let sides: &[Side] =
                     if row.joined { &[Side::Both] } else { &[Side::Only(Appearance::Light), Side::Only(Appearance::Dark)] };
-                lines.push((same_row(row, editor, sheet, ui, halves, of, layer, |side| wants(row.setting.key, side, sides)), false));
+                let focus = |side| wants(row.setting.key, side, sides);
+                lines.push((same_row(row, editor, sheet, ui, halves, room.half, of, layer, focus), false));
             }
             page.child(ui.halves_card(lines, looks))
         }
         ThemeRows::Apart { light, dark } => {
             let mut column = |side: Side, held: &[Held]| {
-                let half = halves[usize::from(side == Side::Only(Appearance::Dark))];
+                let index = usize::from(side == Side::Only(Appearance::Dark));
+                let (half, width) = (halves[index], room.columns[index]);
                 let ui = half.ui;
                 let of = preset.get(side.appearances()[0]).theme.settings();
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
-                let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
+                let fit = ui.setting_fit(width, "Theme", 0.0, true);
+                let max = ui.setting_room(width, "Theme");
+                let theme =
+                    ui.setting_row_in(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, max, layer), Vec::new(), fit);
                 let mut lines = vec![(heading, false), (theme, false)];
                 let mut at = At::default();
                 for (setting, value) in held {
@@ -359,18 +390,24 @@ fn editor(
                     );
                     lines.extend(heads.into_iter().map(|h| (h, true)));
                     if shown {
-                        let control = theme_control(setting, side, *value, editor, half, of, wants(setting.key, side, &[side]), layer);
+                        let segments = segments_fit(setting, ui, ui.stacked_room(width));
+                        let fit = ui.setting_fit(width, setting.label, control_width(setting, ui, segments), shrinks(setting, segments));
+                        let focus = wants(setting.key, side, &[side]);
+                        let max = ui.setting_room(width, setting.label);
+                        let control = theme_control(setting, side, *value, editor, half, of, segments, max, focus, layer);
                         let notes =
                             sheet.refused(Row::Color(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
-                        let row = ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes);
+                        let key = format!("{EDIT}-{}-{}-row", setting.key, side.key());
+                        let row = ui.setting_row_in(&key, setting.label, control, notes, fit);
                         lines.push((row, false));
                     }
                 }
-                ui.card_with_headers(lines).grow(1.0).min_w(0.0)
+                ui.card_with_headers(lines).min_w(0.0).grid_cell(index)
             };
             let light = column(Side::Only(Appearance::Light), &light);
             let dark = column(Side::Only(Appearance::Dark), &dark);
-            page.child(row().key("halves-columns").w_full().gap(ui.spacing().s4).items_start().child(light).child(dark))
+            // Equal columns: a row stacking doesn't widen or narrow its column.
+            page.child(row().key("halves-columns").w_full().gap(ui.spacing().s4).items_start().equal_columns(2).child(light).child(dark))
         }
     }
 }
@@ -440,6 +477,7 @@ fn same_row(
     sheet: &SettingsSheet,
     ui: &Ui,
     halves: [Half; 2],
+    half: Option<f32>,
     of: &'static [Setting],
     layer: &mut Vec<El>,
     focus: impl Fn(Side) -> bool,
@@ -447,15 +485,20 @@ fn same_row(
     let looks = halves.map(|h| h.ui);
     let (setting, key) = (row.setting, row.setting.key);
     let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
+    // Segments only where they fit whole on a line of their own, in both halves alike.
+    let segments = looks.iter().all(|l| segments_fit(setting, l, ui.stacked_room(half)));
+    let needs = looks.map(|l| control_width(setting, l, segments));
+    let fit = ui.halves_fit(half, setting.label, if row.joined { [needs[0], 0.0] } else { needs }, shrinks(setting, segments));
+    let max = |right| ui.halves_room(half, setting.label, fit, right);
     let (cells, sides) = match row.joined {
         true => {
-            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, halves[0], of, focus(Side::Both), layer));
-            (cells, vec![Side::Both])
+            let both = theme_control(setting, Side::Both, row.light, editor, halves[0], of, segments, max(false), focus(Side::Both), layer);
+            (Halves::Joined(both), vec![Side::Both])
         }
         false => {
             let cells = Halves::Split(
-                Some(theme_control(setting, light, row.light, editor, halves[0], of, focus(light), layer)),
-                Some(theme_control(setting, dark, row.dark, editor, halves[1], of, focus(dark), layer)),
+                Some(theme_control(setting, light, row.light, editor, halves[0], of, segments, max(false), focus(light), layer)),
+                Some(theme_control(setting, dark, row.dark, editor, halves[1], of, segments, max(true), focus(dark), layer)),
             );
             (cells, vec![light, dark])
         }
@@ -474,7 +517,38 @@ fn same_row(
         looks,
         Some(join_control(looks[1], key, setting.label, row.joined)),
         notes,
+        fit,
     )
+}
+
+/// Whether `setting`, a choice shown as segments, shows them in `ui`: only where every label fits
+/// whole in `room` (unknown, `None`: it does); else it's a dropdown. Any other setting: no matter.
+pub(crate) fn segments_fit(setting: &Setting, ui: &Ui, room: Option<f32>) -> bool {
+    match &setting.kind {
+        Kind::Choice { choices, show: Show::Segments, .. } => {
+            room.is_none_or(|room| ui.choice_width(&choices.iter().map(|c| c.label).collect::<Vec<_>>()) <= room)
+        }
+        _ => true,
+    }
+}
+
+/// Whether `setting`'s control, shown as segments if `segments`, is a dropdown, which cuts its
+/// value with "…" where there's no room, the menu showing every value whole.
+fn shrinks(setting: &Setting, segments: bool) -> bool {
+    matches!(&setting.kind, Kind::Choice { show, .. } if *show != Show::Segments || !segments)
+}
+
+/// How wide `setting`'s control is in `ui`, its value whole: a choice's segments (if `segments`)
+/// or its dropdown's widest value, a switch, a color's swatch.
+pub(crate) fn control_width(setting: &Setting, ui: &Ui, segments: bool) -> f32 {
+    match &setting.kind {
+        Kind::Choice { choices, show, .. } => {
+            let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
+            if *show == Show::Segments && segments { ui.choice_width(&labels) } else { ui.dropdown_width(&labels) }
+        }
+        Kind::Toggle { .. } => ui.switch_width(),
+        Kind::Color { .. } => ui.swatch_width(),
+    }
 }
 
 /// "Light" or "Dark", for a note under a split row.
@@ -525,7 +599,8 @@ fn save_as(sheet: &SettingsSheet, ui: &Ui) -> Option<El> {
 }
 
 /// The control that sets `setting` (of the theme's settings `of`) to a value of its kind on
-/// `side`, showing `value`, in `half`'s look, keyed `edit-<key>-<side>`. `focus` makes a toggle or
+/// `side`, showing `value`, in `half`'s look, keyed `edit-<key>-<side>`; a choice shown as segments
+/// shows them only if `segments`, else a dropdown ([`segments_fit`]). `focus` makes a toggle or
 /// a choice first in the Tab order. A color's is its swatch (`…-swatch`), which opens its picker,
 /// whose hex field is the control.
 #[allow(clippy::too_many_arguments)]
@@ -536,6 +611,8 @@ fn theme_control(
     editor: &Editor,
     half: Half,
     of: &'static [Setting],
+    segments: bool,
+    max: Option<f32>,
     focus: bool,
     layer: &mut Vec<El>,
 ) -> El {
@@ -546,7 +623,7 @@ fn theme_control(
         (Kind::Choice { choices, show, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
-            if *show == Show::Segments {
+            if *show == Show::Segments && segments {
                 return ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut SettingsWindow, i| {
                     set_theme(s, side, key, Value::Choice(choices[i].id))
                 });
@@ -564,6 +641,7 @@ fn theme_control(
                     close_menu(s);
                     set_theme(s, side, key, Value::Choice(choices[i].id))
                 },
+                max,
                 layer,
             )
         }
@@ -725,7 +803,7 @@ fn active_row(
 
 /// The sheet over Settings of the Look Preset being edited: its name ("Active look" for the Active
 /// one), the editor, and Done; then the Theme pop-up's list, while it's open.
-fn edit_sheet(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
+fn edit_sheet(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, room: Room) -> Vec<El> {
     let Some(open) = &sheet.edit else { return Vec::new() };
     let (title, preset) = match &open.target {
         Target::Active => ("Active look".to_owned(), s.looks().preset().clone()),
@@ -739,7 +817,7 @@ fn edit_sheet(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
     let looks = s.looks();
     let [light, dark] = Appearance::BOTH.map(|a| looks.shown(a).clone());
     let halves = [Half { ui: &light.ui, resolved: &light.resolved }, Half { ui: &dark.ui, resolved: &dark.resolved }];
-    let body = self::editor(&preset, &open.editor, sheet, ui, halves, open.focus.is_none(), open.focus, &mut menu);
+    let body = self::editor(&preset, &open.editor, sheet, ui, halves, room, open.focus.is_none(), open.focus, &mut menu);
     let mut layers = ui.over_sheet(
         EDIT,
         &title,

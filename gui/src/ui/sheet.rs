@@ -140,7 +140,7 @@ impl Ui {
         for (i, name) in labels.iter().enumerate() {
             let on = i == selected;
             let ink = if on { c.text_base } else { c.text_muted };
-            let mut label = text((*name).to_owned()).key("label").font(font).color(ink).truncate().a11y_hidden();
+            let mut label = text((*name).to_owned()).key("label").font(font).color(ink).a11y_hidden();
             if !on {
                 label = label.group_color(c.text_base);
             }
@@ -168,15 +168,107 @@ impl Ui {
             }
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
         }
-        // As narrow as the cell it's in (an editor's half), its labels truncated, never past it.
+        // As narrow as the cell it's in (an editor's half): the row shows it only where its labels
+        // fit whole ([`Ui::choice_width`]), else a dropdown.
         el().key(key).min_w(0.0).shrink().child(group.min_w(0.0).shrink())
+    }
+
+    /// How wide [`Ui::choice`]'s segments of `labels` are with every label whole: equal columns,
+    /// each the widest label and its padding.
+    pub fn choice_width(&self, labels: &[&str]) -> f32 {
+        let font = rune::TextStyle { line_height: 13.0, ..self.k.ty.ui };
+        labels.len() as f32 * (widest(labels, font) + 2.0 * self.spacing.s4)
+    }
+
+    /// How wide [`Ui::dropdown`]'s (or [`Ui::popup_button`]'s) button is showing the longest of
+    /// `options` whole: 8 before the value, then 4, the 16 pt chevron and 4.
+    pub fn dropdown_width(&self, options: &[&str]) -> f32 {
+        widest(options, rune::TextStyle { line_height: 16.0, ..self.k.ty.ui_medium }) + 32.0
+    }
+
+    /// How wide [`Ui::sheet_switch`] is.
+    pub fn switch_width(&self) -> f32 {
+        44.0
+    }
+
+    /// How wide [`Ui::color_swatch`] is.
+    pub fn swatch_width(&self) -> f32 {
+        super::color_picker::SWATCH
+    }
+
+    /// How a Look Preset's editor row ([`Ui::halves_row`]), in halves `half` wide, lays out its
+    /// `label` and controls: [`Fit::Aligned`] (every row's controls in one column, after a label
+    /// column) where they fit beside it; else [`Fit::Compact`], the left control right after
+    /// the label's own text, where they fit there; else [`Fit::Stacked`]. `needs[0]` is the left
+    /// control's width, `needs[1]` the right one's, which sits beside the Join or Split. The left
+    /// one, last on its line, may reach into its half's padding, short of the seam by `s1`, as
+    /// Motion's does at 640 pt. A control that `shrinks` (a dropdown, which cuts its value with
+    /// "…", see [`Ui::halves_room`]) never stacks: it's compact where the column leaves it less
+    /// room than the label's text does. Unknown (`None`, before the first layout), the row is aligned.
+    pub fn halves_fit(&self, half: Option<f32>, label: &str, needs: [f32; 2], shrinks: bool) -> Fit {
+        let Some(half) = half else { return Fit::Aligned };
+        let (s, inner) = (&self.spacing, half - 2.0 * self.spacing.s4);
+        let left = inner + s.s4 - s.s1;
+        let beside = |label: f32| label + s.s6 + needs[0] <= left && needs[1] + s.s6 + HALF_TOGGLE <= inner;
+        if beside(HALF_LABEL) {
+            Fit::Aligned
+        } else if beside(self.row_label_width(label)) {
+            Fit::Compact
+        } else if shrinks {
+            Fit::Compact
+        } else {
+            Fit::Stacked
+        }
+    }
+
+    /// How wide a dropdown has in a [`Ui::halves_row`] `half` wide laid out as `fit`: on the left
+    /// (the joined one's too) after the label, on the `right` beside the Join or Split. `None`
+    /// before the first layout.
+    pub fn halves_room(&self, half: Option<f32>, label: &str, fit: Fit, right: bool) -> Option<f32> {
+        let (s, inner) = (&self.spacing, half? - 2.0 * self.spacing.s4);
+        let label = match fit {
+            Fit::Aligned => HALF_LABEL,
+            _ => self.row_label_width(label),
+        };
+        Some(if right { inner - s.s6 - HALF_TOGGLE } else { inner + s.s4 - s.s1 - label - s.s6 })
+    }
+
+    /// How wide a dropdown has in a [`Ui::setting_row`] `row` wide ([`Fit::Compact`]): beside its
+    /// `label`.
+    pub fn setting_room(&self, row: Option<f32>, label: &str) -> Option<f32> {
+        Some(row? - 2.0 * self.spacing.s4 - self.spacing.s6 - self.row_label_width(label))
+    }
+
+    /// How wide `label` is in the editor's rows, on one line.
+    pub fn row_label_width(&self, label: &str) -> f32 {
+        widest(&[label], self.k.ty.ui)
+    }
+
+    /// How wide a control has room for on a stacked line of its own: a half `half` wide, or a
+    /// [`Ui::setting_row`] `half` wide. `None` before the first layout.
+    pub fn stacked_room(&self, half: Option<f32>) -> Option<f32> {
+        half.map(|half| half - 2.0 * self.spacing.s4)
+    }
+
+    /// How a [`Ui::setting_row`] `row` wide lays out its `label` and a control `control_width` wide:
+    /// beside it ([`Fit::Aligned`]) where both fit whole, else [`Fit::Stacked`]. A control that
+    /// `shrinks` (a dropdown, which cuts its value with "…") is [`Fit::Compact`]: beside the label,
+    /// which keeps its text. Unknown (`None`, before the first layout), it's beside.
+    pub fn setting_fit(&self, row: Option<f32>, label: &str, control_width: f32, shrinks: bool) -> Fit {
+        let Some(row) = row else { return Fit::Aligned };
+        match (shrinks, self.row_label_width(label) + self.spacing.s6 + control_width <= row - 2.0 * self.spacing.s4) {
+            (true, _) => Fit::Compact,
+            (false, true) => Fit::Aligned,
+            (false, false) => Fit::Stacked,
+        }
     }
 
     /// A pop-up button (`Phantom ⌄`) named `label`, showing `current` of `options`; `open`, its
     /// list under it, drawn into `layer` (the overlays over everything else), whose option a press
     /// chooses (`on_choose` with its index). A press on the button calls `on_toggle`, a press
     /// outside or Escape `on_close`. Keyed `key`: its button `<key>-trigger`, its options
-    /// `<key>-content/…/option<index>`. `first_focus`: first in the Tab order. Tab reaches it with
+    /// `<key>-content/…/option<index>`. `max_w`: the room it has, its value cut with "…" past it
+    /// (the tooltip and the list read it whole). `first_focus`: first in the Tab order. Tab reaches it with
     /// Full Keyboard Access off.
     #[allow(clippy::too_many_arguments)]
     pub fn popup_button<S: 'static>(
@@ -190,6 +282,7 @@ impl Ui {
         on_toggle: impl Fn(&mut S) + 'static,
         on_close: impl Fn(&mut S) + 'static,
         on_choose: impl Fn(&mut S, usize) + Clone + 'static,
+        max_w: Option<f32>,
         layer: &mut Vec<El>,
     ) -> El {
         let names: Vec<String> = options.iter().map(|o| (*o).to_owned()).collect();
@@ -205,7 +298,7 @@ impl Ui {
                 }
             })
             .build(&self.k, layer);
-        let select = super::tab_stop(select);
+        let select = super::tab_stop(select).max_w(max_w.unwrap_or(f32::MAX)).help(options.get(current).copied().unwrap_or_default());
         let select = if first_focus { select.tab_index(1) } else { select };
         el().key(key).child(select)
     }
@@ -226,6 +319,7 @@ impl Ui {
         on_toggle: impl Fn(&mut S) + Clone + 'static,
         on_close: impl Fn(&mut S) + 'static,
         on_choose: impl Fn(&mut S, usize) + Clone + 'static,
+        max_w: Option<f32>,
         layer: &mut Vec<El>,
     ) -> El {
         let button = Select::new(key.clone(), options)
@@ -242,6 +336,7 @@ impl Ui {
                 }
                 enter
             });
+        let button = button.max_w(max_w.unwrap_or(f32::MAX)).help(options.get(current).copied().unwrap_or_default());
         let button = if first_focus { button.tab_index(1) } else { button };
         let entries = options
             .iter()
@@ -465,26 +560,47 @@ impl Ui {
     /// half's line, `notes` in their tones. The columns are the same width in every row, so they
     /// line up. The row is keyed `key`, its halves `<key>-left` and `<key>-right`, its controls'
     /// cells `<key>-both-cell` while joined, else `<key>-light-cell` and `<key>-dark-cell`.
-    pub fn halves_row(&self, key: &str, label: &str, cells: Halves, looks: [&Ui; 2], toggle: Option<El>, notes: Vec<(String, Tone)>) -> El {
+    ///
+    /// `fit` ([`Ui::halves_fit`]) is how both halves lay out, so they stay aligned row by row: in a
+    /// label column, right after the label's own text, or each half's controls on a line of their
+    /// own, under the label on the left and the Join or Split on the right.
+    #[allow(clippy::too_many_arguments)]
+    pub fn halves_row(
+        &self,
+        key: &str,
+        label: &str,
+        cells: Halves,
+        looks: [&Ui; 2],
+        toggle: Option<El>,
+        notes: Vec<(String, Tone)>,
+        fit: Fit,
+    ) -> El {
         let [light, dark] = looks;
         let cell = |content: Option<El>, key: String| row().key(key).grow(1.0).min_w(0.0).min_h(44.0).center_y().children(content);
         let (left_cell, right_cell) = match cells {
             Halves::Joined(control) => (cell(Some(control), format!("{key}-both-cell")), cell(None, format!("{key}-dark-cell"))),
             Halves::Split(a, b) => (cell(a, format!("{key}-light-cell")), cell(b, format!("{key}-dark-cell"))),
         };
-        let line = row()
-            .w_full()
-            .gap(self.spacing.s6)
-            .center_y()
-            .child(text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base).w(HALF_LABEL).wrap())
-            .child(left_cell);
+        let name = text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base);
+        let line = match fit {
+            Fit::Stacked => col().w_full().child(row().w_full().min_h(STACK_HEAD).center_y().child(name.wrap())).child(left_cell),
+            Fit::Compact => {
+                let name = name.w(self.row_label_width(label));
+                row().w_full().gap(self.spacing.s6).center_y().child(name).child(left_cell)
+            }
+            Fit::Aligned => row().w_full().gap(self.spacing.s6).center_y().child(name.w(HALF_LABEL).wrap()).child(left_cell),
+        };
         let mut left = col().w_full().gap(self.spacing.s1).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { light.tokens().c.danger.fg } else { light.tone_color(tone) };
             left = left
                 .child(text(note).key(format!("{key}-refused")).font(light.tokens().ty.text_small).color(ink).wrap().pb(self.spacing.s2));
         }
-        let right = row().w_full().gap(self.spacing.s6).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
+        let toggle = el().w(HALF_TOGGLE).center().children(toggle);
+        let right = match fit == Fit::Stacked {
+            true => col().w_full().child(row().w_full().min_h(STACK_HEAD).center_y().justify_end().child(toggle)).child(right_cell),
+            false => row().w_full().gap(self.spacing.s6).center_y().child(right_cell).child(toggle),
+        };
         self.halves_line(key, left, right, [light.tokens().c.bg_base, dark.tokens().c.bg_base])
     }
 
@@ -627,14 +743,24 @@ impl Ui {
     /// One setting: `label` on the left, `control` on the right, and under them `notes`, each in
     /// its tone: what the value means, why a value was refused.
     pub fn setting_row(&self, key: &str, label: &str, control: El, notes: Vec<(String, Tone)>) -> El {
+        self.setting_row_in(key, label, control, notes, Fit::Aligned)
+    }
+
+    /// [`Ui::setting_row`] laid out as `fit` ([`Ui::setting_fit`]) says.
+    pub fn setting_row_in(&self, key: &str, label: &str, control: El, notes: Vec<(String, Tone)>, fit: Fit) -> El {
         let k = &self.k;
-        let line = row()
-            .w_full()
-            .min_h(36.0)
-            .gap(self.spacing.s6)
-            .center_y()
-            .child(text(label.to_owned()).font(k.ty.ui).color(k.c.text_base).grow(1.0).min_w(0.0))
-            .child(control);
+        let name = text(label.to_owned()).font(k.ty.ui).color(k.c.text_base);
+        let line = match fit {
+            Fit::Stacked => col()
+                .w_full()
+                .child(row().w_full().min_h(STACK_HEAD).center_y().child(name.wrap()))
+                .child(row().w_full().min_h(36.0).center_y().child(control)),
+            Fit::Compact => {
+                let name = name.grow(1.0).min_w(self.row_label_width(label));
+                row().w_full().min_h(36.0).gap(self.spacing.s6).center_y().child(name).child(control)
+            }
+            Fit::Aligned => row().w_full().min_h(36.0).gap(self.spacing.s6).center_y().child(name.grow(1.0).min_w(0.0)).child(control),
+        };
         let mut setting = col().key(key.to_owned()).w_full().px(self.spacing.s4).py(self.spacing.s2).gap(self.spacing.s1).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { k.c.danger.fg } else { self.tone_color(tone) };
@@ -905,6 +1031,25 @@ const PREVIEW: f32 = 24.0;
 /// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
 const HALF_LABEL: f32 = 96.0;
 const HALF_TOGGLE: f32 = 46.0;
+/// How an editor's row lays out its label and controls.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fit {
+    /// The controls beside the label (in a label column, in a Look Preset's halves).
+    Aligned,
+    /// The label at its own width, the control after it, which gives way ("…" in a dropdown) or,
+    /// in a Look Preset's halves, starts where the text ends instead of in the column.
+    Compact,
+    /// The controls on a line of their own under the label.
+    Stacked,
+}
+
+/// How tall a stacked row's line of its label (and its Join or Split) is.
+const STACK_HEAD: f32 = 28.0;
+
+/// How wide the widest of `texts` is in `font`, on one line.
+fn widest(texts: &[&str], font: rune::TextStyle) -> f32 {
+    texts.iter().map(|t| rune::text::measure(t, &[], font, None).0).fold(0.0, f32::max).ceil()
+}
 
 /// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's
 /// (and "+ Add image…") as tall as its drawing, name and chips need; a designed pair's, with no
