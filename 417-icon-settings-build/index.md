@@ -16,3 +16,5 @@ The real Settings window, headless, 960x600 @2x unless noted, `--at 0.5`, in Lig
 - The tile at a few colors set by hand, both halves: orange ![](settings-customize-orange-light.png) ![](settings-customize-orange-dark.png), purple ![](settings-customize-purple-light.png) ![](settings-customize-purple-dark.png), green ![](settings-customize-green-light.png) ![](settings-customize-green-dark.png)
 
 At 640 wide, where the picker's 360 pt fit on neither side of a swatch, it opens below the swatch, or above it when there is no room below, shifted to stay inside the window; nothing is cut. The two 640 stills with a picker were rendered again (?v=2).
+
+**At the 640x320 minimum**, the picker open (Light and Dark system Appearance): Dark's Tile ([light](min-tile-picker-light.png), [dark](min-tile-picker-dark.png)), and a hand-set Faint text in Colors with two warnings ([light](min-faint-picker-light.png), [dark](min-faint-picker-dark.png)). With no room beside, below or above the swatch, the picker takes the window's middle.
