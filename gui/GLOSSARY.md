@@ -55,9 +55,11 @@ entirely in the preset's Light look and the right half ☾ Dark entirely in its 
 row, one control for both, left-aligned in the left column where a split row's ☀ control is; a
 **split** row, one per column; its Join or Split button turns one into the other, and only while one
 theme is in both halves; with a theme in each half the columns are two lists, each with its own Theme
-pop-up first, nothing joined). A row whose controls don't fit whole beside its label at the
-window's width is **stacked**: they go on a line of their own under it, both halves together, the
-Join or Split staying on the label's line; segments too long even there are a dropdown. Its **Cancel** (and Escape) puts the preset back
+pop-up first, nothing joined). A row's controls sit in one column after the label; where they don't fit whole
+there the row is **compact** (the control right after the label's text, the halves alike), and where
+not even that, **stacked**: a line of their own under it, both halves together, the Join or Split
+staying on the label's line. Segments never cut: if too long even stacked they are a dropdown, and a
+dropdown never stacks: its trigger cuts the value with "…" (the menu and the tooltip read it whole). Its **Cancel** (and Escape) puts the preset back
 as it was when the sheet opened; its **Done** keeps what changed as one undo step ("Edit of Night"),
 while inside the sheet ⌘Z steps back one change at a time. Save as… keeps the Active look under a name; a name one has asks
 whether to replace it. A name is never blank, and no two saved ones share one.

@@ -13,7 +13,7 @@ use crate::model::settings::customize::{
 };
 use crate::theme::icon::{IconSetting, ThemeIcon, Tint, find};
 use crate::theme::preset::Appearance;
-use crate::ui::{FIELD_HEIGHT, Halves, PopupParts, Ui};
+use crate::ui::{FIELD_HEIGHT, Fit, Halves, PopupParts, Ui};
 
 /// How wide the sheet gets.
 const WIDTH: f32 = 600.0;
@@ -33,11 +33,11 @@ pub(super) fn sheet(s: &SettingsWindow, open: &Customize, ui: &Ui) -> Vec<El> {
     let pictures = Appearance::BOTH.map(|half| Some(picture(s, icon, half, uis[index(half)])));
     let [l, d] = pictures;
     let mut lines =
-        vec![(header, false), (ui.halves_row("customize-icon", "Icon", Halves::Split(l, d), uis, None, Vec::new(), false), false)];
+        vec![(header, false), (ui.halves_row("customize-icon", "Icon", Halves::Split(l, d), uis, None, Vec::new(), Fit::Aligned), false)];
     for setting in icon.settings {
         let [l, d] = Appearance::BOTH.map(|half| Some(swatch(s, open, icon, setting, half, uis[index(half)], &mut layer)));
         let key = format!("customize-{}", setting.key);
-        lines.push((ui.halves_row(&key, setting.label, Halves::Split(l, d), uis, None, Vec::new(), false), false));
+        lines.push((ui.halves_row(&key, setting.label, Halves::Split(l, d), uis, None, Vec::new(), Fit::Aligned), false));
     }
     let body = col().w_full().child(ui.halves_card(lines, uis));
     let mut layers = ui.over_sheet(

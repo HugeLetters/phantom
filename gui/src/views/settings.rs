@@ -290,7 +290,7 @@ fn editor(
     let themes = crate::theme::themes();
     let names: Vec<&str> = themes.iter().map(|t| t.name()).collect();
     // A Theme pop-up of `side`, in the look `ui`.
-    let pop_up = |side: Side, ui: &Ui, layer: &mut Vec<El>| {
+    let pop_up = |side: Side, ui: &Ui, max: Option<f32>, layer: &mut Vec<El>| {
         let theme = preset.get(side.appearances()[0]).theme;
         let current = themes.iter().position(|t| t.id() == theme.id()).unwrap_or(0);
         ui.popup_button(
@@ -303,6 +303,7 @@ fn editor(
             move |s: &mut SettingsWindow| toggle_menu(s, THEME, side),
             close_menu,
             move |s: &mut SettingsWindow, i| choose_theme(s, side, crate::theme::themes()[i].id()),
+            max,
             layer,
         )
     };
@@ -310,17 +311,18 @@ fn editor(
     let page = col().w_full().gap(ui.spacing().s2);
     match rows {
         ThemeRows::Same { rows, .. } => {
+            let needs = looks.map(|l| l.dropdown_width(&names));
+            let fit = ui.halves_fit(room.half, "Theme", if theme_joined { [needs[0], 0.0] } else { needs }, true);
+            let max = |right| ui.halves_room(room.half, "Theme", fit, right);
             let theme = match theme_joined {
-                true => Halves::Joined(pop_up(Side::Both, looks[0], layer)),
+                true => Halves::Joined(pop_up(Side::Both, looks[0], max(false), layer)),
                 false => Halves::Split(
-                    Some(pop_up(Side::Only(Appearance::Light), looks[0], layer)),
-                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], layer)),
+                    Some(pop_up(Side::Only(Appearance::Light), looks[0], max(false), layer)),
+                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], max(true), layer)),
                 ),
             };
             let toggle = join_control(looks[1], THEME, "Theme", theme_joined);
-            let needs = looks.map(|l| l.dropdown_width(&names));
-            let inline = ui.halves_inline(room.half, if theme_joined { [needs[0], 0.0] } else { needs });
-            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new(), !inline);
+            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new(), fit);
             let header = ui.halves_header(looks[0].half_heading(false), looks[1].half_heading(true), looks);
             let mut lines = vec![(header, false), (theme, false)];
             let of = preset.light.theme.settings();
@@ -356,9 +358,10 @@ fn editor(
                 let ui = half.ui;
                 let of = preset.get(side.appearances()[0]).theme.settings();
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
-                let stacked = !ui.setting_inline(width, "Theme", ui.dropdown_width(&names));
+                let fit = ui.setting_fit(width, "Theme", 0.0, true);
+                let max = ui.setting_room(width, "Theme");
                 let theme =
-                    ui.setting_row_in(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new(), stacked);
+                    ui.setting_row_in(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, max, layer), Vec::new(), fit);
                 let mut lines = vec![(heading, false), (theme, false)];
                 let mut at = At::default();
                 for (setting, value) in held {
@@ -388,13 +391,14 @@ fn editor(
                     lines.extend(heads.into_iter().map(|h| (h, true)));
                     if shown {
                         let segments = segments_fit(setting, ui, ui.stacked_room(width));
-                        let stacked = !ui.setting_inline(width, setting.label, control_width(setting, ui, segments));
+                        let fit = ui.setting_fit(width, setting.label, control_width(setting, ui, segments), shrinks(setting, segments));
                         let focus = wants(setting.key, side, &[side]);
-                        let control = theme_control(setting, side, *value, editor, half, of, segments, focus, layer);
+                        let max = ui.setting_room(width, setting.label);
+                        let control = theme_control(setting, side, *value, editor, half, of, segments, max, focus, layer);
                         let notes =
                             sheet.refused(Row::Color(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
                         let key = format!("{EDIT}-{}-{}-row", setting.key, side.key());
-                        let row = ui.setting_row_in(&key, setting.label, control, notes, stacked);
+                        let row = ui.setting_row_in(&key, setting.label, control, notes, fit);
                         lines.push((row, false));
                     }
                 }
@@ -484,16 +488,17 @@ fn same_row(
     // Segments only where they fit whole on a line of their own, in both halves alike.
     let segments = looks.iter().all(|l| segments_fit(setting, l, ui.stacked_room(half)));
     let needs = looks.map(|l| control_width(setting, l, segments));
-    let inline = ui.halves_inline(half, if row.joined { [needs[0], 0.0] } else { needs });
+    let fit = ui.halves_fit(half, setting.label, if row.joined { [needs[0], 0.0] } else { needs }, shrinks(setting, segments));
+    let max = |right| ui.halves_room(half, setting.label, fit, right);
     let (cells, sides) = match row.joined {
         true => {
-            let both = theme_control(setting, Side::Both, row.light, editor, halves[0], of, segments, focus(Side::Both), layer);
+            let both = theme_control(setting, Side::Both, row.light, editor, halves[0], of, segments, max(false), focus(Side::Both), layer);
             (Halves::Joined(both), vec![Side::Both])
         }
         false => {
             let cells = Halves::Split(
-                Some(theme_control(setting, light, row.light, editor, halves[0], of, segments, focus(light), layer)),
-                Some(theme_control(setting, dark, row.dark, editor, halves[1], of, segments, focus(dark), layer)),
+                Some(theme_control(setting, light, row.light, editor, halves[0], of, segments, max(false), focus(light), layer)),
+                Some(theme_control(setting, dark, row.dark, editor, halves[1], of, segments, max(true), focus(dark), layer)),
             );
             (cells, vec![light, dark])
         }
@@ -512,7 +517,7 @@ fn same_row(
         looks,
         Some(join_control(looks[1], key, setting.label, row.joined)),
         notes,
-        !inline,
+        fit,
     )
 }
 
@@ -525,6 +530,12 @@ pub(crate) fn segments_fit(setting: &Setting, ui: &Ui, room: Option<f32>) -> boo
         }
         _ => true,
     }
+}
+
+/// Whether `setting`'s control, shown as segments if `segments`, is a dropdown, which cuts its
+/// value with "…" where there's no room, the menu showing every value whole.
+fn shrinks(setting: &Setting, segments: bool) -> bool {
+    matches!(&setting.kind, Kind::Choice { show, .. } if *show != Show::Segments || !segments)
 }
 
 /// How wide `setting`'s control is in `ui`, its value whole: a choice's segments (if `segments`)
@@ -601,6 +612,7 @@ fn theme_control(
     half: Half,
     of: &'static [Setting],
     segments: bool,
+    max: Option<f32>,
     focus: bool,
     layer: &mut Vec<El>,
 ) -> El {
@@ -629,6 +641,7 @@ fn theme_control(
                     close_menu(s);
                     set_theme(s, side, key, Value::Choice(choices[i].id))
                 },
+                max,
                 layer,
             )
         }

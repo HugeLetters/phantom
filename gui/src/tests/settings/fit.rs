@@ -1,5 +1,6 @@
-//! Settings' rows fit the window (#425, #457): a label or a value is never cut, and a row's
-//! controls sit beside its label where they fit whole, else on a line of their own under it.
+//! Settings' rows fit the window (#425, #457): a label or a segment is never cut; a row's
+//! controls sit beside its label where they fit whole, else on a line of their own under it; a
+//! dropdown's trigger cuts its value with "…" (its menu and tooltip show it whole).
 
 use super::*;
 
@@ -26,7 +27,15 @@ fn texts_whole(d: &Desk, width: f32, at: &str) {
         }
         seen += 1;
         let [x, _, w, _] = e.rect;
-        // Rune keeps the whole text here; `text_cut` says whether it drew it shortened.
+        // Rune keeps the whole text here; `text_cut` says whether it drew it shortened. A
+        // dropdown's value may be: its trigger's tooltip then reads it whole.
+        if e.key.as_deref() == Some("value") && e.path.contains("-trigger") {
+            if e.text_cut {
+                let trigger = elements.iter().find(|t| !t.exiting && e.path.starts_with(&t.path) && t.role == "combobox");
+                assert_eq!(trigger.and_then(|t| t.help.as_deref()), Some(text), "{at}: the cut {text:?} is whole in its trigger's tooltip");
+            }
+            continue;
+        }
         assert!(!e.text_cut, "{at}: {text:?} is cut");
         if let Some([needs, _]) = e.text_size {
             assert!(needs <= w + 0.5, "{at}: {text:?} needs {needs} but is {w} wide");
@@ -76,10 +85,9 @@ fn look_sheet(width: f32, dark: bool, split: bool) -> Desk {
     d
 }
 
-/// Every label and value in the Look sheet is whole at every width, both Tones, joined and split;
-/// at 960 and 640 every row is as before, its controls beside its label; at 480 those that don't
-/// fit there (Tone's segments in Light's half, Motion's dropdown) are on a line of their own,
-/// Tone's still segments.
+/// Every label, segment and menu value in the Look sheet is whole at every width, both Tones,
+/// joined and split; a dropdown's trigger stays on its row, its value cut with "…" if need be.
+/// At 960 and 640 every row is aligned, as before; no shipped row needs to stack down to 480 pt.
 #[test]
 fn the_look_sheets_rows_show_every_label_and_value_whole() {
     for dark in [false, true] {
@@ -90,16 +98,56 @@ fn the_look_sheets_rows_show_every_label_and_value_whole() {
                 texts_whole(&d, width, &at);
                 let rows = stacked_rows(&d);
                 assert!(rows.len() >= 6, "{at}: the rows were found: {rows:?}");
-                let stacked = |row: &str| rows.iter().find(|(r, _)| r == row).unwrap_or_else(|| panic!("{at}: no {row}")).1;
                 if width >= 640.0 {
                     assert!(rows.iter().all(|(_, s)| !s), "{at}: every row inline, as before: {rows:?}");
                 }
-                if width == 480.0 {
-                    assert!(stacked("edit-tone") && stacked("edit-motion"), "{at}: Tone and Motion stacked: {rows:?}");
-                    assert!(!stacked("edit-corners"), "{at}: Corners fits beside its label: {rows:?}");
-                }
+                // Dropdowns never stack.
+                assert!(!rows.iter().any(|(r, s)| *s && (r == "edit-theme" || r == "edit-motion")), "{at}: a dropdown stacked: {rows:?}");
+                assert!(rows.iter().all(|(_, s)| !s), "{at}: every shipped row fits beside its label: {rows:?}");
                 let side = if split { "light" } else { "both" };
                 assert!(d.settings.find(&format!("edit-tone-{side}/#0/segment1")).is_some(), "{at}: Tone's segments whole, still segments");
+            }
+        }
+    }
+}
+
+/// Tone's controls start right after its label where the label column leaves them no room, and in
+/// the column (as at 960) where it does: the same line as the label either way.
+#[test]
+fn tone_is_beside_its_label_wherever_that_fits() {
+    let x_of = |d: &Desk, key: &str| d.settings.elements().iter().find(|e| !e.exiting && e.key.as_deref() == Some(key)).map(|e| e.rect[0]);
+    let wide = look_sheet(960.0, false, false);
+    let narrow = look_sheet(480.0, false, false);
+    let (wide_tone, wide_motion) = (x_of(&wide, "edit-tone-both-cell").unwrap(), x_of(&wide, "edit-motion-both-cell").unwrap());
+    assert_eq!(wide_tone, wide_motion, "at 960 the controls share a column");
+    let (tone, left) = (x_of(&narrow, "edit-tone-both-cell").unwrap(), x_of(&narrow, "edit-tone-left").unwrap());
+    assert!(tone > left, "the control is after the label");
+    assert!(narrow.settings.find("edit-tone-both/#0/segment1").is_some(), "still segments");
+}
+
+/// A dropdown's menu shows every value whole at every width, even where its trigger cuts the
+/// value: Motion's "Follow Reduce Motion" and every Theme name.
+#[test]
+fn a_dropdowns_menu_shows_every_value_whole() {
+    for width in WIDTHS {
+        for trigger in ["edit-motion-both-trigger", "edit-theme-both-trigger"] {
+            let mut d = look_sheet(width, false, false);
+            press(&mut d, trigger);
+            let elements = d.settings.elements();
+            let items: Vec<_> = elements.iter().filter(|e| !e.exiting && e.role.starts_with("menuitem") || e.role == "option").collect();
+            assert!(items.len() >= 2, "{trigger} at {width}: the menu is open");
+            for item in items {
+                let texts =
+                    elements.iter().filter(|t| t.path.starts_with(&item.path) && t.text.as_deref().is_some_and(|t| !t.trim().is_empty()));
+                let mut seen = 0;
+                for t in texts {
+                    seen += 1;
+                    assert!(!t.text_cut, "{trigger} at {width}: {:?} is cut in the menu", t.text);
+                    if let Some([needs, _]) = t.text_size {
+                        assert!(needs <= t.rect[2] + 0.5, "{trigger} at {width}: {:?} is squeezed", t.text);
+                    }
+                }
+                assert!(seen > 0, "{trigger} at {width}: an item shows its value");
             }
         }
     }
