@@ -1,6 +1,7 @@
 //! The command palette (#33, #434), while it's open: its field, and the entries `model::palette`
 //! lists for its text, each with its icon and key, a setting with its place and value. Its keys: ↑ and
-//! ↓ move the highlight, Return picks it, ⌘Return shows a setting in Settings, Escape goes back one
+//! ↓ move the highlight, Return picks it, ⇧Return picks it and stays, ⌘Return shows a setting in
+//! Settings, Escape goes back one
 //! level; the field keeps the rest for its text.
 
 use rune::{El, Key, KeyEvent, Tx};
@@ -66,6 +67,9 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Down => palette::down(s, tx),
         Key::Escape => palette::back(s, tx),
         Key::Enter if ev.mods.cmd => palette::show_highlighted(s, tx),
+        Key::Enter if ev.mods.shift => palette::run_and_stay(s, tx),
+        // With nothing typed, ⌘Z is the app's, not the field's own: it takes back what ⇧Return ran.
+        Key::Command('z') if ev.mods.cmd && !ev.mods.shift && s.palette.query.text.is_empty() => crate::changes::press(s),
         _ => return false,
     }
     true

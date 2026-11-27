@@ -53,7 +53,7 @@ fn drawn_palette(rt: &Runtime<Phantom>) -> Vec<(String, Option<String>)> {
         .collect()
 }
 
-fn labels(rt: &Runtime<Phantom>) -> Vec<String> {
+pub(super) fn labels(rt: &Runtime<Phantom>) -> Vec<String> {
     drawn_palette(rt).into_iter().map(|(l, _)| l).collect()
 }
 
@@ -525,7 +525,7 @@ fn drawn_groups(rt: &Runtime<Phantom>) -> Vec<(String, Vec<String>)> {
     groups
 }
 
-fn headings(rt: &Runtime<Phantom>) -> Vec<String> {
+pub(super) fn headings(rt: &Runtime<Phantom>) -> Vec<String> {
     drawn_groups(rt).into_iter().map(|(h, _)| h).collect()
 }
 
@@ -711,7 +711,11 @@ fn a_torrent_command_is_not_offered_when_the_torrent_list_is_not_registered() {
     select(&mut rt, 1);
     rt.update(|s, _| s.mounted.begin());
     assert!(crate::commands::on_torrents(&rt.state).is_empty());
-    assert!(crate::model::palette::offered(&rt.state).iter().all(|e| !matches!(e.kind, crate::model::palette::Kind::Action(crate::commands::Command::Torrents(_)))));
+    assert!(
+        crate::model::palette::offered(&rt.state)
+            .iter()
+            .all(|e| !matches!(e.kind, crate::model::palette::Kind::Action(crate::commands::Command::Torrents(_))))
+    );
     rt.key(shortcuts::keys(OnTorrents::Remove)[0].event());
     assert!(probe.commands().is_empty(), "⌫ ran nothing: {:?}", probe.commands());
 }

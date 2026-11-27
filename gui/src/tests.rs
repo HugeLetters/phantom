@@ -7,6 +7,7 @@ mod moving;
 mod notice_actions;
 mod notices;
 mod palette;
+mod palette_settings;
 mod renaming;
 mod settings;
 mod space;

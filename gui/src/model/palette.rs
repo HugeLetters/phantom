@@ -24,6 +24,10 @@
 //! | Setting, a Choice | lists its choices ([`Sub`]), the current one ticked; Return sets it | Show in Settings |
 //! | Setting, a typed value, a color | Show in Settings | the same |
 //!
+//! ⇧Return runs an action, a flip or a Choice's option like Return, but the palette stays open, its
+//! field empty and the list at the top level, so the next one can be typed at once; for the rest
+//! (a place, Rename…, a setting's choices, Show in Settings) it is Return.
+//!
 //! A change from the palette is the same Settings change as one made in Settings: one undo step.
 //! Show in Settings opens Settings at the setting with its control focused. With nothing matching,
 //! Return does nothing. It's one of the overlays (`overlay`): opening it closes the others, and
@@ -371,7 +375,7 @@ fn service_value(key: &str, settings: &proto::Settings) -> String {
 
 /// Settings' places and every setting: the service's, from the table the Settings screen draws
 /// from, then the Active look's theme's, from what it declares.
-fn settings_entries(s: &Phantom) -> Vec<Entry> {
+pub fn settings_entries(s: &Phantom) -> Vec<Entry> {
     let place = |kind: Kind, label: &str, place: Option<&str>, hint: Option<&str>, synonyms: &'static [&'static str]| Entry {
         place: place.map(str::to_owned),
         hint: hint.map(str::to_owned),
@@ -725,27 +729,70 @@ pub fn down(s: &mut Phantom, tx: &mut Tx) {
     arrow(s, tx, |n| Event::Down { n });
 }
 
+/// How an entry is picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pick {
+    /// Return: it runs, and the palette closes.
+    Return,
+    /// ⌘Return: a setting shows in Settings; any other entry as [`Pick::Return`].
+    Show,
+    /// ⇧Return: what runs without leaving the palette (an action, a flip, a choice) runs and leaves
+    /// it open, its field empty, at the top level; any other entry as [`Pick::Return`].
+    Keep,
+}
+
 /// Return: picks the highlighted entry ([`pick_entry`]). With nothing listed, nothing. It's the
 /// entry highlighted that is picked, found by identity ([`highlighted`]), never whatever the
 /// position now holds.
 pub fn run(s: &mut Phantom, tx: &mut Tx) {
-    let at = highlighted(s);
-    let Some(entry) = listed(s).into_iter().nth(at) else { return };
-    pick_entry(s, entry, false, tx);
+    pick_highlighted(s, Pick::Return, tx);
 }
 
 /// ⌘Return: the highlighted setting in Settings, its control focused; any other entry as Return.
 pub fn show_highlighted(s: &mut Phantom, tx: &mut Tx) {
-    let at = highlighted(s);
-    let Some(entry) = listed(s).into_iter().nth(at) else { return };
-    pick_entry(s, entry, true, tx);
+    pick_highlighted(s, Pick::Show, tx);
 }
 
-/// What picking `entry` does; `show`: ⌘Return.
-fn pick_entry(s: &mut Phantom, entry: Entry, show: bool, tx: &mut Tx) {
+/// ⇧Return: runs the highlighted entry and keeps the palette open for the next, its field empty and
+/// the list back at the top level, Recent first. An entry that opens something (Rename…, a place, a
+/// setting's choices or its control in Settings) leaves the palette as Return does.
+pub fn run_and_stay(s: &mut Phantom, tx: &mut Tx) {
+    pick_highlighted(s, Pick::Keep, tx);
+}
+
+fn pick_highlighted(s: &mut Phantom, pick: Pick, tx: &mut Tx) {
+    let at = highlighted(s);
+    let Some(entry) = listed(s).into_iter().nth(at) else { return };
+    pick_entry(s, entry, pick, tx);
+}
+
+/// The palette is done with a pick: closed, or, for [`Pick::Keep`], open again with its field empty
+/// and the list at the top level.
+fn done(s: &mut Phantom, pick: Pick, tx: &mut Tx) {
+    if pick == Pick::Keep {
+        s.palette.sub = None;
+        s.palette.query = TextEdit::new("");
+        s.palette.query.focused = true;
+        s.palette.state = State::Open { at: 0 };
+        s.palette.seen = String::new();
+        s.palette.on = listed(s).first().map(Entry::pin);
+        tx.scroll_into_view(row_key(0));
+    } else {
+        dismiss(s, tx);
+    }
+}
+
+/// What picking `entry` does.
+fn pick_entry(s: &mut Phantom, entry: Entry, pick: Pick, tx: &mut Tx) {
+    let show = pick == Pick::Show;
     match entry.kind.clone() {
         Kind::Action(command) => {
-            dismiss(s, tx);
+            // One that asks for more (its name ends with "…") opens its flow: the palette leaves.
+            if command.spec().name.ends_with('…') || entry.to.is_some() {
+                dismiss(s, tx);
+            } else {
+                done(s, pick, tx);
+            }
             if let Some(to) = entry.to {
                 return super::moving::move_selection_to(s, to);
             }
@@ -764,7 +811,7 @@ fn pick_entry(s: &mut Phantom, entry: Entry, show: bool, tx: &mut Tx) {
             s.palette.remember(&entry.kind);
             match (show, how(s, of)) {
                 (false, How::Flip) => {
-                    dismiss(s, tx);
+                    done(s, pick, tx);
                     flip(s, of, &entry.label);
                 }
                 (false, How::Choose) => enter(s, of, entry.label, tx),
@@ -773,7 +820,7 @@ fn pick_entry(s: &mut Phantom, entry: Entry, show: bool, tx: &mut Tx) {
         }
         Kind::Choice(of, id) if !show => {
             let name = s.palette.sub.as_ref().map(|sub| sub.name.clone()).unwrap_or_default();
-            dismiss(s, tx);
+            done(s, pick, tx);
             choose(s, of, id, &name, &entry.label);
         }
         Kind::Choice(of, _) | Kind::Show(of) => show_in_settings(s, of, tx),

@@ -62,6 +62,11 @@ an Active look's sheet keeps its changes (Done), a saved preset's goes back (Can
 - ↑ ↓ move (wrapping round), Return picks, ⌘Return shows the setting in Settings.
 - Escape goes back one level: from a setting's choices to the list, with the typed text back;
   from the list, closes.
+- ⇧Return runs an action, an on/off flip or a Choice's option like Return, but the palette stays
+  open with its field empty and the list back at the top level (Recent first), so the next command
+  can be typed at once. Its notice (with Undo) still shows, and ⌘Z takes each run back, newest
+  first. A pick that opens something (a place, Rename…, a setting's choices, Show in Settings)
+  leaves the palette as Return does.
 - Tab does nothing new: the focus stays in the field, as today.
 - In the choices, typing filters them ("ro" → Round).
 
