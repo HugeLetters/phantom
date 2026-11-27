@@ -1,6 +1,5 @@
-//! Letting go of a file gone from the Trash (#234): a file a Move to Trash took, emptied from the
-//! Trash (or deleted from it by hand) while librqbit still has it open. Phantom closes it, so its
-//! space is freed at once, then takes the torrent out of librqbit and adds it back without that
+//! Letting go of a file: one a Move to Trash took (ADR 0014), or one set Off and gone from its path
+//! (#276). Phantom closes it, then takes the torrent out of librqbit and adds it back without that
 //! file's pieces, so nothing offers them any more. librqbit can't withdraw a piece it has, and drops
 //! a peer whose piece it can't read: its peers drop once, and connect again.
 //!
@@ -14,8 +13,8 @@
 //!                                 Stashed, none saved by librqbit              --> its pieces put back from the stash
 //! ```
 //!
-//! The pieces go by file, each a range of pieces: those it shares with a neighbour too, which a
-//! neighbour in the Trash reads from what's kept of it, and one the torrent gets downloads again.
+//! The pieces go by file, each a range of pieces: those it shares with a neighbour too, which one the
+//! torrent gets downloads again.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -34,7 +33,7 @@ pub enum State {
     /// Nothing to let go of.
     #[default]
     Holding,
-    /// These files are gone from the Trash, written ahead of closing them: the torrent is to be
+    /// These files are gone from their paths, written ahead of closing them: the torrent is to be
     /// added back without their pieces, once it can be taken out of librqbit.
     Gone { pieces: Pieces },
     /// Kept aside in `stash` (its .torrent and its pieces), written ahead of taking it out of
@@ -45,7 +44,7 @@ pub enum State {
 /// What the actor finds, or how a step went.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// A look found these files gone from the Trash, still open.
+    /// These files are gone from their paths: moved to the Trash, or found so by a size check.
     Found(Pieces),
     /// The torrent is kept aside here.
     Stashed(Stash),

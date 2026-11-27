@@ -13,7 +13,7 @@
 //! back, as its files may have changed. One missing files is stopped in librqbit, which still holds
 //! the files that went open and has their pieces, until a check (or its missing files set Off);
 //! one missing files at a start isn't added until then, so nothing makes them again. One Ready comes
-//! back (at a start, brought back by an undo, or letting go of a file gone from the Trash) with the
+//! back (at a start, brought back by an undo, or letting go of a file) with the
 //! pieces librqbit saved of it (its `.bitv`), resuming: librqbit samples a few, its row as its
 //! record says meanwhile, and what's asked of it waits its turn on its lane until that's over.
 //!

@@ -188,13 +188,12 @@ impl Engine {
             }
         }
         let guard = guard.keeping_parts_in(parts::dir(&data_dir));
-        // What Moves to Trash took that their undos may put back: librqbit reads it where it went,
-        // and never makes it again.
-        guard.trashed().follow(&undo, &records.iter().map(|r| r.info_hash.clone()).collect());
-        // A let-go of a file gone from the Trash a crash cut short: its pieces cleared in what
-        // librqbit saved, before the torrent is added again with them (#234); so is a file set Off that
-        // was deleted or moved away while the service was stopped (#276).
-        actor::letgo::clear_at_start(&mut records, &session_folder, |hash| guard.trashed().in_trash(hash));
+        // What's kept aside of a torrent neither listed nor on the stack goes.
+        guard.trashed().keep_parts_of(&undo, &records.iter().map(|r| r.info_hash.clone()).collect());
+        // A let-go a crash cut short: its pieces cleared in what librqbit saved, before the torrent
+        // is added again with them; so is a file set Off that was deleted, moved away or moved to the
+        // Trash while the service was stopped (#276).
+        actor::letgo::clear_at_start(&mut records, &session_folder);
         let unavailable = unavailable_at_start(&records);
         let session = Session::new_with_opts(
             download_dir.clone(),

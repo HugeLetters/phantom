@@ -1,32 +1,19 @@
-//! A file in the Trash (#151, #217, #218, [ADR 0008]): everything about a file a Move to Trash took,
-//! while its undo may put it back.
+//! librqbit's storage of every torrent ([`Files`], #374), and a Move to Trash's hold on it (#151,
+//! [ADR 0014]).
 //!
-//! - A Move to Trash [takes](Trashed::take) each file with librqbit's changes to the torrent's
-//!   files held still around it. From then on librqbit's storage ([`Files`], which every storage
-//!   librqbit gets is) never changes the file where it went, nor makes it again at its path, until
-//!   its undo puts it back. The file is read-only to librqbit: it's read where it went, so a check,
-//!   a start and an upload find it as before the move, and Undo is a rename and the priorities.
-//! - What librqbit writes into it meanwhile (a piece it shares with a file the torrent gets) is kept
-//!   aside, in its log in the data dir (`parts.rs`), read over the file, and goes into the file as its
-//!   undo [puts it back](Trashed::put_back). One that can't be kept fails librqbit's write: the
-//!   torrent goes to Error, as for any failed write.
-//! - Which files those are is what the undo stack says ([`Trashed::follow`]): each running Move to
-//!   Trash's, each entry's still in the Trash as it went, each undo's until it's over. What's kept of
-//!   a file stays with it, read over it, until it's written into it or let go of; a torrent neither
-//!   listed nor on the stack loses all of it.
-//! - An undo checks the torrent only when librqbit has more of a file back than it had as it went,
-//!   and what came couldn't go into the file ([`needs_check`]).
-//! - Whether a file is still where it was opened is looked at on disk only for the files Moves to
-//!   Trash took: one moved by hand is noticed by the size check, as Missing files.
-//! - One gone from the Trash (emptied, or deleted from it by hand) while librqbit has it open is
-//!   [found](Trashed::gone) and [closed](Trashed::let_go), so its space is freed (#234); the actor
-//!   then adds the torrent back without its pieces (`machine::letgo`).
+//! - A Move to Trash [takes](Trashed::take) each file with librqbit's changes to the torrent's files
+//!   held still around it, and closes it as it goes: librqbit's storage has nothing of it open once
+//!   it's in the Trash, so nothing reads it, writes it or seeds it from there, and whatever was kept
+//!   aside of it goes. The actor then lets go of its pieces (`machine::letgo`). Its undo puts it
+//!   back and checks the torrent, which reads it at its path.
+//! - A file deleted by hand while librqbit has it open is [closed](Trashed::look) off the actor, so
+//!   its space is freed (#244).
 //!
-//! [ADR 0008]: ../../../docs/adr/0008-undo-is-inverse-commands-in-the-service.md
+//! [ADR 0014]: ../../../docs/adr/0014-surprises-stop-check-decides.md
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{Context, Result, bail};
@@ -36,10 +23,10 @@ use tracing::warn;
 
 use super::parts::Parts;
 use super::slots::{Granting, Handle, Opened, Refused, Slots};
-use super::trash::{self, Carried, Plan, Trash, identity};
-use super::undo::{Back, machine};
+use super::trash::{self, Carried, Plan, Trash};
+use super::undo::machine;
 
-/// The files in the Trash of every torrent, shared by the actor and every storage librqbit gets.
+/// The open files of every torrent, shared by the actor and every storage librqbit gets.
 #[derive(Clone, Default)]
 pub struct Trashed {
     torrents: Arc<Mutex<HashMap<String, Arc<Torrent>>>>,
@@ -63,7 +50,7 @@ pub enum At {
     Length,
     /// A read with its file in hand, as one from a disk that doesn't answer holds it.
     Reading,
-    /// A look closing a file deleted by hand ([`Trashed::close_deleted`]), off the actor.
+    /// A look closing a file deleted by hand ([`Trashed::look`]), off the actor.
     Close,
 }
 
@@ -75,33 +62,15 @@ pub type Hook = Arc<dyn Fn(At) + Send + Sync>;
 #[cfg(test)]
 pub type ReadsOf = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// A torrent's files in the Trash, shared by every storage of it.
+/// A torrent's open files, shared by every storage of it.
 #[derive(Default)]
 struct Torrent {
     /// Held to read by each change librqbit makes to a file while it makes it, to write while a
-    /// file moves or comes back: a move waits for the change under way, and none reaches the file
+    /// file moves to the Trash: a move waits for the change under way, and none reaches the file
     /// meanwhile.
     changes: RwLock<()>,
-    files: Mutex<Away>,
-    /// Whether a Move to Trash ever took a file of it: a torrent with none pays nothing to ask.
-    any: AtomicBool,
     /// Its open files, which every storage of it has a handle of.
     slots: Arc<Slots>,
-}
-
-#[derive(Default)]
-struct Away {
-    /// The files in the Trash, by path: their index and where they went.
-    away: BTreeMap<PathBuf, (usize, trash::Trashed)>,
-    /// Taken by a Move to Trash still running, which the stack may not say yet.
-    taking: BTreeMap<PathBuf, (usize, trash::Trashed)>,
-    /// Every file a Move to Trash took since the start, or the stack said at it: only these are
-    /// looked for on disk. One found moved that's no longer in the Trash for an undo is made again
-    /// where librqbit writes it, as any file set Off that isn't there.
-    taken: BTreeSet<PathBuf>,
-    /// The files in the Trash that couldn't be opened where they went, by index: librqbit can't read
-    /// them, so a check finds less of them.
-    unread: BTreeSet<usize>,
 }
 
 impl Trashed {
@@ -130,8 +99,9 @@ impl Trashed {
 
     /// Moves `plan`'s items of torrent `info_hash` to the Trash, its files `files` (by index and
     /// path), telling `went` of each that goes, until `stop`: [`trash::carry_out_until`], each item
-    /// moving with librqbit's changes to the torrent's files held still, and from then on in the
-    /// Trash, read-only to librqbit. On the blocking task that moves it, never the actor's.
+    /// moving with librqbit's changes to the torrent's files held still, and closed as it goes, so
+    /// nothing of librqbit's reaches it in the Trash. A read under way is waited for. On the blocking
+    /// task that moves it, never the actor's.
     pub fn take(
         &self,
         info_hash: &str,
@@ -146,174 +116,51 @@ impl Trashed {
             // Poisoned only by a panic while a move held it: it guards no data, so that means nothing.
             let _held = torrent.changes.write().unwrap_or_else(std::sync::PoisonError::into_inner);
             let taken = take();
-            if let Ok(item) = &taken
-                && let Some((index, _)) = files.iter().find(|(_, path)| *path == item.from)
-            {
-                let mut away = torrent.lock();
-                away.taking.insert(item.from.clone(), (*index, item.clone()));
-                away.away.insert(item.from.clone(), (*index, item.clone()));
-                away.taken.insert(item.from.clone());
-                torrent.any.store(true, Ordering::SeqCst);
+            if let Ok(item) = &taken {
+                let moved: BTreeSet<usize> = files.iter().filter(|(_, path)| *path == item.from).map(|(i, _)| *i).collect();
+                torrent.close(&moved);
             }
             taken
         })
     }
 
-    /// The files of torrent `info_hash` an undo put back at their paths (by index and path), its
-    /// priorities set: the torrent's again, as the stack says once the undo is reported over, next.
-    /// What librqbit wrote into each while it was away goes into it first: the indices of those
-    /// something went into. Holds the torrent's files still meanwhile: on a blocking task, never the
-    /// actor's.
-    pub fn put_back(&self, info_hash: &str, files: &[(usize, PathBuf)]) -> PutBack {
+    /// Runs `put_back` (an undo of a Move to Trash putting its files back, its own new copies `copies`
+    /// (by index) going to the Trash first) with librqbit's changes to torrent `info_hash`'s files
+    /// held still, then closes each of `copies` that's no longer at its path: nothing of librqbit's
+    /// reaches a copy in the Trash. On a blocking task, never the actor's.
+    pub fn putting_back<T>(&self, info_hash: &str, copies: &BTreeSet<usize>, put_back: impl FnOnce() -> T) -> T {
         let torrent = self.torrent(info_hash);
-        // librqbit's changes wait meanwhile; its reads, which only look at what's away, don't.
         let _held = torrent.changes.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let indices: BTreeSet<usize> = files.iter().map(|(index, _)| *index).collect();
-        let unread = torrent.lock().unread.intersection(&indices).copied().collect();
-        let parts = torrent.slots.parts();
-        let mut written = BTreeSet::new();
-        for (index, path) in files.iter().filter(|(index, _)| parts.has(*index)) {
-            // One that can't go in stays kept, read over the file, and the undo checks the torrent.
-            match open(path, false).and_then(|file| parts.write_into(*index, &file)) {
-                Ok(true) => drop(written.insert(*index)),
-                Ok(false) => {}
-                Err(e) => warn!("writing what was kept of {path:?} while it was in the Trash: {e}"),
+        let put = put_back();
+        let mut gone = BTreeSet::new();
+        torrent.slots.each(|index, path, file| {
+            let opened = file.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if copies.contains(&index)
+                && let Opened::Open(f) | Opened::Closed(Some(f)) = &*opened
+                && moved(path, f)
+            {
+                gone.insert(index);
             }
-        }
-        let mut away = torrent.lock();
-        for (index, path) in files {
-            away.unread.remove(index);
-            away.away.remove(path);
-        }
-        PutBack { written, unread }
+        });
+        torrent.close(&gone);
+        put
     }
 
-    /// The undo stack is `stack`: the files in the Trash are those it names (each running Move to
-    /// Trash's, each entry's still in the Trash as it went, each undo's while it runs), and
-    /// what a running move took that it doesn't say yet. What's kept of a torrent neither in
-    /// `listed` (by info hash) nor named by the stack goes. At a start, before any torrent is added to
-    /// librqbit; then whenever the stack changes, and as the Trash may be emptied.
-    pub fn follow(&self, stack: &machine::State, listed: &BTreeSet<String>) {
-        let mut named: HashMap<String, Named> = HashMap::new();
-        let take = |named: &mut HashMap<String, Named>,
-                    info_hash: &str,
-                    previous: &[(usize, proto::Priority, PathBuf)],
-                    items: &[trash::Trashed],
-                    undoing: bool| {
-            let named = named.entry(info_hash.to_owned()).or_default();
-            for item in items {
-                let Some((index, ..)) = previous.iter().find(|(_, _, path)| *path == item.from) else { continue };
-                let there = undoing || item.to.as_deref().is_some_and(|to| identity(to).is_some() && identity(to) == item.seen);
-                named.files.insert(item.from.clone(), (*index, item.clone(), there));
-            }
-        };
-        // Each entry's, and each part over of an action still running (its entry until it's committed).
-        let over = stack.steps.values().flat_map(|s| match &s.what {
-            machine::What::Action(parts) => parts
-                .values()
-                .filter_map(|p| match p {
-                    lifecycle::undo::Part::Over(Some(e)) => Some(e),
-                    lifecycle::undo::Part::Over(None) | lifecycle::undo::Part::Doing(_) => None,
-                })
-                .collect(),
-            machine::What::Undo { .. } | machine::What::Command(_) => Vec::new(),
-        });
-        let mut kept: BTreeSet<String> = listed.clone();
-        for entry in stack.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values()).chain(over) {
-            kept.insert(entry.info_hash.clone());
-            if let Back::Files { previous, .. } = &entry.back {
-                take(&mut named, &entry.info_hash, previous, &entry.put_back, false);
-            }
+    /// What's kept aside of each torrent neither in `listed` (by info hash) nor named by the undo
+    /// stack `stack` goes: nothing can bring it back with its pieces. At a start, before any torrent
+    /// is added to librqbit; then whenever the stack changes.
+    pub fn keep_parts_of(&self, stack: &machine::State, listed: &BTreeSet<String>) {
+        let kept: BTreeSet<String> = listed.iter().cloned().chain(machine::info_hashes(stack)).collect();
+        let hashes: Vec<String> = self.torrents.lock().unwrap().keys().cloned().collect();
+        for hash in hashes.iter().filter(|h| !kept.contains(*h)) {
+            self.torrent(hash).slots.parts().forget_all();
         }
-        for step in stack.steps.values() {
-            match (&step.what, step.phase) {
-                (machine::What::Action(parts), lifecycle::undo::Phase::Running | lifecycle::undo::Phase::Aborting) => {
-                    for r in parts.values().filter_map(lifecycle::undo::Part::doing) {
-                        kept.insert(r.info_hash.clone());
-                        if matches!(r.action, proto::UndoAction::TrashFiles { .. }) {
-                            take(&mut named, &r.info_hash, &r.previous, &r.moved, false);
-                            named.entry(r.info_hash.clone()).or_default().moving = true;
-                        }
-                    }
-                }
-                (machine::What::Undo { parts, .. }, _) => {
-                    for entry in parts.values().filter_map(lifecycle::undo::Part::doing) {
-                        kept.insert(entry.info_hash.clone());
-                        if let Back::Files { previous, .. } = &entry.back {
-                            take(&mut named, &entry.info_hash, previous, &entry.put_back, true);
-                        }
-                    }
-                }
-                (machine::What::Action(_), lifecycle::undo::Phase::Queued) | (machine::What::Command(_), _) => {}
-            }
-        }
-        let hashes: BTreeSet<String> = self.torrents.lock().unwrap().keys().chain(named.keys()).cloned().collect();
-        for hash in hashes {
-            let named = named.remove(&hash).unwrap_or_default();
-            let torrent = self.torrent(&hash);
-            let mut away = torrent.lock();
-            if !named.moving {
-                away.taking.clear();
-            }
-            let mut now: BTreeMap<PathBuf, (usize, trash::Trashed)> =
-                named.files.into_iter().filter(|(_, f)| f.2).map(|(path, f)| (path, (f.0, f.1))).collect();
-            now.extend(away.taking.iter().map(|(path, f)| (path.clone(), f.clone())));
-            away.taken.extend(now.keys().cloned());
-            if !away.taken.is_empty() {
-                torrent.any.store(true, Ordering::SeqCst);
-            }
-            let indices: BTreeSet<usize> = now.values().map(|(index, _)| *index).collect();
-            away.unread.retain(|index| indices.contains(index));
-            away.away = now;
-            drop(away);
-            if !kept.contains(&hash) {
-                torrent.slots.parts().forget_all();
-            }
-        }
-        // A torrent gone, whatever it kept: nothing can bring it back with its pieces.
         let Some(dir) = &self.parts else { return };
         for torrent in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             if !kept.contains(&*torrent.file_name().to_string_lossy()) {
                 let _ = std::fs::remove_dir_all(torrent.path());
             }
         }
-    }
-
-    /// The files (by index) of torrent `info_hash` in the Trash for an undo, or being moved there:
-    /// librqbit reads them where they went. Only what's in memory, so the actor may ask.
-    pub fn in_trash(&self, info_hash: &str) -> BTreeSet<usize> {
-        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
-        let away = torrent.lock();
-        away.away.values().chain(away.taking.values()).map(|(index, _)| *index).collect()
-    }
-
-    /// The files of torrent `info_hash` a Move to Trash took that are gone from the Trash (emptied,
-    /// or deleted from it by hand), by index, while librqbit's storage still has them open: the
-    /// Trash no longer has them for an undo ([`Trashed::follow`]), and the file it has open has no
-    /// name left anywhere. Looks at each of them open (`fstat`), and waits
-    /// for nothing: one being opened or closed is looked at next time. A torrent no move took a file
-    /// of pays nothing.
-    fn gone(&self, info_hash: &str) -> BTreeSet<usize> {
-        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
-        if !torrent.any.load(Ordering::SeqCst) {
-            return BTreeSet::new();
-        }
-        // Not one the Trash still has for an undo, as `follow` last found: librqbit's handle may be
-        // to a file replaced by hand at its path before it moved, which is whole where it went.
-        let (taken, away): (BTreeSet<PathBuf>, BTreeSet<PathBuf>) = {
-            let away = torrent.lock();
-            (away.taken.clone(), away.away.keys().cloned().collect())
-        };
-        let mut gone = BTreeSet::new();
-        torrent.slots.each(|index, path, file| {
-            if let Ok(opened) = file.try_read()
-                && path.is_some_and(|p| taken.contains(p) && !away.contains(p))
-                && unlinked(&opened)
-            {
-                gone.insert(index);
-            }
-        });
-        gone
     }
 
     /// The files librqbit's storage of torrent `info_hash` has open that aren't the ones at their
@@ -358,14 +205,31 @@ impl Trashed {
         granting.grant(&self.torrent(info_hash).slots, files)
     }
 
-    /// A look at torrent `info_hash` off the actor: first closes the files `closable` that were deleted
-    /// by hand ([`Trashed::close_deleted`], if any), then finds those a Move to Trash took that are
-    /// gone from the Trash ([`Trashed::gone`]).
+    /// A look at torrent `info_hash` off the actor: closes the files `closable` (those missing, or
+    /// let go of) that are gone for good (deleted by hand while librqbit has them open: no name left
+    /// anywhere), so their space is freed at once; one moved elsewhere has its space still, and stays
+    /// open. Looks at each (`fstat`), so never on the actor; waits for nothing, as [`Trashed::let_go`]:
+    /// one librqbit is reading or opening now is left for the next look. Which of them it closed.
     pub fn look(&self, info_hash: &str, closable: &BTreeSet<usize>) -> BTreeSet<usize> {
-        if !closable.is_empty() {
-            self.close_deleted(info_hash, closable);
-        }
-        self.gone(info_hash)
+        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
+        let mut closed = BTreeSet::new();
+        torrent.slots.each(|index, _, file| {
+            if !closable.contains(&index) {
+                return;
+            }
+            #[cfg(test)]
+            if let Some(hook) = &self.hook {
+                hook(At::Close);
+            }
+            if let Ok(mut opened) = file.try_write()
+                && unlinked(&opened)
+            {
+                *opened = Opened::Closed(None);
+                closed.insert(index);
+            }
+        });
+        closed.iter().for_each(|index| torrent.slots.parts().forget(*index));
+        closed
     }
 
     /// The files of torrent `info_hash` open for writing, by index: those granted, or made since. Only
@@ -387,12 +251,10 @@ impl Trashed {
         self.torrent(info_hash).slots.in_use(f);
     }
 
-    /// Closes the files `files` (by index) of torrent `info_hash`, which [`Trashed::gone`] found gone
-    /// from disk, so their space is freed: librqbit can't read them any
-    /// more, and the torrent is to be added back without their pieces. Touches no disk: a file with
-    /// no name left never gets one back, so the look's answer stands. Waits for nothing: one
-    /// librqbit is reading or opening now is left open, for the next look to find again. Which of
-    /// them it closed.
+    /// Closes the files `files` (by index) of torrent `info_hash`, let go of (set Off and gone from
+    /// their paths), so librqbit reads none of them any more, and the torrent is to be added back
+    /// without their pieces. Touches no disk. Waits for nothing: one librqbit is reading or opening
+    /// now is left open, for the next look to find again. Which of them it closed.
     pub fn let_go(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
         let torrent = self.torrent(info_hash);
         let mut closed = BTreeSet::new();
@@ -415,37 +277,6 @@ impl Trashed {
         closed
     }
 
-    /// Closes the files `files` (by index) of torrent `info_hash` (those missing, or let go of) that
-    /// are gone for good (deleted by hand while librqbit has them open: no name left anywhere), so
-    /// their space is freed at once; one moved elsewhere has its space still, and
-    /// stays open, and one a Move to Trash took is [`Trashed::gone`]'s, written ahead. Looks at each
-    /// (`fstat`), so never on the actor; waits for nothing, as [`Trashed::let_go`]: one librqbit is
-    /// reading or opening now is left for the next look. Which of them it closed. One set Off is let
-    /// go of, as one gone from the Trash is, so librqbit offers none of its pieces (the actor writes
-    /// that ahead as it's set Off).
-    fn close_deleted(&self, info_hash: &str, files: &BTreeSet<usize>) -> BTreeSet<usize> {
-        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
-        let taken = torrent.lock().taken.clone();
-        let mut closed = BTreeSet::new();
-        torrent.slots.each(|index, path, file| {
-            if !files.contains(&index) || path.is_some_and(|p| taken.contains(p)) {
-                return;
-            }
-            #[cfg(test)]
-            if let Some(hook) = &self.hook {
-                hook(At::Close);
-            }
-            if let Ok(mut opened) = file.try_write()
-                && unlinked(&opened)
-            {
-                *opened = Opened::Closed(None);
-                closed.insert(index);
-            }
-        });
-        closed.iter().for_each(|index| torrent.slots.parts().forget(*index));
-        closed
-    }
-
     /// librqbit's storage of torrent `info_hash`'s files, laid out as `layout`, in `destination`.
     pub(super) fn storage(&self, info_hash: &str, layout: Layout, destination: PathBuf) -> Files {
         Files {
@@ -461,7 +292,7 @@ impl Trashed {
         }
     }
 
-    /// The torrent's files in the Trash, made once, with what was kept of them before a restart.
+    /// The torrent's open files, made once, with what was kept of them before a restart.
     fn torrent(&self, info_hash: &str) -> Arc<Torrent> {
         let mut torrents = self.torrents.lock().unwrap();
         if let Some(torrent) = torrents.get(info_hash) {
@@ -478,26 +309,16 @@ impl Trashed {
     }
 }
 
-/// How an undo's put-back went, for [`needs_check`]: the files something kept went into, and those
-/// librqbit couldn't read where they went (opened there failed after a restart, the Trash out of
-/// reach), which it has less of than it had.
-#[derive(Debug, Default, PartialEq)]
-pub struct PutBack {
-    pub written: BTreeSet<usize>,
-    pub unread: BTreeSet<usize>,
-}
-
-/// What the stack names of a torrent: each file (its index, where it went, whether it's in the Trash
-/// for an undo: there still as it went, or an undo under way has it), and whether a move of it runs.
-#[derive(Default)]
-struct Named {
-    files: BTreeMap<PathBuf, (usize, trash::Trashed, bool)>,
-    moving: bool,
-}
-
 impl Torrent {
-    fn lock(&self) -> std::sync::MutexGuard<'_, Away> {
-        self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Closes the files `files` (by index), just moved to the Trash: waits for a read under way
+    /// (a change waits for the move), and what was kept aside of them goes.
+    fn close(&self, files: &BTreeSet<usize>) {
+        self.slots.each(|index, _, file| {
+            if files.contains(&index) {
+                *file.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Opened::Closed(None);
+                self.slots.parts().forget(index);
+            }
+        });
     }
 }
 
@@ -508,16 +329,6 @@ fn unlinked(opened: &Opened) -> bool {
         Opened::Open(file) | Opened::Closed(Some(file)) => file.metadata().is_ok_and(|m| m.nlink() == 0),
         Opened::Closed(None) | Opened::HandedOn => false,
     }
-}
-
-/// Whether the undo of a Move to Trash, which put back the files `back` (by index), must check the
-/// torrent: librqbit has more of one now than it had as it moved (`had`), a piece it shares with a
-/// file the torrent gets, and what came couldn't go into the file (not in `put.written`); or it
-/// couldn't read one where it went (`put.unread`), so a check found less of it. Nothing else changes
-/// what librqbit has of a file in the Trash: it's read as it went.
-pub fn needs_check(had: &[(usize, u64)], back: &[usize], now: impl Fn(usize) -> u64, put: &PutBack) -> bool {
-    back.iter().any(|i| put.unread.contains(i))
-        || had.iter().filter(|(i, _)| back.contains(i)).any(|&(i, was)| now(i) > was && !put.written.contains(&i))
 }
 
 /// Where a torrent's files go and which it gets.
@@ -562,12 +373,9 @@ impl Layout {
 /// torrent gets (a stub), with the folders to it, but never the destination (#67). Nothing is ever
 /// removed but what librqbit asks.
 ///
-/// A file in the Trash for an undo is never changed where it went (#217's fourth review): librqbit
-/// keeps it open, and a write or a length set through it would change it there, so its undo
-/// wouldn't find it as it went. Its length isn't set; what's written into it is kept aside, and read
-/// over the file; the file itself is read where it went (#218's S1), opened there after a restart.
-/// A write through a storage already taken is refused, as for every other file: librqbit asks
-/// for the piece again.
+/// A file a Move to Trash took is closed as it goes ([`Trashed::take`]): from then on it's one that
+/// isn't there. A write through a storage already taken is refused, as for every other file:
+/// librqbit asks for the piece again.
 pub(super) struct Files {
     layout: Layout,
     destination: PathBuf,
@@ -583,17 +391,6 @@ pub(super) struct Files {
     reads_of: Option<(ReadsOf, String)>,
 }
 
-/// Where an open file stands.
-enum Place<'a> {
-    /// Where it was opened; whether it may be written ([`Opened::Open`]).
-    InPlace(&'a std::fs::File, bool),
-    /// In the Trash for an undo: read where it went (if it's open), never made again at its path.
-    Trashed(Option<&'a std::fs::File>),
-    /// Moved or gone some other way, or never there: made again where it's written. Or the storage
-    /// was taken: neither read nor written ([`Opened::HandedOn`]).
-    Elsewhere,
-}
-
 impl Files {
     #[cfg(test)]
     fn at(&self, at: At) {
@@ -602,34 +399,9 @@ impl Files {
         }
     }
 
-    /// Where the file of `path`, as `opened`, stands now. Looked at on disk only for a file a Move to
-    /// Trash took: its undo puts it back, and may take it back to the Trash, without a move. One
-    /// handed on is [`Place::Elsewhere`], whose write makes nothing ([`Handle::change`] refuses it).
-    fn place<'a>(&self, path: Option<&Path>, opened: &'a Opened) -> Place<'a> {
-        let (file, writable) = match opened {
-            Opened::Open(file) => (Some(file), true),
-            Opened::Closed(file) => (file.as_ref(), false),
-            // Through a storage already taken, its peer late: refused, in the Trash too, where it
-            // would replace what a newer storage kept, which the undo writes into the file (#374).
-            Opened::HandedOn => return Place::Elsewhere,
-        };
-        let (looked, trashed) = match (path, self.torrent.any.load(Ordering::SeqCst)) {
-            (Some(path), true) => {
-                let away = self.torrent.lock();
-                (away.taken.contains(path), away.away.contains_key(path))
-            }
-            (_, _) => (false, false),
-        };
-        match file {
-            Some(file) if !looked || !moved(path, file) => Place::InPlace(file, writable),
-            _ if trashed => Place::Trashed(file),
-            _ => Place::Elsewhere,
-        }
-    }
-
     /// Writes `bufs`, one after another, at `offset` into file `index`, made first if it isn't
-    /// there; aside if it's closed, or in the Trash. Where it is is looked at once. Writing no bytes
-    /// makes nothing (#376).
+    /// there; aside if it's closed. Writing no bytes makes nothing (#376). Through a storage already
+    /// taken, its peer late, it's refused ([`Handle::change`] refuses to make it).
     fn write(&self, index: usize, offset: u64, bufs: &[&[u8]]) -> Result<()> {
         // librqbit writes 0 bytes into the file before a chunk: that makes nothing (#376).
         if bufs.iter().all(|buf| buf.is_empty()) {
@@ -638,17 +410,16 @@ impl Files {
         let _changing = self.torrent.changes.read().unwrap_or_else(std::sync::PoisonError::into_inner);
         #[cfg(test)]
         self.at(At::Change);
-        let written = self.files.read(index, |path, opened| {
-            match self.place(path, opened) {
-                Place::InPlace(file, true) => write_at(file, offset, bufs)?,
-                Place::InPlace(_, false) => {
+        let written = self.files.read(index, |_, opened| {
+            match opened {
+                Opened::Open(file) => write_at(file, offset, bufs)?,
+                Opened::Closed(Some(_)) => {
                     if !self.layout.is_off(index) {
                         warn!("a write into file {index}, which the torrent gets, before it was granted: kept aside");
                     }
                     self.keep(index, offset, bufs)?
                 }
-                Place::Trashed(_) => self.keep(index, offset, bufs)?,
-                Place::Elsewhere => return Ok(false),
+                Opened::Closed(None) | Opened::HandedOn => return Ok(false),
             }
             Ok(true)
         })?;
@@ -693,8 +464,10 @@ impl Files {
     /// writing now: not if something is at its path (made since by someone else, or a link).
     fn made(&self, index: usize) -> Result<bool> {
         self.files.change(index, |path, opened| {
-            if let Place::InPlace(_, writable) = self.place(path, opened) {
-                return Ok(writable);
+            match opened {
+                Opened::Open(_) => return Ok(true),
+                Opened::Closed(Some(_)) => return Ok(false),
+                Opened::Closed(None) | Opened::HandedOn => {}
             }
             let path = path.context("a padding file is never written")?;
             make_folders(&self.destination, path.parent().context("a file without a folder")?)?;
@@ -710,42 +483,21 @@ impl Files {
         })
     }
 
-    /// File `index` at `path` if it's there, closed, or if it's set Off where it went to the Trash for
-    /// an undo. One that can't be opened there is remembered, for its undo to check the torrent.
-    fn open_closed(&self, index: usize, path: &Path) -> Result<Opened> {
+    /// File `index` at `path` if it's there, closed.
+    fn open_closed(&self, path: &Path) -> Result<Opened> {
         match open(path, false) {
             Ok(file) => Ok(Opened::Closed(Some(file))),
             // A link there isn't it (#267): as if nothing were.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound || is_link(&e) => {
-                match self.layout.is_off(index).then(|| self.in_trash(path)).flatten().map(|to| open(&to, false)) {
-                    Some(Ok(file)) => Ok(Opened::Closed(Some(file))),
-                    Some(Err(e)) => {
-                        warn!("opening {path:?} where it went to the Trash: {e}");
-                        self.torrent.lock().unread.insert(index);
-                        Ok(Opened::Closed(None))
-                    }
-                    None => Ok(Opened::Closed(None)),
-                }
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || is_link(&e) => Ok(Opened::Closed(None)),
             Err(e) => Err(e).with_context(|| format!("opening {path:?}")),
         }
-    }
-
-    /// Where file `index`, set Off and not at `path`, went to the Trash for an undo, if it's there
-    /// as it went.
-    fn in_trash(&self, path: &Path) -> Option<PathBuf> {
-        let away = self.torrent.lock();
-        let (_, item) = away.away.get(path)?;
-        let to = item.to.clone()?;
-        (item.seen.is_some() && identity(&to) == item.seen).then_some(to)
     }
 }
 
 /// Whether `file`, opened at `path`, is no longer what's there: moved (to the Trash, say), or
 /// gone. A symbolic link at the path isn't followed (#267): it's never the torrent's file, even one
-/// to the file it has open. Only looked at for the files a Move to Trash took; for any other file
-/// the open handle serves its own file until the size check finds the link, and `init` opens it
-/// again.
+/// to the file it has open. librqbit's storage doesn't look: the open handle serves its own file
+/// until the size check finds it gone, and `init` opens what's there again.
 fn moved(path: Option<&Path>, file: &std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Some(path) = path else { return false };
@@ -849,13 +601,13 @@ impl TorrentStorage for Files {
         }
         self.lens = Arc::new(metadata.file_infos.iter().map(|info| info.len).collect());
         let mut files = Vec::with_capacity(metadata.file_infos.len());
-        for (index, info) in metadata.file_infos.iter().enumerate() {
+        for info in &metadata.file_infos {
             if info.attrs.padding {
                 files.push((None, Opened::Closed(None)));
                 continue;
             }
             let path = self.layout.at(&info.relative_filename);
-            let file = self.open_closed(index, &path)?;
+            let file = self.open_closed(&path)?;
             files.push((Some(path), file));
         }
         self.files = self.torrent.slots.open(files);
@@ -869,7 +621,7 @@ impl TorrentStorage for Files {
         if let Some((reads_of, hash)) = &self.reads_of {
             reads_of(hash);
         }
-        self.files.read(file, |path, opened| {
+        self.files.read(file, |_, opened| {
             #[cfg(test)]
             self.at(At::Reading);
             // Nothing to read: librqbit asks so of the file a piece starts right after, whether it's
@@ -877,16 +629,11 @@ impl TorrentStorage for Files {
             if buf.is_empty() {
                 return Ok(());
             }
-            // What's kept of it, over the file, wherever it is: in the Trash, as it went (with what was
-            // written meanwhile, which may reach past its end, a stub). Moved, and no undo will put it
-            // back (#223's review, S1): read where it went all the same, as a read changes nothing, so
-            // a peer that asks for one of its pieces isn't dropped. A write makes it again at its path.
-            match (self.place(path, opened), opened) {
-                (Place::InPlace(f, _), _)
-                | (Place::Trashed(Some(f)), _)
-                | (Place::Elsewhere, Opened::Open(f) | Opened::Closed(Some(f))) => self.read_into(file, Some(f), offset, buf),
-                (Place::Trashed(None), _) | (Place::Elsewhere, Opened::Closed(None)) => self.read_into(file, None, offset, buf),
-                (Place::Elsewhere, Opened::HandedOn) => bail!("file {file} was handed on"),
+            // What's kept of it, over the file: one let go of, or moved by hand, too.
+            match opened {
+                Opened::Open(f) | Opened::Closed(Some(f)) => self.read_into(file, Some(f), offset, buf),
+                Opened::Closed(None) => self.read_into(file, None, offset, buf),
+                Opened::HandedOn => bail!("file {file} was handed on"),
             }
         })
     }
@@ -929,15 +676,15 @@ impl TorrentStorage for Files {
         #[cfg(test)]
         self.at(At::Change);
         // Only one open for writing: librqbit sets the length as its check ends, when every file is
-        // closed (it gets its length at its grant), and one in the Trash stays as it went.
-        self.files.read(file, |path, opened| match (self.place(path, opened), opened) {
-            (Place::InPlace(f, true), _) => {
+        // closed (it gets its length at its grant).
+        self.files.read(file, |_, opened| match opened {
+            Opened::Open(f) => {
                 #[cfg(test)]
                 self.at(At::Length);
                 Ok(grow(f, len)?)
             }
-            (Place::Elsewhere, Opened::HandedOn) => bail!("file {file} was handed on"),
-            _ => Ok(()),
+            Opened::HandedOn => bail!("file {file} was handed on"),
+            Opened::Closed(_) => Ok(()),
         })
     }
 
@@ -986,31 +733,6 @@ mod tests {
         Trashed::default().keeping_parts_in(dir.join("parts"))
     }
 
-    /// A part that can't be kept aside (the data dir can't be written into; a full disk alike) fails
-    /// librqbit's write, so the torrent goes to Error, and nothing is read of it.
-    #[test]
-    fn a_part_that_cannot_be_kept_fails_the_write() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let data = dir.path().join("data");
-        std::fs::create_dir(&data).unwrap();
-        // Not empty: a Move to Trash sweeps the empty folders.
-        std::fs::write(data.join("settings.json"), "{}").unwrap();
-        let trashed = kept(&data);
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let files = storage(&trashed, dir.path(), &path);
-        take(&trashed, &bin(dir.path()), dir.path(), &path);
-        let mode = std::fs::metadata(&data).unwrap().permissions();
-        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let wrote = files.pwrite_all(0, 4, &[2; 10]);
-        std::fs::set_permissions(&data, mode).unwrap();
-        assert!(wrote.is_err(), "kept nowhere");
-        let mut buf = [0; 10];
-        files.pread_exact(0, 4, &mut buf).unwrap();
-        assert_eq!(buf, [1; 10], "the file as it went, nothing over it");
-    }
-
     /// A trash into a folder of its own, as the engine's tests have.
     fn bin(dir: &Path) -> Trash {
         trash::into(dir.join("trash"), Default::default(), Default::default())
@@ -1035,6 +757,54 @@ mod tests {
         let mut files = trashed.storage("t", Layout::new(dir.to_owned(), None), dir.to_owned());
         files.files = trashed.torrent("t").slots.open(vec![(Some(path.to_owned()), Opened::Closed(None))]);
         files
+    }
+
+    /// ADR 0014: a file a Move to Trash takes is closed as it goes, and what was kept aside of it
+    /// goes too. Nothing of librqbit's reads it, writes it or sets its length in the Trash: it's one
+    /// that isn't there, so a piece it shares with a file the torrent gets makes it anew at its path.
+    #[test]
+    fn a_file_a_move_to_trash_takes_is_closed_as_it_goes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let mut files = trashed.storage("t", Layout::new(dir.path().to_owned(), Some(&[])), dir.path().to_owned());
+        files.files = trashed.torrent("t").slots.open(vec![(Some(path.clone()), Opened::Closed(Some(open(&path, false).unwrap())))]);
+        files.pwrite_all(0, 0, &[7; 10]).unwrap();
+        assert!(trashed.torrent("t").slots.parts().has(0), "kept aside while it's closed");
+        let away = take(&trashed, &trash, dir.path(), &path).to.unwrap();
+        let open = open_on(&away);
+        assert_eq!(open(), 0, "closed as it went");
+        assert!(!trashed.torrent("t").slots.parts().has(0), "and what was kept of it goes");
+        assert!(files.pread_exact(0, 0, &mut [0; 10]).is_err(), "nothing to read of it");
+        files.ensure_file_length(0, 150).unwrap();
+        files.pwrite_all(0, 20, &[2; 10]).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), [[0u8; 20].as_slice(), &[2; 10]].concat(), "made anew at its path");
+        assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "the one in the Trash as it went");
+        assert_eq!(trashed.writable("t"), BTreeSet::from([0]), "Phantom's own, open for writing");
+    }
+
+    /// A part of a closed file that can't be kept aside (the data dir can't be written into; a full
+    /// disk alike) fails librqbit's write, so the torrent goes to Error, and nothing is read of it.
+    #[test]
+    fn a_part_that_cannot_be_kept_fails_the_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let trashed = kept(&data);
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let mut files = trashed.storage("t", Layout::new(dir.path().to_owned(), Some(&[])), dir.path().to_owned());
+        files.files = trashed.torrent("t").slots.open(vec![(Some(path.clone()), Opened::Closed(Some(open(&path, false).unwrap())))]);
+        let mode = std::fs::metadata(&data).unwrap().permissions();
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let wrote = files.pwrite_all(0, 4, &[2; 10]);
+        std::fs::set_permissions(&data, mode).unwrap();
+        assert!(wrote.is_err(), "kept nowhere");
+        let mut buf = [0; 10];
+        files.pread_exact(0, 4, &mut buf).unwrap();
+        assert_eq!(buf, [1; 10], "the file as it is, nothing over it");
     }
 
     /// #376: librqbit writes 0 bytes into the file before a chunk. Not a byte, not a file, nor its
@@ -1062,176 +832,6 @@ mod tests {
         let n = files.pwrite_all_vectored(0, 0, [std::io::IoSlice::new(b"x"), std::io::IoSlice::new(&[])]).unwrap();
         assert_eq!(n, 1);
         assert_eq!(std::fs::read(&path).unwrap(), b"x\0ab");
-    }
-
-    /// A write of nothing to a file in the Trash keeps nothing aside.
-    #[test]
-    fn a_write_of_nothing_to_a_file_in_the_trash_keeps_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, b"abc").unwrap();
-        let trashed = kept(dir.path());
-        let bin = bin(dir.path());
-        let files = storage(&trashed, dir.path(), &path);
-        take(&trashed, &bin, dir.path(), &path);
-        files.pwrite_all(0, 3, &[]).unwrap();
-        assert!(!trashed.torrent("t").slots.parts().has(0), "nothing kept");
-        assert!(!path.exists(), "nothing made at its path");
-    }
-
-    /// #217's fourth and fifth reviews, #218's S1: a file a Move to Trash took while open is left as
-    /// it went. librqbit's length set skips it, a write (a piece it shares with a file the torrent
-    /// gets) makes nothing at its path and is kept aside, and a read reads the file where it went,
-    /// with what was written over it. Once it's back, it's the torrent's file again, with what was
-    /// written in it.
-    #[test]
-    fn a_file_a_move_to_trash_took_is_read_only_where_it_went() {
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let files = storage(&trashed, dir.path(), &path);
-        let item = take(&trashed, &trash, dir.path(), &path);
-        let away = item.to.clone().unwrap();
-        let went = std::fs::metadata(&away).unwrap().modified().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        files.ensure_file_length(0, 150).unwrap();
-        assert!(!path.exists(), "its length isn't set at its path either");
-        let mut buf = [0; 10];
-        files.pread_exact(0, 0, &mut buf).unwrap();
-        assert_eq!(buf, [1; 10], "read where it went");
-        files.pwrite_all(0, 0, &[2; 10]).unwrap();
-        files.pwrite_all_vectored(0, 10, [std::io::IoSlice::new(&[3; 5]), std::io::IoSlice::new(&[4; 5])]).unwrap();
-        assert!(!path.exists(), "a write makes nothing at its path");
-        let mut buf = [0; 25];
-        files.pread_exact(0, 0, &mut buf).unwrap();
-        assert_eq!(buf[..20], [[2; 10].as_slice(), &[3; 5], &[4; 5]].concat(), "what was written is read over it");
-        assert_eq!(buf[20..], [1; 5], "and the file as it went past that");
-        assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "the one moved stays as it went");
-        assert_eq!(std::fs::metadata(&away).unwrap().modified().unwrap(), went, "modified time too");
-        // Put back, it's the torrent's again, with what was written meanwhile in it.
-        std::fs::rename(&away, &path).unwrap();
-        assert_eq!(trashed.put_back("t", &[(0, path.clone())]).written, BTreeSet::from([0]), "something went into it");
-        assert_eq!(std::fs::read(&path).unwrap()[..20], buf[..20]);
-        files.ensure_file_length(0, 150).unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), 150);
-    }
-
-    /// #234: a file a Move to Trash took, gone from the Trash while librqbit has it open, is found and
-    /// closed, so nothing has it open and its space is freed, once nothing reads it. One still in the
-    /// Trash isn't, nor one no move took.
-    #[test]
-    fn a_file_gone_from_the_trash_is_found_and_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let files = storage(&trashed, dir.path(), &path);
-        let away = take(&trashed, &trash, dir.path(), &path).to.unwrap();
-        let open = open_on(&away);
-        assert_eq!(trashed.gone("t"), BTreeSet::new(), "still in the Trash");
-        assert_eq!(open(), 1);
-        std::fs::remove_file(&away).unwrap();
-        assert_eq!(trashed.gone("t"), BTreeSet::new(), "the Trash has it for its undo, as far as it was last found");
-        // Its undo no longer finds it there.
-        trashed.follow(&machine::State::default(), &BTreeSet::from(["t".to_owned()]));
-        assert_eq!(trashed.gone("t"), BTreeSet::from([0]));
-        assert_eq!(open(), 1, "found, not closed yet");
-        // A read under way (stalled, say) holds it: it's left open, and nothing waits for it.
-        trashed.in_use("t", || {
-            assert_eq!(trashed.let_go("t", &BTreeSet::from([0])), BTreeSet::new());
-            assert_eq!(open(), 1, "left open while it's read");
-        });
-        assert_eq!(trashed.gone("t"), BTreeSet::from([0]), "found again");
-        assert_eq!(trashed.let_go("t", &BTreeSet::from([0])), BTreeSet::from([0]));
-        assert_eq!(open(), 0, "closed: its space is freed");
-        assert_eq!(trashed.gone("t"), BTreeSet::new(), "found once");
-        assert!(files.pread_exact(0, 0, &mut [0; 10]).is_err(), "nothing to read any more");
-        // One no move took isn't looked for, gone or not.
-        let other = Trashed::default();
-        let path = dir.path().join("b.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let _files = storage(&other, dir.path(), &path);
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(other.gone("t"), BTreeSet::new());
-    }
-
-    /// Found by the model (#242): a file written anew at its path by hand (librqbit's handle is to
-    /// the one it replaced, which has no name left), then moved to the Trash whole, isn't one gone
-    /// from it: the Trash has it for its undo, and it's read there.
-    #[test]
-    fn a_file_replaced_by_hand_then_moved_to_the_trash_isnt_taken_for_one_gone_from_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let _files = storage(&trashed, dir.path(), &path);
-        let replaced = dir.path().join("a.bin.new");
-        std::fs::write(&replaced, [1; 100]).unwrap();
-        std::fs::rename(&replaced, &path).unwrap();
-        take(&trashed, &trash, dir.path(), &path);
-        assert_eq!(trashed.gone("t"), BTreeSet::new());
-        trashed.follow(&machine::State::default(), &BTreeSet::from(["t".to_owned()]));
-        assert_eq!(trashed.gone("t"), BTreeSet::from([0]), "once its undo no longer has it, it's let go of");
-    }
-
-    /// An undo that fails once a file is back takes it to the Trash again, with no move: until its
-    /// undo is over, such a file is looked at every time, and so is never written where it went.
-    #[test]
-    fn a_file_taken_back_to_the_trash_by_a_failed_undo_is_left_as_it_went() {
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let files = storage(&trashed, dir.path(), &path);
-        let away = take(&trashed, &trash, dir.path(), &path).to.unwrap();
-        // Back for a while (the undo), and read there.
-        std::fs::rename(&away, &path).unwrap();
-        files.pread_exact(0, 0, &mut [0; 10]).unwrap();
-        // Taken back to the Trash (the undo failed).
-        std::fs::rename(&path, &away).unwrap();
-        files.pwrite_all(0, 0, &[2; 10]).unwrap();
-        assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "nothing written where it went");
-        assert!(!path.exists());
-    }
-
-    /// A file no undo will put back any more (its entry refused, or pushed off the stack) is the
-    /// torrent's no more where it went: a piece it shares with a file the torrent gets makes it again
-    /// at its path, as for any file set Off that isn't there, and the one in the Trash stays as it
-    /// went.
-    #[test]
-    fn a_file_no_undo_will_put_back_is_made_again_at_its_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 100]).unwrap();
-        let files = storage(&trashed, dir.path(), &path);
-        let away = take(&trashed, &trash, dir.path(), &path).to.unwrap();
-        trashed.follow(&machine::State::default(), &BTreeSet::from(["t".to_owned()]));
-        // Read where it went all the same (#223's review): a peer asking for its pieces isn't dropped.
-        let mut buf = [0; 10];
-        files.pread_exact(0, 0, &mut buf).unwrap();
-        assert_eq!(buf, [1; 10]);
-        files.pwrite_all(0, 0, &[2; 10]).unwrap();
-        assert_eq!(std::fs::read(&path).unwrap()[..10], [2; 10], "made again at its path");
-        assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "the one in the Trash stays as it went");
-    }
-
-    /// A file in the Trash shorter than what was kept of it (a stub a shared piece made, then
-    /// trashed) reads what was kept past its end; past both, it fails.
-    #[test]
-    fn a_short_file_in_the_trash_reads_what_was_kept_past_its_end() {
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 10]).unwrap();
-        let files = storage(&trashed, dir.path(), &path);
-        take(&trashed, &trash, dir.path(), &path);
-        files.pwrite_all(0, 8, &[2; 8]).unwrap();
-        let mut buf = [0; 16];
-        files.pread_exact(0, 0, &mut buf).unwrap();
-        assert_eq!(buf, [[1u8; 8].as_slice(), &[2; 8]].concat().as_slice());
-        assert!(files.pread_exact(0, 0, &mut [0; 17]).is_err(), "past both");
     }
 
     /// librqbit's `take` as it sets a file's length (a check's end), or writes: it waits for that one.
@@ -1284,64 +884,6 @@ mod tests {
         taken.pread_exact(1, 0, &mut [0; 10]).unwrap();
     }
 
-    /// A write into a file in the Trash through a storage already taken, its peer late at a pause, is
-    /// refused, as for every other file: kept, it would replace a newer part, which its undo would
-    /// write into the file. Whether the new storage has the files (taken) or the torrent was taken
-    /// out and added again (out). A read through it is refused too.
-    #[test]
-    fn a_late_write_into_a_file_in_the_trash_is_refused() {
-        for out in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let parts = dir.path().join("parts");
-            let trashed = Trashed::default().keeping_parts_in(parts.clone());
-            let path = dir.path().join("a.bin");
-            std::fs::write(&path, [1; 100]).unwrap();
-            let old = storage(&trashed, dir.path(), &path);
-            take(&trashed, &bin(dir.path()), dir.path(), &path);
-            let mut new = old.take().unwrap();
-            if out {
-                drop(new);
-                let mut again = trashed.storage("t", Layout::new(dir.path().to_owned(), Some(&[])), dir.path().to_owned());
-                let opened = again.open_closed(0, &path).unwrap();
-                again.files = trashed.torrent("t").slots.open(vec![(Some(path.clone()), opened)]);
-                new = Box::new(again);
-            }
-            new.pwrite_all(0, 0, &[2; 10]).unwrap();
-            assert!(old.pwrite_all(0, 0, &[3; 10]).is_err(), "out={out}: written late");
-            assert!(old.pwrite_all(0, 50, &[3; 10]).is_err(), "out={out}: written late where nothing was");
-            assert!(old.pread_exact(0, 0, &mut [0; 10]).is_err(), "out={out}: read late");
-            let mut read = [0; 10];
-            new.pread_exact(0, 0, &mut read).unwrap();
-            assert_eq!(read, [2; 10], "out={out}: the newer part");
-            assert!(parts.join("t/0").is_file(), "out={out}: on disk");
-            new.pread_exact(0, 50, &mut read).unwrap();
-            assert_eq!(read, [1; 10], "out={out}: nothing kept of the late one");
-            drop(new);
-            assert_eq!(trashed.put_back("t", &[(0, path)]).written, BTreeSet::new(), "out={out}: not back yet");
-        }
-    }
-
-    /// A file in the Trash that can't be opened where it went after a restart (the Trash out of
-    /// reach) is remembered: its undo checks the torrent, which has less of it than is on disk.
-    #[test]
-    fn a_file_that_cannot_be_opened_in_the_trash_makes_its_undo_check() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
-        let path = dir.path().join("a.bin");
-        std::fs::write(&path, [1; 10]).unwrap();
-        let away = take(&trashed, &trash, dir.path(), &path).to.unwrap();
-        let mode = std::fs::metadata(&away).unwrap().permissions();
-        std::fs::set_permissions(&away, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let after_a_restart = trashed.storage("t", Layout::new(dir.path().to_owned(), Some(&[])), dir.path().to_owned());
-        assert!(matches!(after_a_restart.open_closed(0, &path), Ok(Opened::Closed(None))));
-        std::fs::set_permissions(&away, mode).unwrap();
-        std::fs::rename(&away, &path).unwrap();
-        let put = trashed.put_back("t", &[(0, path.clone())]);
-        assert_eq!(put.unread, BTreeSet::from([0]));
-        assert!(needs_check(&[], &[0], |_| 0, &put));
-    }
-
     /// A symbolic link at a torrent file's path is never the file (#267): opening it fails, to make
     /// it as well, so nothing is made where a dangling one points; and it isn't where the file was
     /// opened, even a link to that file, so a write fails rather than go through it.
@@ -1364,12 +906,6 @@ mod tests {
         let mut files = trashed.storage("t", Layout::new(dir.path().to_owned(), None), dir.path().to_owned());
         files.files = trashed.torrent("t").slots.open(vec![(Some(path.clone()), Opened::Open(open(&real, false).unwrap()))]);
         assert_eq!(trashed.replaced("t"), BTreeSet::from([0]), "not the file at its path");
-        // Looked at on disk, as one a move took.
-        trashed.torrent("t").lock().taken.insert(path.clone());
-        trashed.torrent("t").any.store(true, Ordering::SeqCst);
-        files.pwrite_all(0, 0, &[2; 10]).unwrap();
-        assert_eq!(std::fs::read(&real).unwrap(), [1; 100], "not written through the link");
-        assert!(trashed.torrent("t").slots.parts().has(0), "kept aside");
     }
 
     /// S2 of #217's fifth review: a panic while a Move to Trash holds the torrent's files still (the
@@ -1399,25 +935,5 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap()[..10], [2; 10]);
         take(&trashed, &bin(dir.path()), dir.path(), &path);
         assert!(!path.exists());
-    }
-
-    /// The checks an undo of a Move to Trash makes: only a file back that librqbit has more of than
-    /// as it went, with nothing written into it.
-    #[test]
-    fn an_undo_checks_only_a_file_back_with_more_than_could_go_into_it() {
-        let had = [(0, 100), (1, 100)];
-        let now = |i: usize| [100, 150][i];
-        let none = PutBack::default();
-        assert!(needs_check(&had, &[0, 1], now, &none), "more of file 1, nothing written");
-        assert!(
-            !needs_check(&had, &[0, 1], now, &PutBack { written: BTreeSet::from([1]), ..Default::default() }),
-            "what came went into it"
-        );
-        assert!(!needs_check(&had, &[0], now, &none), "file 1 isn't back");
-        assert!(!needs_check(&had, &[0, 1], |_| 50, &none), "less: read where it went, it's a check's own");
-        assert!(!needs_check(&[], &[0, 1], now, &none), "nothing known as it went");
-        let unread = PutBack { unread: BTreeSet::from([0]), ..Default::default() };
-        assert!(needs_check(&[], &[0, 1], |_| 0, &unread), "file 0 couldn't be read where it went");
-        assert!(!needs_check(&[], &[1], |_| 0, &unread), "but it isn't back");
     }
 }

@@ -137,12 +137,6 @@ pub(super) enum Message {
     DefaultFolder(Option<AbsolutePath>, oneshot::Sender<()>),
     /// What a look at the default folder found (`default_folder.rs`).
     DefaultFolderLook(default_folder::Report),
-    /// What a look at torrent `hash`'s open files found (`letgo.rs`): `files` (by index), which a
-    /// Move to Trash took, are gone from the Trash, still open.
-    Gone {
-        hash: String,
-        files: BTreeSet<usize>,
-    },
     /// Record what's missing, pause what runs, stop the session, answer and end: with the pieces
     /// each torrent has, and (a restart for new settings) the Moves it didn't start.
     Stop(Ending, oneshot::Sender<(Vec<(String, u64)>, steps::Carried)>),
@@ -258,7 +252,7 @@ pub(super) struct Actor {
     /// what undoes it is kept); `.1` says it did.
     #[cfg(test)]
     pub(super) crash_before_forgetting: Option<(TorrentId, Arc<std::sync::atomic::AtomicBool>)>,
-    /// Where a test kills it while it lets go of a file gone from the Trash; `.1` says it did.
+    /// Where a test kills it while it lets go of a file; `.1` says it did.
     #[cfg(test)]
     pub(super) crash_letting_go: Option<(letgo::CrashAt, Arc<std::sync::atomic::AtomicBool>)>,
     /// A test's gate on letting go: while it's held, what's to be let go of is written ahead and
@@ -438,12 +432,7 @@ impl Actor {
         });
         let (gone_looks, looked) = watch::channel(letgo::Wanted::new());
         let gone_inbox = inbox.clone();
-        letgo::watch(guard.trashed().clone(), looked, size_check_every, move |hash, files| {
-            let Some(inbox) = gone_inbox.upgrade() else { return false };
-            // A full inbox drops the news; the next look finds the files again.
-            let _ = inbox.try_send(Message::Gone { hash, files });
-            true
-        });
+        letgo::watch(guard.trashed().clone(), looked, size_check_every, move || gone_inbox.upgrade().is_some());
         let (default_folder, folder) = watch::channel(default_folder::Folder::new());
         let folder_inbox = inbox.clone();
         default_folder::watch(looks.default_folder, folder, poll_every, move |report| {
@@ -625,9 +614,7 @@ impl Actor {
                     self.watch_destinations();
                     self.size_check_all().await;
                     self.keep_rounds();
-                    // A file emptied from the Trash since is in it no more, and what's kept of it goes.
-                    self.follow_trash();
-                    // One gone from the Trash is let go of once its torrent can be taken out (#234).
+                    // A file let go of is, once its torrent can be taken out.
                     self.let_go().await;
                     #[cfg(test)]
                     if self.killed {
@@ -808,7 +795,6 @@ impl Actor {
             Message::Space(report) => self.space(report),
             Message::DefaultFolder(folder, reply) => self.default_folder(folder, reply),
             Message::DefaultFolderLook(report) => self.default_folder_found(report),
-            Message::Gone { hash, files } => self.found_gone(&hash, files).await,
             // Applied at the next poll.
             Message::Seeding(limits) => self.seeding = limits,
             Message::Undo(reply) => self.undo(reply).await,
@@ -1783,12 +1769,12 @@ impl Actor {
         let progress = if torrent.lifecycle.phase.unchecked() { &[] } else { torrent.polled.file_progress.as_slice() };
         let mut files = files(record, progress, &missing(&torrent.lifecycle.phase));
         uncount(&mut files, torrent);
-        // One in the Trash for an undo, nothing at its path: librqbit reads it where it went, for its
-        // undo, but it shows none of it (#276), as it would download it all set Normal.
-        let in_trash = self.guard.trashed().in_trash(&record.info_hash);
+        // One let go of, nothing at its path (moved to the Trash, say), shows none of it (#276): its
+        // pieces go once its torrent is added back, and it would download it all set Normal.
+        let letting = record.letting_go.files();
         for f in &mut files {
             f.on_disk = torrent.there.contains(&f.index);
-            if in_trash.contains(&f.index) && !f.on_disk {
+            if letting.contains(&f.index) && !f.on_disk {
                 f.progress_bytes = 0;
             }
         }
@@ -1826,12 +1812,10 @@ impl Actor {
             .filter(|(_, p)| *p == Priority::Normal)
             .map(|(i, _)| i)
             .collect();
-        let in_trash = self.guard.trashed().in_trash(&record.info_hash);
         let torrent = self.torrents.get_mut(&id).expect("just found");
         // A file missing, set Off: librqbit would offer its pieces once the torrent runs, and can't
-        // read them once the file is closed. It's let go of, written ahead, before it starts again;
-        // not one in the Trash, which librqbit reads where it went.
-        let set_off = |i: &usize| priority == Priority::Off && indices.contains(i) && !back.contains(i) && !in_trash.contains(i);
+        // read them once the file is closed. It's let go of, written ahead, before it starts again.
+        let set_off = |i: &usize| priority == Priority::Off && indices.contains(i) && !back.contains(i);
         let gone: machine::letgo::Pieces = match &torrent.record.info {
             Some(info) => missing(&torrent.lifecycle.phase)
                 .into_iter()
@@ -1846,7 +1830,7 @@ impl Actor {
             torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
         }
         if priority == Priority::Normal {
-            self.normal_again(id, indices, &in_trash, back);
+            self.normal_again(id, indices, back);
         }
         self.save();
         self.carry_out(id).await
@@ -1854,13 +1838,13 @@ impl Actor {
 
     /// Torrent `id`'s files `indices`, set Normal, that aren't at their paths (#276): each is
     /// downloaded from nothing, not Missing files, which is for a file it gets that vanished.
-    /// librqbit's pieces of each are let go of, as they're of a file that's elsewhere (in the Trash
-    /// for an undo, `in_trash`, which it reads there) or gone. So is one it has open with none had
+    /// librqbit's pieces of each are let go of, as they're of a file that's elsewhere or gone. So is
+    /// one it has open with none had
     /// (#402), or it would be downloaded into where it went, not at its path. Each is made at its path
     /// as the torrent is let run (its grant, #374), and the size check doesn't find it missing
     /// meanwhile, none of it had. Not one just put `back` by an undo, nor one missing already: that
     /// one vanished while it was Normal.
-    fn normal_again(&mut self, id: TorrentId, indices: &[usize], in_trash: &BTreeSet<usize>, back: &BTreeSet<usize>) {
+    fn normal_again(&mut self, id: TorrentId, indices: &[usize], back: &BTreeSet<usize>) {
         let Some(torrent) = self.torrents.get(&id) else { return };
         let Some(info) = &torrent.record.info else { return };
         if files::unavailable(&torrent.record.destination).is_some() {
@@ -1880,7 +1864,7 @@ impl Actor {
         let open = self.guard.trashed().open(&hash);
         let gone: machine::letgo::Pieces = again
             .iter()
-            .filter(|i| in_trash.contains(i) || open.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
+            .filter(|i| open.contains(i) || have.get(**i).is_some_and(|had| *had > 0))
             .map(|&i| (i, (info.files[i].pieces.start, info.files[i].pieces.end)))
             .collect();
         if !gone.is_empty() {
@@ -2309,13 +2293,6 @@ impl Actor {
     /// Whether torrent `id`'s lifecycle has a check under way, whatever clients are shown.
     pub(super) fn checking(&self, id: TorrentId) -> bool {
         self.torrents.get(&id).is_some_and(|t| t.lifecycle.status(false) == Some(Status::Checking))
-    }
-
-    /// Torrent `id` as if librqbit had said, at its last poll, it has `bytes` of file `file`.
-    pub(super) fn fake_progress(&mut self, id: TorrentId, file: usize, bytes: u64) {
-        if let Some(p) = self.torrents.get_mut(&id).and_then(|t| t.polled.file_progress.get_mut(file)) {
-            *p = bytes;
-        }
     }
 
     /// Torrent `id` as if librqbit had a peer sending and taking `rate` bytes a second, till the next

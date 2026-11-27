@@ -151,7 +151,7 @@ pub struct Saved {
     /// it was whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stash: Option<Stash>,
-    /// Letting go of its files gone from the Trash (#234, [`letgo`]): each step written ahead, so
+    /// Letting go of its files gone from their paths (ADR 0014, #276, [`letgo`]): each step written ahead, so
     /// a start finishes one a crash cut short.
     #[serde(default, skip_serializing_if = "is_holding")]
     pub letting_go: letgo::State,

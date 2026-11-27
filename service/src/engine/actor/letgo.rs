@@ -1,20 +1,17 @@
-//! Letting go of a file gone from the Trash (#234, `machine::letgo`): the files Moves to Trash took
-//! that are gone from the Trash while librqbit has them open are looked for off the actor, in a
-//! thread per torrent with a timeout, as the destinations' disks are (`looks.rs`), every size check;
-//! what's found comes back as a message. They're written ahead in their torrent's record, then
-//! closed, which frees their space, without waiting on librqbit (one it's reading is closed at a
-//! later look). Once the torrent can be taken out of librqbit, it's kept aside (librqbit's `.bitv`,
-//! as for Undo), taken out of librqbit, and what librqbit saved of its pieces is put back without
-//! those files' pieces; then it's added back as any torrent Ready and out of librqbit is (#45,
-//! [`lib::reconcile`]): stopped, with the pieces it had, resuming ([`lib::Lib::Resuming`]): its
-//! lifecycle hears nothing until librqbit has read the few pieces it samples, so its row stays as
-//! it was, then it runs as wanted. Its peers drop once and connect again, and nothing offers those
-//! pieces any more: librqbit can't withdraw a piece it has, and drops a peer whose piece it can't
-//! read.
+//! Letting go of a file (`machine::letgo`): one set Off that's gone from its path (moved to the
+//! Trash by a Move to Trash, ADR 0014; deleted or moved away by hand, #276) is written ahead in its
+//! torrent's record, then closed. Once the torrent can be taken out of librqbit, it's kept aside
+//! (librqbit's `.bitv`, as for Undo), taken out of librqbit, and what librqbit saved of its pieces
+//! is put back without those files' pieces; then it's added back as any torrent Ready and out of
+//! librqbit is (#45, [`lib::reconcile`]): stopped, with the pieces it had, resuming
+//! ([`lib::Lib::Resuming`]): its lifecycle hears nothing until librqbit has read the few pieces it
+//! samples, so its row stays as it was, then it runs as wanted. Its peers drop once and connect
+//! again, and nothing offers those pieces any more: librqbit can't withdraw a piece it has, and
+//! drops a peer whose piece it can't read.
 //!
-//! A file a Move to Trash takes that librqbit has open as another file than the one at its path
-//! (replaced by hand) is let go of the same way as it goes ([`Actor::off_replaced`], #268): its
-//! pieces were of the file librqbit has open, not of what goes to the Trash.
+//! The files a torrent misses or lets go of are looked at off the actor, in a thread per torrent
+//! with a timeout, as the destinations' disks are (`looks.rs`): one deleted for good is closed
+//! there, so its space is freed (#244).
 //!
 //! A crash between the steps is finished at the next start ([`clear_at_start`]), before any torrent
 //! is added: its pieces are cleared in what librqbit saved, or put back from what was kept.
@@ -52,23 +49,18 @@ pub(in super::super) enum CrashAt {
 pub(in super::super) type Wanted = BTreeMap<String, BTreeSet<usize>>;
 
 /// Looks at the torrents `wanted` names every `every`, each in a thread of its own (an `fstat` of
-/// an open file can hang on a network volume that stops answering), and tells `report` what it
-/// found: the files of each a Move to Trash took that are gone from the Trash, still open. Each look
-/// first closes the files the torrent is missing (or lets go of, set Off while missing) that were
-/// deleted by hand, there and then: their space is freed at once, and the actor never touches the
-/// disk for it. A look that hangs finds nothing until it answers.
+/// an open file can hang on a network volume that stops answering), while `listening`: each look
+/// closes the files the torrent is missing (or lets go of) that were deleted by hand, there and
+/// then, so their space is freed at once, and the actor never touches the disk for it.
 pub(super) fn watch(
     trashed: Trashed,
     wanted: tokio::sync::watch::Receiver<Wanted>,
     every: Duration,
-    report: impl Fn(String, BTreeSet<usize>) -> bool + Send + Sync + 'static,
+    listening: impl Fn() -> bool + Send + Sync + 'static,
 ) {
     let look: Arc<dyn Fn(&String, &BTreeSet<usize>) -> BTreeSet<usize> + Send + Sync> =
         Arc::new(move |hash, closable| trashed.look(hash, closable));
-    looks::watch(look, wanted, every, move |hash, found| match found {
-        looks::Looked::Read(gone) => gone.is_empty() || report(hash, gone),
-        looks::Looked::Stalled => true,
-    });
+    looks::watch(look, wanted, every, move |_, _| listening());
 }
 
 impl Actor {
@@ -84,8 +76,7 @@ impl Actor {
     /// now; or ends that, if librqbit has none of their pieces any more.
     async fn let_go_of(&mut self, id: TorrentId) {
         let Some(state) = self.torrents.get(&id).map(|t| t.record.letting_go.clone()) else { return };
-        // Closed, whichever found it first: a look of the files gone from the Trash, or a size check
-        // of the files set Off that aren't at their paths ([`Actor::off_gone`]).
+        // Closed already: by a Move to Trash, or as a size check found it ([`Actor::off_gone`]).
         #[cfg(test)]
         if matches!(state, letgo::State::Gone { .. }) && self.crashes_at(CrashAt::Closing).await {
             return;
@@ -110,7 +101,7 @@ impl Actor {
                         self.add_back_without(id, &pieces, &stash).await;
                     }
                 }
-                None => warn!(id, "couldn't keep the torrent aside to let go of a file gone from the Trash: tried again later"),
+                None => warn!(id, "couldn't keep the torrent aside to let go of a file: tried again later"),
             },
             Some(letgo::Do::AddBack { pieces, stash }) => self.add_back_without(id, &pieces, &stash).await,
             // Only at a start, before any torrent is added.
@@ -118,33 +109,9 @@ impl Actor {
         }
     }
 
-    /// A look found the files `gone` (by index) of torrent `hash` a Move to Trash took gone from the
-    /// Trash, still open. Those set Off are written ahead, then closed; one it gets that's gone is
-    /// Missing files, the size check's. Then it's added back without them, if it can be now.
-    pub(super) async fn found_gone(&mut self, hash: &str, gone: BTreeSet<usize>) {
-        let Some(torrent) = self.by_hash(hash) else { return };
-        let (id, record) = (torrent.id, &torrent.record);
-        let Some(info) = record.info.as_ref().filter(|_| torrent.lib.torrent().is_some()) else { return };
-        let pieces: Pieces = gone
-            .iter()
-            .filter(|&&i| !record.gets(i))
-            .filter_map(|&i| Some((i, info.files.get(i)?.pieces.clone())))
-            .map(|(i, r)| (i, (r.start, r.end)))
-            .collect();
-        if pieces.is_empty() {
-            return;
-        }
-        let gone: BTreeSet<usize> = pieces.keys().copied().collect();
-        self.letting_go(id, &letgo::Event::Found(pieces));
-        // Never waits: one librqbit is reading now is found, and closed, at a later look.
-        self.guard.trashed().let_go(hash, &gone);
-        self.let_go_of(id).await;
-    }
-
     /// The files of torrent `id` set Off that librqbit has some of and that aren't at their paths any
-    /// more (moved away by hand, to Finder's Trash say, or deleted), as the size check finds them: not
-    /// one in the Trash for an undo, which librqbit reads where it went. Each is let go of, written
-    /// ahead, then closed, as one gone from the Trash is (#276): librqbit would count and offer its
+    /// more (moved away by hand, to Finder's Trash say, or deleted), as the size check finds them.
+    /// Each is let go of, written ahead, then closed, as one a Move to Trash took is (#276): librqbit would count and offer its
     /// pieces, read through the file it has open, or not at all once that's closed. Only while it's
     /// Ready or Missing files with nothing on its lane: a Delete, a Move to Trash or a move takes
     /// files away on purpose. As the size check found them, which looks at every file.
@@ -156,12 +123,12 @@ impl Actor {
         }
         let (record, have) = (&torrent.record, super::progress(torrent));
         let Some(info) = &record.info else { return };
-        let (in_trash, letting) = (self.guard.trashed().in_trash(&record.info_hash), record.letting_go.files());
+        let letting = record.letting_go.files();
         let pieces: Pieces = info
             .files
             .iter()
             .enumerate()
-            .filter(|(i, f)| !f.padding && !record.gets(*i) && !in_trash.contains(i) && !letting.contains(i))
+            .filter(|(i, f)| !f.padding && !record.gets(*i) && !letting.contains(i))
             .filter(|(i, _)| have.get(*i).is_some_and(|had| *had > 0))
             .filter(|(i, _)| !torrent.there.contains(i))
             .map(|(i, f)| (i, (f.pieces.start, f.pieces.end)))
@@ -175,36 +142,27 @@ impl Actor {
         self.guard.trashed().let_go(&hash, &gone);
     }
 
-    /// The files `files` (by index) of torrent `id`, set Off, that a Move to Trash is about to take
-    /// and that librqbit has open as other files than the ones at their paths (replaced by hand,
-    /// [`Trashed::replaced`]): librqbit's pieces of them are of the files it has open, not of what
-    /// goes to the Trash, so each is let go of, written ahead, then closed, as one gone from the
-    /// Trash is: it would count and offer them. Which of them. Never waits: one librqbit is reading
-    /// now is closed as it's added back, once the Move to Trash is over.
-    pub(super) fn off_replaced(&mut self, id: TorrentId, files: &[usize]) -> BTreeSet<usize> {
-        let Some(torrent) = self.torrents.get(&id) else { return BTreeSet::new() };
-        let Some(info) = &torrent.record.info else { return BTreeSet::new() };
-        let hash = torrent.record.info_hash.clone();
-        let replaced = self.guard.trashed().replaced(&hash);
+    /// The files `files` (by index) of torrent `id` a Move to Trash took, closed as they went (ADR
+    /// 0014): their pieces are let go of, written ahead, so nothing reads or offers them from the
+    /// Trash. Its undo checks the torrent, which reads them back at their paths.
+    pub(super) fn let_go_of_trashed(&mut self, id: TorrentId, files: &BTreeSet<usize>) {
+        let Some(torrent) = self.torrents.get(&id) else { return };
+        let Some(info) = &torrent.record.info else { return };
         let pieces: Pieces = files
             .iter()
-            .filter(|i| replaced.contains(i) && !torrent.record.gets(**i))
+            .filter(|i| !torrent.record.gets(**i))
             .filter_map(|&i| Some((i, info.files.get(i).filter(|f| !f.padding)?.pieces.clone())))
             .map(|(i, r)| (i, (r.start, r.end)))
             .collect();
-        if pieces.is_empty() {
-            return BTreeSet::new();
+        if !pieces.is_empty() {
+            self.letting_go(id, &letgo::Event::Found(pieces));
         }
-        let replaced: BTreeSet<usize> = pieces.keys().copied().collect();
-        self.letting_go(id, &letgo::Event::Found(pieces));
-        self.guard.trashed().let_go(&hash, &replaced);
-        replaced
     }
 
     /// Whether librqbit has any piece of the files torrent `id` lets go of: a check, or an add again,
     /// since may have dropped them all, and one out of librqbit offers none (it's checked in full
     /// when it comes back). One set Normal again counts with none had too: what librqbit has open of
-    /// it, or reads in the Trash, isn't the file at its path, and only an add again opens that (#402).
+    /// it isn't the file at its path, and only an add again opens that (#402).
     /// So does one set Off since with a file at its path: set Normal yet again, it's downloaded there.
     fn offered(&self, id: TorrentId, state: &letgo::State) -> bool {
         let files = match state {
@@ -271,7 +229,7 @@ impl Actor {
                     return;
                 }
                 if let Err(e) = self.take_out(id).await {
-                    return warn!(id, error = %e, "couldn't take the torrent out of librqbit to let go of a file gone from the Trash");
+                    return warn!(id, error = %e, "couldn't take the torrent out of librqbit to let go of a file");
                 }
                 // librqbit's last save of its pieces lands in the stash, which shares the file.
                 bitv::wait_for(&[(stash.bitv(), had)]).await;
@@ -285,14 +243,14 @@ impl Actor {
         }
         let hash = self.torrents[&id].record.info_hash.clone();
         if let Err(e) = without(stash, pieces, &bitv::path(&self.session_folder(), &hash)) {
-            warn!(id, error = %e, "couldn't put back the pieces of a torrent letting go of a file gone from the Trash: tried again later");
+            warn!(id, error = %e, "couldn't put back the pieces of a torrent letting go of a file: tried again later");
             return;
         }
         // Listed with what it's added back with while librqbit samples it, not what it had.
         self.polled_as_saved(id);
         let added = self.carry_out(id).await;
         if let Err(e) = &added {
-            warn!(id, error = ?e, "couldn't add the torrent back once it let go of a file gone from the Trash");
+            warn!(id, error = ?e, "couldn't add the torrent back once it let go of a file");
         }
         self.letting_go(id, if added.is_ok() { &letgo::Event::Cleared } else { &letgo::Event::Failed });
         // The stash isn't named any more.
@@ -320,7 +278,7 @@ impl Actor {
 
 /// Writes ahead the let-go of the files of `record` set Off, with pieces in `saved`, with nothing at
 /// their paths; `next` then clears them. A destination out of reach says nothing of its files.
-fn off_gone_at_start(record: &mut Record, saved: &Path, in_trash: &BTreeSet<usize>) {
+fn off_gone_at_start(record: &mut Record, saved: &Path) {
     let Some(info) = &record.info else { return };
     if !matches!(record.letting_go, letgo::State::Holding) || crate::engine::files::unavailable(&record.destination).is_some() {
         return;
@@ -333,7 +291,7 @@ fn off_gone_at_start(record: &mut Record, saved: &Path, in_trash: &BTreeSet<usiz
         .files
         .iter()
         .enumerate()
-        .filter(|(i, f)| !f.padding && !record.gets(*i) && !in_trash.contains(i) && had[*i] > 0)
+        .filter(|(i, f)| !f.padding && !record.gets(*i) && had[*i] > 0)
         .filter(|(i, _)| paths.get(*i).is_some_and(|p| crate::engine::files::stamp(p).is_none()))
         .map(|(i, f)| (i, (f.pieces.start, f.pieces.end)))
         .collect();
@@ -354,13 +312,13 @@ fn without(stash: &Stash, pieces: &Pieces, saved: &Path) -> anyhow::Result<()> {
 /// librqbit saved, or, taken out of librqbit already, put back from what was kept without them.
 /// Either way it's then added as any torrent is, with the pieces it has.
 ///
-/// A file set Off that librqbit saved pieces of and that's no longer at its path (deleted or moved
-/// away while the service was stopped; not one in the Trash for an undo, `in_trash`) is let go of
-/// here too (#276), as `off_gone` does at a size check: librqbit would offer them until then.
-pub(in super::super) fn clear_at_start(records: &mut [Record], session: &Path, in_trash: impl Fn(&str) -> BTreeSet<usize>) {
+/// A file set Off that librqbit saved pieces of and that's no longer at its path (deleted, moved
+/// away, or moved to the Trash by a Move to Trash a crash cut short) is let go of here too (#276),
+/// as `off_gone` does at a size check: librqbit would offer them until then.
+pub(in super::super) fn clear_at_start(records: &mut [Record], session: &Path) {
     for record in records {
         let saved = bitv::path(session, &record.info_hash);
-        off_gone_at_start(record, &saved, &in_trash(&record.info_hash));
+        off_gone_at_start(record, &saved);
         let cleared = match letgo::next(&record.letting_go, letgo::World::Starting { saved: saved.exists() }) {
             None => continue,
             Some(letgo::Do::ClearSaved { pieces }) => bitv::clear(&saved, pieces.values().copied()).map_err(anyhow::Error::from),
@@ -370,7 +328,7 @@ pub(in super::super) fn clear_at_start(records: &mut [Record], session: &Path, i
         match cleared {
             Ok(()) => record.letting_go = letgo::decide(&record.letting_go, &letgo::Event::Cleared),
             // librqbit samples what it saved, and checks it in full on a piece of a file that's gone.
-            Err(e) => warn!(hash = record.info_hash, error = %e, "couldn't clear the pieces of a file gone from the Trash"),
+            Err(e) => warn!(hash = record.info_hash, error = %e, "couldn't clear the pieces of a file let go of"),
         }
     }
 }
