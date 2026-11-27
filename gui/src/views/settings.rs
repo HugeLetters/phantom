@@ -296,7 +296,7 @@ fn editor(
                 ),
             };
             let toggle = join_control(looks[1], THEME, "Theme", theme_joined);
-            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new());
+            let theme = ui.halves_row(&format!("{EDIT}-theme"), "Theme", theme, looks, Some(toggle), Vec::new(), false);
             let header = ui.halves_header(looks[0].half_heading(false), looks[1].half_heading(true), looks);
             let mut lines = vec![(header, false), (theme, false)];
             let of = preset.light.theme.settings();
@@ -460,6 +460,13 @@ fn same_row(
             (cells, vec![light, dark])
         }
     };
+    // A dropdown whose longest option doesn't fit beside the label and toggle gets a line of its own.
+    let stacked = match &setting.kind {
+        Kind::Choice { choices, show: Show::Dropdown, .. } => {
+            !ui.dropdown_fits_beside(&choices.iter().map(|c| c.label).collect::<Vec<_>>())
+        }
+        _ => false,
+    };
     let notes = sides
         .iter()
         .filter_map(|&side| {
@@ -474,6 +481,7 @@ fn same_row(
         looks,
         Some(join_control(looks[1], key, setting.label, row.joined)),
         notes,
+        stacked,
     )
 }
 

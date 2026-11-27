@@ -4528,6 +4528,58 @@ fn the_look_sheets_choices_show_their_labels_whole() {
     }
 }
 
+/// A dropdown's value is never cut or shortened: in the Look sheet, Corners's and Motion's
+/// triggers, joined and in both halves, show their whole value ("Follow Reduce Motion"), inside
+/// the trigger and the window, at Settings' 480 pt minimum, 640 and 960, in both Tones.
+#[test]
+fn the_look_sheets_dropdowns_show_their_values_whole() {
+    let font = rune::TextStyle { line_height: 16.0, ..Look::build(LookPreset::fresh().get(Appearance::Light)).ui.tokens().ty.ui_medium };
+    for dark in [false, true] {
+        for width in [480.0, 640.0, 960.0] {
+            for split in [false, true] {
+                let mut d = appearance_tab();
+                d.settings.set_system_dark(dark);
+                d.settings.set_viewport((width, 900.0), 2.0);
+                d.settle();
+                press(&mut d, "active-edit");
+                if split {
+                    for key in ["corners", "motion"] {
+                        press(&mut d, &format!("edit-{key}-split"));
+                    }
+                }
+                let sides: &[&str] = if split { &["light", "dark"] } else { &["both"] };
+                for (key, shown) in [("corners", "Small"), ("motion", "Follow Reduce Motion")] {
+                    for side in sides {
+                        let control = format!("edit-{key}-{side}");
+                        let elements = d.settings.elements();
+                        let find = |end: String| {
+                            elements.iter().find(|e| e.path.ends_with(&end) && !e.exiting).unwrap_or_else(|| panic!("no {end}"))
+                        };
+                        let (value, trigger) = (find(format!("{control}-trigger/value")), find(format!("{control}-trigger")));
+                        let at = format!("at {width} pt, dark {dark}, split {split}: {control}");
+                        assert_eq!(value.text.as_deref(), Some(shown), "{at}");
+                        let (needs, _) = rune::text::measure(shown, &[], font, None);
+                        assert!(needs <= value.rect[2] + 0.5, "{at}: {shown:?} needs {needs} but its box is {} wide", value.rect[2]);
+                        let [x, _, w, _] = value.rect;
+                        let [tx, _, tw, _] = trigger.rect;
+                        assert!(
+                            tx - 0.5 <= x && x + w <= tx + tw + 0.5,
+                            "{at}: the value {:?} inside its trigger {:?}",
+                            value.rect,
+                            trigger.rect
+                        );
+                        assert!(tx >= 0.0 && tx + tw <= width, "{at}: the trigger {:?} inside the window", trigger.rect);
+                        // The half is what cuts it: its page ends where the other's begins.
+                        let half = find(format!("edit-{key}-{}", if *side == "dark" { "right" } else { "left" }));
+                        let [hx, _, hw, _] = half.rect;
+                        assert!(tx + tw <= hx + hw + 0.5, "{at}: the trigger {:?} inside its half {:?}", trigger.rect, half.rect);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A choice's dropdown works from the keyboard: Tab focuses it, Space or Return opens its list,
 /// the arrow keys move in it, Return picks and Escape closes without changing the setting.
 #[test]

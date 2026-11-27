@@ -263,6 +263,17 @@ impl Ui {
         el().key(key).child(menu)
     }
 
+    /// Whether a dropdown of `options` beside a half's toggle fits its trigger (its longest option,
+    /// whole) at Settings' narrowest window; if not, its row is stacked ([`Ui::halves_row`]). It
+    /// doesn't depend on the window's live width, so a row never changes shape as it's dragged.
+    pub fn dropdown_fits_beside(&self, options: &[&str]) -> bool {
+        let widest = options.iter().map(|o| rune::text::measure(o, &[], self.k.ty.ui_medium, None).0).fold(0.0, f32::max);
+        // The inline trigger: 8 before the text, 4 + the chevron's 16 + 4 after.
+        let needs = widest + 32.0;
+        let half = (SETTINGS_MIN_WIDTH - 2.0 * self.spacing.s7 - 2.0) / 2.0;
+        needs <= half - 2.0 * self.spacing.s4 - HALF_TOGGLE - self.spacing.s6
+    }
+
     /// A chip of a Look Preset's half (or both): its glyph over its look, 22 pt square, keyed `key`.
     /// `on_apply`, if there's one, makes it a button, a press calling it; in use it's outlined in
     /// the half's accent and a press does nothing. Without `on_apply` it only shows. Either way its
@@ -465,26 +476,49 @@ impl Ui {
     /// half's line, `notes` in their tones. The columns are the same width in every row, so they
     /// line up. The row is keyed `key`, its halves `<key>-left` and `<key>-right`, its controls'
     /// cells `<key>-both-cell` while joined, else `<key>-light-cell` and `<key>-dark-cell`.
-    pub fn halves_row(&self, key: &str, label: &str, cells: Halves, looks: [&Ui; 2], toggle: Option<El>, notes: Vec<(String, Tone)>) -> El {
+    ///
+    /// `stacked` puts each half's control on a line under the label (left) and the toggle (right),
+    /// where a control too wide to sit beside them ([`Ui::dropdown_fits_beside`]) has the half's
+    /// whole width.
+    #[allow(clippy::too_many_arguments)]
+    pub fn halves_row(
+        &self,
+        key: &str,
+        label: &str,
+        cells: Halves,
+        looks: [&Ui; 2],
+        toggle: Option<El>,
+        notes: Vec<(String, Tone)>,
+        stacked: bool,
+    ) -> El {
         let [light, dark] = looks;
         let cell = |content: Option<El>, key: String| row().key(key).grow(1.0).min_w(0.0).min_h(44.0).center_y().children(content);
         let (left_cell, right_cell) = match cells {
             Halves::Joined(control) => (cell(Some(control), format!("{key}-both-cell")), cell(None, format!("{key}-dark-cell"))),
             Halves::Split(a, b) => (cell(a, format!("{key}-light-cell")), cell(b, format!("{key}-dark-cell"))),
         };
-        let line = row()
-            .w_full()
-            .gap(self.spacing.s6)
-            .center_y()
-            .child(text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base).w(HALF_LABEL).wrap())
-            .child(left_cell);
+        let name = text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base);
+        let line = match stacked {
+            true => {
+                col().w_full().gap(self.spacing.s1).child(row().w_full().min_h(STACK_HEAD).center_y().child(name.wrap())).child(left_cell)
+            }
+            false => row().w_full().gap(self.spacing.s6).center_y().child(name.w(HALF_LABEL).wrap()).child(left_cell),
+        };
         let mut left = col().w_full().gap(self.spacing.s1).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { light.tokens().c.danger.fg } else { light.tone_color(tone) };
             left = left
                 .child(text(note).key(format!("{key}-refused")).font(light.tokens().ty.text_small).color(ink).wrap().pb(self.spacing.s2));
         }
-        let right = row().w_full().gap(self.spacing.s6).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
+        let toggle = el().w(HALF_TOGGLE).center().children(toggle);
+        let right = match stacked {
+            true => col()
+                .w_full()
+                .gap(self.spacing.s1)
+                .child(row().w_full().min_h(STACK_HEAD).center_y().justify_end().child(toggle))
+                .child(right_cell),
+            false => row().w_full().gap(self.spacing.s6).center_y().child(right_cell).child(toggle),
+        };
         self.halves_line(key, left, right, [light.tokens().c.bg_base, dark.tokens().c.bg_base])
     }
 
@@ -905,6 +939,10 @@ const PREVIEW: f32 = 24.0;
 /// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
 const HALF_LABEL: f32 = 96.0;
 const HALF_TOGGLE: f32 = 46.0;
+/// The line of a stacked row's label and toggle ([`Ui::halves_row`]).
+const STACK_HEAD: f32 = 36.0;
+/// Settings' narrowest window.
+pub const SETTINGS_MIN_WIDTH: f32 = 480.0;
 
 /// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's
 /// (and "+ Add image…") as tall as its drawing, name and chips need; a designed pair's, with no
