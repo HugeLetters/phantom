@@ -675,7 +675,7 @@ fn every_notice_line() -> Vec<String> {
     let mut shorts: Vec<String> =
         keys.into_iter().chain(["app_icon", "app_icon_settings"]).map(|k| d::setting_short(k).to_owned()).collect();
     shorts.extend(
-        crate::theme::phantom::palette::settings()
+        crate::theme::phantom::colors::settings()
             .flat_map(|s| [s.label.to_owned(), format!("{} (Light)", s.label), format!("{} (Dark)", s.label)]),
     );
     shorts.push("Edit of the Active look".into());
