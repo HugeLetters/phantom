@@ -1340,18 +1340,28 @@ impl Model {
         }
     }
 
-    /// With its destination unavailable, it's stopped in librqbit, remembering whether it was running; its missing files are
-    /// forgotten, as they're out of reach, and none of them is shown counted, as before it went (#366).
-    /// A check under way is lost with them: its returning files are the same.
+    /// With its destination unavailable, it's stopped in librqbit, remembering whether it was running; none of its
+    /// missing files is shown counted, as before it went (#366). It remembers them, to judge once it's back (#464):
+    /// those a check under way was of, or that a cancelled one left, count as back if they're there.
     fn destination_gone(&mut self, pack: usize) {
         self.unavailable[pack] = true;
+        let disk = self.disk[pack];
         if let Some(p) = self.pack_torrent(pack) {
             p.unavailable = true;
-            for f in std::mem::take(&mut p.missing).into_keys() {
+            for &f in p.missing.keys() {
                 p.have[f] = false;
             }
-            p.uncounted.extend(p.checking.take().into_iter().flat_map(BTreeMap::into_keys));
-            p.unchecked = false;
+            let returning = p.checking.take().unwrap_or_default();
+            p.uncounted.extend(returning.keys().copied());
+            // The files a check was of, or a cancelled one left: back if they're there, as the engine
+            // judges them by what was there before they came back.
+            let back = |f: usize| disk[f] != OnDisk::Absent;
+            if std::mem::take(&mut p.unchecked) {
+                p.missing.iter_mut().for_each(|(f, g)| g.back = back(*f));
+            }
+            for (f, g) in returning {
+                p.missing.insert(f, Gone { back: back(f), ..g });
+            }
         }
     }
 
@@ -1380,8 +1390,12 @@ impl Model {
             _ => None,
         }) {
             p.unavailable = false;
-            if !p.delete_failed {
+            // Those known missing as it went are judged as a size check judges them (#464).
+            if p.delete_failed {
+            } else if p.missing.is_empty() {
                 p.check(disk, folder, held, BTreeMap::new());
+            } else {
+                p.size_check(disk, folder, held);
             }
         }
     }
@@ -1464,7 +1478,11 @@ impl Model {
                         false => (0..FILES)
                             .map(|f| {
                                 let priority = if p.off[f] { Priority::Off } else { Priority::Normal };
-                                (priority, p.missing.contains_key(&f), !self.unavailable[p.pack] && self.disk[p.pack][f] != OnDisk::Absent)
+                                (
+                                    priority,
+                                    !p.unavailable && p.missing.contains_key(&f),
+                                    !self.unavailable[p.pack] && self.disk[p.pack][f] != OnDisk::Absent,
+                                )
                             })
                             .collect(),
                     };
@@ -3911,5 +3929,18 @@ fn what_waits_behind_a_delete_undone_runs_once_what_came_before_it_has_started()
         Resume(1),
         TrashFiles { id: 1, files: vec![0, 1, 2] },
         ReleaseTrash,
+    ]);
+}
+
+/// #466's review: a file made as it was let run, deleted by hand, is Missing files; the drive gone
+/// and back, it still is, rather than checked and made again (#464).
+#[test]
+fn a_file_missing_as_the_drive_went_is_still_missing_once_its_back() {
+    replay(&[
+        Step::Add { pack: None, paused: false },
+        Step::Add { pack: Some(0), paused: false },
+        Step::DeleteFile { pack: 0, file: 0 },
+        Step::DestinationGone { pack: 0 },
+        Step::DestinationBack { pack: 0 },
     ]);
 }
