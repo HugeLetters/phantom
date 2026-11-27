@@ -777,6 +777,7 @@ fn moved(was: &Phase, stage: &moving::Stage) -> Phase {
         was if adopted.is_empty() => was.clone(),
         Phase::MissingFiles { gone } => still_gone(gone, adopted).map_or_else(check_due, |gone| Phase::MissingFiles { gone }),
         Phase::Unchecked { gone } => still_gone(gone, adopted).map_or_else(check_due, |gone| Phase::Unchecked { gone }),
+        Phase::DestinationUnavailable { reason, gone } => away(reason, &still_gone(gone, adopted).unwrap_or_default()),
         _ => check_due(),
     }
 }
@@ -920,6 +921,21 @@ mod tests {
     use super::samples::{OTHER, WAS, disk, drive, gone_as, stamp};
     use super::*;
     use machine::{Every, check, decide_table, sequences, table};
+
+    #[test]
+    fn a_move_ended_while_away_keeps_what_was_missing() {
+        let gone: BTreeMap<usize, Gone> = [(0, gone_as(Seen::Was(None))), (1, gone_as(Seen::Was(None)))].into();
+        let was = Phase::DestinationUnavailable { reason: drive(), gone };
+        let to = AbsolutePath::new("/y").unwrap();
+        let s = State::new(Wants::Run, Phase::Moving { to, stage: moving::Stage::RemovingOld { adopted: [0].into() }, was: Box::new(was) });
+        let after = decide(&s, &Event::Observed(Observation::Move(moving::Event::Ended))).unwrap();
+        let kept: Vec<usize> = match &after.phase {
+            Phase::DestinationUnavailable { gone, .. } | Phase::MissingFiles { gone } => gone.keys().copied().collect(),
+            Phase::CheckDue { returning } => returning.keys().copied().collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(kept, vec![1], "b.bin's being missing is forgotten: {:?}", after.phase);
+    }
 
     fn has_info(phase: &Phase) -> bool {
         !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
