@@ -79,8 +79,7 @@ impl Ui {
 
     /// What a notice's list says under its line: each group (a name with its reason and paths) set
     /// apart from the next. A name is normal text, a reason muted; a path or a link has a line of
-    /// its own, cut in the middle when it doesn't fit, whole on hover. A long name wraps, once the
-    /// popover is as wide as it gets.
+    /// its own. Every line wraps, once the popover is as wide as it gets; none is cut.
     pub fn notice_listing(&self, listing: &Listing) -> El {
         let k = &self.k;
         let line = |l: &Line| match l {
@@ -92,18 +91,10 @@ impl Ui {
         col().key("notice-listing").w_full().gap(if listing.is_apart() { 6.0 } else { 2.0 }).children(groups)
     }
 
-    /// A path or a link in a list: one line, cut in the middle, whole on hover.
+    /// A path or a link in a list: a line of its own, wrapped whole when it doesn't fit, never cut.
     fn listing_path(&self, path: &str) -> El {
         let k = &self.k;
-        text(path.to_owned())
-            .key("notice-path")
-            .font(k.ty.text_small)
-            .color(k.c.text_base)
-            .truncate_middle()
-            .w_full()
-            .shrink()
-            .min_w(0.0)
-            .help_when_truncated(path.to_owned())
+        text(path.to_owned()).key("notice-path").font(k.ty.text_small).color(k.c.text_base).wrap().w_full().shrink().min_w(0.0)
     }
 
     /// How wide the popover is for a list of notices: as the widest of them needs, within
@@ -124,7 +115,7 @@ impl Ui {
         // Mark and its gap; × and its gap; the panel's padding and border.
         let (mark, cross, frame) = (16.0 + sp.s4, 8.0 + 24.0, 2.0 * sp.s5 + 2.0);
         let title = mark + advance(line, k.ty.text_small_medium) + cross;
-        // A path counts for its real width; the popover cuts it in the middle at its widest.
+        // A path counts for its real width; at the popover's widest it wraps.
         let texts = listing.into_iter().flat_map(Listing::lines).map(|l| mark + advance(l.text(), k.ty.text_small));
         let row: f32 = buttons
             .iter()

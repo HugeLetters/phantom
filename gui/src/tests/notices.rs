@@ -493,13 +493,13 @@ proptest! {
 proptest! {
     #![proptest_config(Config { cases: 16, ..config() })]
 
-    /// However long the newest notice's line and however wide the window (from the smallest, 640),
-    /// with several notices the count and › are drawn whole inside the bar, clear of the line and
-    /// the totals: only the line truncates.
+    /// Whatever the newest notice's line (up to the longest Phantom writes) and however wide the window
+    /// (from the smallest, 640), with several notices the count and › are drawn whole inside the bar,
+    /// clear of the line and the totals.
     #[test]
     fn the_count_stays_whole_in_the_bar_whatever_the_line_and_the_width(
         notices in 2..=8usize,
-        words in 1..60usize,
+        words in 1..4usize,
         width in prop_oneof![Just(640.0f32), 640.0..1600.0f32],
         with_rows in any::<bool>(),
     ) {
@@ -1011,10 +1011,9 @@ fn a_path_is_a_line_of_its_own_and_a_reasons_words_hold_none() {
     }
 }
 
-/// Rule 1: a failed magnet add shows the link's `dn=` name if it has one, else the link, cut in the
-/// middle on a line of its own, whole on hover.
+/// Rule 1: a failed magnet add shows the link's `dn=` name if it has one, else the link, whole on a line of its own.
 #[test]
-fn a_failed_magnet_add_shows_its_name_or_the_link_shortened_in_the_middle() {
+fn a_failed_magnet_add_shows_its_name_or_the_whole_link() {
     let hash = "00000000000000000000000000000000000000ff";
     let named = format!("magnet:?xt=urn:btih:{hash}&dn=Nobody");
     let bare =
@@ -1037,8 +1036,8 @@ fn a_failed_magnet_add_shows_its_name_or_the_link_shortened_in_the_middle() {
     let shown = super::generated::texts_under(&rt, &format!("notice/{second}"));
     assert!(shown.iter().any(|t| t == &bare), "the link is a line of its own: {shown:?}");
     let drawn = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("notice-path")).expect("the link's line");
-    assert_eq!(drawn.help.as_deref(), Some(bare.as_str()), "cut where it doesn't fit, so whole on hover");
-    assert!(drawn.rect[3] < 24.0 && drawn.rect[2] <= 480.0, "on one line, within the popover: {:?}", drawn.rect);
+    assert_eq!(drawn.text.as_deref(), Some(bare.as_str()), "the whole link");
+    assert!(drawn.rect[2] <= 480.0, "within the popover: {:?}", drawn.rect);
 }
 
 /// Rule 2: a Remove lists the torrent and nothing of why its files stay; a Delete keeps its one note.

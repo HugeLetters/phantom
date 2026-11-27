@@ -1100,6 +1100,16 @@ fn spec() -> AppSpec<Phantom> {
                     "It isn't on disk",
                 )));
             }),
+            // A long path and a long reason in the list: both wrap whole, at any window size; the line is short.
+            ("notice-long", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(Notice::error("Couldn't add the torrent").with_listing(display::show_failed_listing(
+                    std::path::Path::new(
+                        "/Volumes/An External Drive With a Long Name/Downloads/A Folder Deep Down/And Deeper/And Deeper Still/file.torrent",
+                    ),
+                    "The folder it was going into was moved, renamed or deleted while it waited",
+                )));
+            }),
             ("notice-width-mixed", |s| {
                 s.service = Box::new(demo_service());
                 s.bar.tell(Notice::error("Can't open the file").with_listing(display::show_failed_listing(

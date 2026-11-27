@@ -115,11 +115,15 @@ window and is shown there while it holds, from the latest update, so there's not
 The notice list is only for what has no such place.
 A notice's **line** (in the status bar) holds only words Phantom writes, short and known in advance:
 "Added the torrent", "Can't open the file", "Download limit undone" (a setting's name is Phantom's).
+Every line Phantom writes fits whole in the bar at the 640 pt minimum width, and the totals (the
+speeds first, then the count) give way to it; the bar's "…" is only the last resort, for a line that
+can't be shortened. A reason, however long, is the list's ("Couldn't add the
+torrent"; "The folder it was going into was moved, renamed or deleted while it waited" under it).
 Anything from outside goes in the **list** behind it: file paths, file names, torrent names (and
 names a user gave a Look Preset), errors from macOS or a peer, a change as "old → new" ("10 MB/s →
 2 MB/s"; the setting's name stays in the line), the settings a reset reset ("Settings reset"). A
-**path or a link** has a line of its own in the list, shortened in the middle (whole on hover),
-never inside a sentence; a failed magnet add shows the link's name (`dn=`) if it has one, else the
+**path or a link** has a line of its own in the list, wrapping whole (never cut), never inside a
+sentence; a failed magnet add shows the link's name (`dn=`) if it has one, else the
 link so. A **reason** is short words under the name that never repeat the line ("The new
 destination's disk is full", not "Not moved: …"), with the path under it ("Something is already
 at"). A notice tells what happened, never why Phantom works so: a Remove says no word of its files
@@ -146,8 +150,7 @@ on the bar always opens the list, at the newest, even for a lone notice; only ×
 dismisses. The list shows one notice at a time: with several, a top row (‹ 2 of 3 › and Dismiss
 all) over a hairline, with none for a lone notice; then the notice, its mark (✓ done, ⓘ nothing was done ("Already in the list"), ⚠, ⛔), its line
 and × on its own line, the names, why, and its buttons, the first the default. The popover is as wide as the widest notice in the list needs, the same
-on every page (it changes when a notice arrives or leaves): a path counts for its real width and is
-cut in the middle at 480 pt; never under about 240 pt, which fits the pager and Dismiss all. Its Undo is in the
+on every page (it changes when a notice arrives or leaves): a path counts for its real width, and at 480 pt it wraps whole, never cut; never under about 240 pt, which fits the pager and Dismiss all. Its Undo is in the
 bar too, and "Undo ⌘Z" in the list.
 The connection's words beside it are short and fixed too ("Connecting…", "Service unavailable",
 "Phantom was updated"), with no ›, red while the dot is, as an error notice's line is; while the

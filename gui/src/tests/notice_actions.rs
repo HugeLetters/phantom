@@ -230,6 +230,44 @@ fn the_popover_is_as_wide_as_the_widest_notice_needs_on_every_page() {
     assert_eq!(width(&rt), 480.0, "the same on every page");
 }
 
+/// A long path and a long reason are shown whole, wrapped, never cut: no ellipsis, inside the
+/// popover, the popover inside the window, at 960x600 and at the 640x320 minimum.
+#[test]
+fn a_long_path_and_a_long_reason_wrap_whole_inside_the_popover() {
+    let path = "/Volumes/An External Drive With a Long Name/Downloads/A Folder Deep Down/And Deeper/And Deeper Still/file.torrent";
+    let line = "The folder it was going into was moved, renamed or deleted while it waited";
+    for (w, h) in [(960.0, 600.0), (640.0, 320.0)] {
+        let mut rt = app(MemoryService::new());
+        rt.set_viewport((w, h), 2.0);
+        let id = told(
+            &mut rt,
+            Notice::error("Couldn't add the torrent").with_listing(client::display::show_failed_listing(std::path::Path::new(path), line)),
+        );
+        show_notice(&mut rt, id);
+        for _ in 0..3 {
+            settle(&mut rt);
+        }
+        let shown = super::generated::texts_under(&rt, "notices-panel");
+        for whole in [path, line] {
+            assert!(shown.iter().any(|t| t == whole), "{w}x{h}: {whole:?} whole in {shown:?}");
+        }
+        assert!(shown.iter().all(|t| !t.contains('…')), "{w}x{h}: no ellipsis: {shown:?}");
+        let panel = super::generated::rect_of(&rt, "notices-panel").expect("the panel");
+        assert!(panel[0] >= 0.0 && panel[1] >= 0.0 && panel[0] + panel[2] <= w && panel[1] + panel[3] <= h, "{w}x{h}: panel {panel:?}");
+        let drawn = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("notice-path")).expect("the path");
+        assert!(drawn.rect[3] > 24.0, "{w}x{h}: the path wraps onto lines: {:?}", drawn.rect);
+        // Nothing outside the popover: the scrolling body holds what's tall, so the path's own
+        // width stays within the panel.
+        assert!(
+            drawn.rect[0] >= panel[0] && drawn.rect[0] + drawn.rect[2] <= panel[0] + panel[2],
+            "{w}x{h}: path {:?} in {panel:?}",
+            drawn.rect
+        );
+        let title = super::generated::rect_of(&rt, "notice-line").expect("the line");
+        assert!(title[0] + title[2] <= panel[0] + panel[2], "{w}x{h}: line {title:?} in {panel:?}");
+    }
+}
+
 /// Row: Couldn't rename, something is already there. Rename… selects the torrent and opens its name
 /// field; Reveal in Finder shows what's in the way, while it's on disk.
 #[test]
@@ -575,4 +613,124 @@ fn rename_keeps_its_notice_until_the_rename_is_sent() {
     rt.key(rune::KeyEvent { key: rune::Key::Enter, mods: Default::default() });
     wait(&mut rt, 1.0);
     assert!(!notice_is_there(&rt, id));
+}
+
+/// Every line Phantom writes for the status bar, each worst case: counts of three digits, the longest
+/// setting and theme names.
+fn every_notice_line() -> Vec<String> {
+    use client::display as d;
+    let mut lines: Vec<String> = Vec::new();
+    let actions = [
+        Action::Pause,
+        Action::Resume,
+        Action::Check,
+        Action::CancelCheck,
+        Action::SetPriority,
+        Action::TrashFiles,
+        Action::Remove,
+        Action::Delete,
+        Action::Move,
+        Action::Rename,
+        Action::CancelMove,
+        Action::Open,
+        Action::Reveal,
+    ];
+    lines.extend(actions.into_iter().flat_map(|a| [d::commands_failed(a, 1, 1), d::commands_failed(a, 999, 999)]));
+    lines.extend([d::adds_failed(1, 1), d::adds_failed(999, 999), d::moved_of(999, 999), d::copied_magnets(1), d::copied_magnets(999)]);
+    lines.extend([d::several_undone(999), d::partly_undone(999, 999), d::already_in_list().into()]);
+    for added in [false, true] {
+        let added = proto::Added { id: 0, name: None, already_existed: added };
+        lines.push(d::added_line(&added).into());
+    }
+    let named = |n: u64| (0..n).map(|id| proto::Named { id, name: String::new() }).collect::<Vec<_>>();
+    for action in [
+        proto::UndoAction::Remove,
+        proto::UndoAction::Delete,
+        proto::UndoAction::TrashFiles { count: 1 },
+        proto::UndoAction::TrashFiles { count: 999 },
+        proto::UndoAction::Rename,
+    ] {
+        for torrents in [1u64, 999] {
+            lines.push(d::happened(action, torrents as usize));
+            let undo = proto::Undoable { seq: 1, action, torrents: named(torrents) };
+            lines.push(d::undone_line(&undo));
+            let why = proto::CantUndo::Failed { detail: "x".into() };
+            lines.push(d::cant_undo_line(&undo, &why, &[]).0);
+        }
+    }
+    lines.extend([
+        d::cant_show(Action::Open).into(),
+        d::cant_show(Action::Reveal).into(),
+        d::cant_start_finder().into(),
+        d::settings_reset_line().into(),
+        d::look_preset_undone().into(),
+        d::setting_not_changed().into(),
+        d::cant_ask_for_file().into(),
+        d::cant_read_gui_json().into(),
+        d::records_set_aside().into(),
+        d::undo_failed().into(),
+        d::cant_restart().into(),
+    ]);
+    let keys = ["listen_port", "default_destination", "upnp", "keep_awake", "download_limit", "upload_limit", "seed_ratio", "seed_time"];
+    let mut shorts: Vec<String> =
+        keys.into_iter().chain(["app_icon", "app_icon_settings"]).map(|k| d::setting_short(k).to_owned()).collect();
+    shorts.extend(
+        crate::theme::phantom::palette::settings()
+            .flat_map(|s| [s.label.to_owned(), format!("{} (Light)", s.label), format!("{} (Dark)", s.label)]),
+    );
+    shorts.push("Edit of the Active look".into());
+    for short in shorts {
+        lines.push(d::setting_undone_short(&short));
+        lines.push(d::setting_undone_short(&d::of_a_saved_preset(&short)));
+    }
+    lines
+}
+
+/// A notice's line is short and known in advance: every one fits whole in the status bar at the
+/// 640 pt minimum width, with its Undo and the pill, beside the connection and the totals (a worst
+/// case of them), and no text in the bar is cut.
+#[test]
+fn every_notice_line_fits_whole_in_the_status_bar_at_the_minimum_width() {
+    let mut rt = app(MemoryService::new().with_torrents((0..99).map(|i| torrent(i, "a")).collect()));
+    rt.set_viewport((640.0, 320.0), 2.0);
+    rt.update(|s, _| {
+        for t in &mut s.torrents {
+            t.download_bytes_per_sec = 10 << 20;
+            t.upload_bytes_per_sec = 10 << 20;
+        }
+    });
+    wait(&mut rt, 0.5);
+    rt.update(|s, _| {
+        for t in &mut s.torrents {
+            t.download_bytes_per_sec = 10 << 20;
+            t.upload_bytes_per_sec = 10 << 20;
+        }
+        s.bar.tell(Notice::warning("Another"));
+    });
+    // Whatever fits for the widest fits for the rest, so only the widest are drawn.
+    let ui = crate::ui::Ui::phantom(true);
+    let mut lines = every_notice_line();
+    lines.sort_by(|a, b| ui.caption_width(b).total_cmp(&ui.caption_width(a)));
+    lines.dedup();
+    lines.truncate(6);
+    for line in lines {
+        let undo = crate::notice::NoticeAction { undo: true, ..crate::notice::NoticeAction::new("Undo", |_| {}) };
+        rt.update(|s, _| s.bar.tell(Notice::error(line.clone()).with_actions(vec![undo.clone()])));
+        for _ in 0..3 {
+            settle(&mut rt);
+        }
+        let bar = [texts_under(&rt, "notice"), texts_under(&rt, "totals"), texts_under(&rt, "connection")].concat();
+        assert!(bar.iter().any(|t| *t == line), "{line:?} whole in {bar:?}");
+        assert!(bar.iter().all(|t| !t.contains('…')), "{line:?}: no ellipsis: {bar:?}");
+        let (text, totals) = (super::generated::rect_of(&rt, "notice-text").unwrap(), super::generated::rect_of(&rt, "totals").unwrap());
+        assert!(text[0] + text[2] <= totals[0], "{line:?}: {text:?} runs into the totals {totals:?}");
+        let need = ui.caption_width(&line);
+        assert!(text[2] + 0.5 >= need, "{line:?} needs {need} pt, the bar gives it {}", text[2]);
+        let notice = super::generated::rect_of(&rt, "notice").unwrap();
+        assert!(notice[0] + notice[2] <= totals[0] && totals[0] + totals[2] <= 640.0, "{line:?}: {notice:?} {totals:?}");
+    }
+    // A short line leaves the speeds in the totals; a long one takes their room.
+    rt.update(|s, _| s.bar.tell(Notice::new("Added the torrent")));
+    settle(&mut rt);
+    assert!(texts_under(&rt, "totals").iter().any(|t| t.contains('↓')), "short line: speeds stay");
 }
