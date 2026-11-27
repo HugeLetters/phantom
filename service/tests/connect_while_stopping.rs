@@ -12,7 +12,7 @@ use client::Client;
 fn a_client_connecting_while_the_service_stops_starts_a_new_one() {
     let dir = tempfile::tempdir().unwrap();
     fake::isolate(dir.path());
-    fake::service(fake::Answer::Close, Duration::from_millis(1500));
+    fake::service(fake::Answer::Close { times: 3 }, Duration::from_secs(10));
 
     let mut client = Client::connect_or_spawn(env!("CARGO_BIN_EXE_phantom-service").as_ref()).unwrap();
     assert_eq!(client.service_version, env!("CARGO_PKG_VERSION"));

@@ -184,7 +184,7 @@ async fn a_piece_got_twice_is_counted_once() {
     assert!(all_had((now.1.clone(), now.1.clone())), "{now:?}");
     wait_until("all of it is had, once", async || all_had(had(&engine, id).await)).await;
     // Nor is a whole file, as of a size it can't have, Missing files at the size checks.
-    tokio::time::sleep(3 * SIZE_CHECK_EVERY).await;
+    size_checks(&engine, 3).await;
     assert_eq!(find(&engine, id).await.status, Status::Seeding);
     engine.stop().await;
 }

@@ -75,7 +75,7 @@ async fn a_longer_file_and_an_incomplete_hard_link_are_missing_files_and_never_w
     wait_for(&engine, id, Status::MissingFiles).await;
     for command in [TorrentCommand::Check, TorrentCommand::Resume] {
         engine.command(id, command.clone()).await.unwrap();
-        tokio::time::sleep(SIZE_CHECK_EVERY * 4).await;
+        size_checks(&engine, 4).await;
         wait_for(&engine, id, Status::MissingFiles).await;
         assert_eq!((as_it_is(&theirs), as_it_is(&mine)), was, "{command:?}: neither written");
     }

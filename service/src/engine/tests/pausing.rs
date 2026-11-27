@@ -57,10 +57,16 @@ async fn finishes(ends_first: bool) {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
+        let had = engine.inspect(move |a| a.torrents[&id].lib.torrent().map_or(0, |h| h.stats().progress_bytes)).await;
         engine.command(id, TorrentCommand::Resume).await.unwrap();
         gate.hold(false);
         // Some pieces are had before the next one.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..1000 {
+            if engine.inspect(move |a| a.torrents[&id].lib.torrent().is_some_and(|h| h.stats().progress_bytes > had)).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         engine.command(id, TorrentCommand::Pause).await.unwrap();
     }
     seeder.ratelimits.set_upload_bps(None);

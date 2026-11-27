@@ -38,6 +38,8 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }
+# Paused time (`tokio::time::pause`, `start_paused`): a test of tokio's timers alone moves the clock.
+tokio = { version = "1", features = ["test-util"] }
 machine = { workspace = true, features = ["harness"] }
 cases.workspace = true
 proptest = "1.12"

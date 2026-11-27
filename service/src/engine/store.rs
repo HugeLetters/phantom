@@ -1164,20 +1164,21 @@ mod tests {
         assert_eq!(wait(rows.next()).unwrap().unwrap().get::<String>(0).unwrap(), "{\"id\": \"one\"}", "as it was");
     }
 
-    /// Another connection holds a write lock for `hold`, from when this returns: the join handle
-    /// ends once it's released.
-    fn lock_for(data: &Path, hold: Duration) -> std::thread::JoinHandle<()> {
+    /// Another connection holds a write lock from when this returns until `release` is sent (or
+    /// dropped): the join handle ends once it's released.
+    fn lock_until(data: &Path) -> (std::thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
         let (locked, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
         let path = data.join(FILE);
         let thread = std::thread::spawn(move || {
             let conn = wait(async { libsql::Builder::new_local(path).build().await?.connect() }).unwrap();
             wait(conn.execute_batch("BEGIN IMMEDIATE")).unwrap();
             locked.send(()).unwrap();
-            std::thread::sleep(hold);
+            let _ = released.recv();
             wait(conn.execute_batch("COMMIT")).unwrap();
         });
         held.recv().unwrap();
-        thread
+        (thread, release)
     }
 
     /// Another connection saving or closing at a start is waited for, not refused at once.
@@ -1188,12 +1189,19 @@ mod tests {
         let kept = record(&mut store, &torrent(), Wants::Run);
         store.save([&kept]).unwrap();
         drop(store);
-        let holder = lock_for(dir.path(), Duration::from_millis(150));
+        let (holder, release) = lock_until(dir.path());
+        // A moment, shorter than the wait: a fixed time, as libsql says nothing of a statement
+        // waiting for a lock, so nothing else can say the load has begun to wait.
+        let releasing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let _ = release.send(());
+        });
         let started = std::time::Instant::now();
         let loaded = load(dir.path());
         assert!(started.elapsed() >= Duration::from_millis(100), "it waited: {:?}", started.elapsed());
         assert_eq!(loaded.records, vec![kept]);
         holder.join().unwrap();
+        releasing.join().unwrap();
     }
 
     /// Every file in `dir`, with its bytes.
@@ -1213,10 +1221,11 @@ mod tests {
         drop(store);
         let before = files(dir.path());
 
-        let holder = lock_for(dir.path(), BUSY_TIMEOUT * 4);
+        let (holder, release) = lock_until(dir.path());
         assert!(Store::load(dir.path(), &dir.path().join("session")).is_err(), "busy");
         assert!(!names(dir.path()).iter().any(|n| n.starts_with("records.invalid")), "{:?}", names(dir.path()));
         assert_eq!(files(dir.path())[FILE], before[FILE], "as it was");
+        release.send(()).unwrap();
         holder.join().unwrap();
         assert_eq!(load(dir.path()).records, vec![kept.clone()], "once it's free");
 

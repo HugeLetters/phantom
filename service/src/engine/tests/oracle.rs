@@ -724,27 +724,34 @@ impl World {
         tokio::time::timeout(PATIENCE, self.engine().command(id, command)).await.unwrap_or_else(|_| panic!("{what} is never answered"))
     }
 
-    /// Waits until nothing seems to happen: the status the same for some size checks. Where that's
-    /// too short, on a loaded machine, a later look still sees what was done.
+    /// Waits until nothing seems to happen: the status the same over three whole size checks (and
+    /// the polls between them). Where that's too short, a later look still sees what was done.
     async fn settle(&mut self) {
-        let mut same = (None, std::time::Instant::now());
+        let checks = async |engine: &Engine| engine.inspect(|a| a.size_checks).await;
+        let mut same = (None, checks(self.engine()).await);
         let deadline = std::time::Instant::now() + PATIENCE;
-        loop {
+        let stable = loop {
             let now = self.listed().await.map(|t| (t.status, t.content));
             let busy = now.as_ref().is_some_and(|(s, _)| {
                 let busy = matches!(s, Status::Checking | Status::FetchingInfo | Status::Moving { .. } | Status::WaitingToMove);
                 // Its peer is on its way.
                 busy || (*s == Status::Downloading && self.open.load(Ordering::SeqCst))
             });
+            // Counted from the first check that starts after it's seen: one under way may have
+            // begun before.
+            let checked = checks(self.engine()).await;
             if Some(&now) != same.0.as_ref() || busy {
-                same = (Some(now), std::time::Instant::now());
+                same = (Some(now), checked + 1);
             }
-            if same.1.elapsed() > SIZE_CHECK_EVERY * 3 || std::time::Instant::now() > deadline {
-                break;
+            if checked >= same.1 + 3 {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        if same.1.elapsed() > SIZE_CHECK_EVERY * 3 {
+        };
+        if stable {
             self.settled(same.0.flatten().map(|(status, _)| status));
         }
         if self.status().await == Some(Status::MissingFiles) {

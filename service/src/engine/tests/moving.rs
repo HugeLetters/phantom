@@ -372,7 +372,7 @@ async fn a_restart_for_new_settings_waits_for_a_move_and_a_shutdown_puts_it_back
             let engine = engine.clone();
             async move { if restart { drop(engine.stop_to_restart().await) } else { engine.stop().await } }
         });
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        stop_begun(&engine).await;
         super::super::trash::hold(&gate, false);
         stopping.await.unwrap();
         let answer = answer.await.unwrap();
@@ -433,7 +433,7 @@ async fn a_file_of_the_persons_at_a_new_path_sends_the_move_back_and_a_file_dele
     let rest = ["a.bin", "b.bin", "c.bin"].into_iter().filter(|n| **n != *copying);
     assert!(rest.clone().all(|n| file(dir.path(), n).exists()), "the rest, back where they were");
     assert_eq!(bytes_in(&elsewhere), BTreeMap::from([(PathBuf::from("pack").join(other), b"mine".to_vec())]), "nothing else there");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "nothing downloads by itself");
     assert!(!downloads.join("pack").join(&copying).exists());
     engine.stop().await;
@@ -796,7 +796,7 @@ async fn a_shutdown_puts_back_the_move_under_way_and_the_waiting_ones_never_star
         let engine = engine.clone();
         async move { engine.stop().await }
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    stop_begun(&engine).await;
     super::super::trash::hold(&gate, false);
     stopping.await.unwrap();
 
@@ -1199,7 +1199,7 @@ async fn a_restart_for_new_settings_waits_only_for_the_move_under_way_and_the_ne
         let old = old.clone();
         async move { old.stop_to_restart().await }
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    stop_begun(&old).await;
     let cancelled = tokio::time::timeout(Duration::from_secs(10), old.command(c, TorrentCommand::CancelMove)).await;
     assert!(matches!(cancelled, Ok(Ok(()))), "Cancel move while it restarts: {cancelled:?}");
     super::super::trash::hold(&gate, false);

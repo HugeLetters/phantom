@@ -293,6 +293,17 @@ async fn says_its_place(engine: &Engine, id: u64) {
     panic!("the add never said where its files go");
 }
 
+/// Waits until the add of torrent `id` waits for the undo putting files back where its go.
+async fn waits_for_its_place(engine: &Engine, id: u64) {
+    for _ in 0..1000 {
+        if engine.inspect(move |actor| actor.guard.places().waits(id)).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the add never waited for its place");
+}
+
 /// A torrent added into a place an undo is putting files back to touches nothing there till the undo
 /// is over. One with the undone torrent's files refuses it: what went back is in the Trash again,
 /// as it went, and the other torrent then makes its own file and keeps it.
@@ -305,8 +316,7 @@ async fn an_add_into_the_place_waits_while_the_files_go_back() {
     let (_, ours, undoing) = held_putting_back(dir.path(), &engine, &gate).await;
     let place = dir.path().join("downloads/pack");
     let b = add_now(&engine, torrent_file("a.bin"), &place).await;
-    says_its_place(&engine, b).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    waits_for_its_place(&engine, b).await;
     assert_eq!(bytes_in(&place), ours, "the add touched nothing yet");
 
     super::super::trash::hold(&gate, false);
@@ -322,7 +332,7 @@ async fn an_add_into_the_place_waits_while_the_files_go_back() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    tokio::time::sleep(4 * SIZE_CHECK_EVERY).await;
+    size_checks(&engine, 4).await;
     assert!(!matches!(find(&engine, b).await.status, Status::MissingFiles { .. }), "{:?}", find(&engine, b).await.status);
     assert_eq!(bytes_in(&place), BTreeMap::from([("a.bin".into(), vec![0; 16384])]), "its own file, and only it");
     engine.stop().await;
@@ -340,8 +350,7 @@ async fn an_add_inside_the_folder_sharing_no_file_waits_and_both_are_listed() {
     // However it's spelled.
     let place = dir.path().join("downloads/pack");
     let b = add_now(&engine, torrent_file("own.bin"), &dir.path().join("downloads/PACK")).await;
-    says_its_place(&engine, b).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    waits_for_its_place(&engine, b).await;
     assert_eq!(bytes_in(&place), ours, "the add touched nothing yet");
 
     super::super::trash::hold(&gate, false);
@@ -518,7 +527,8 @@ async fn an_add_taken_off_the_list_says_its_place_no_more() {
     let b = add_now(&engine, torrent_file("a.bin"), &place).await;
     says_its_place(&engine, b).await;
     engine.inspect(move |actor| actor.old_add_ends(b)).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Handled before this.
+    engine.inspect(|_| ()).await;
     assert!(engine.inspect(move |actor| actor.guard.places().says(b)).await, "the add under way still says it");
     engine.command(b, TorrentCommand::Remove).await.unwrap();
 

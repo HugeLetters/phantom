@@ -120,6 +120,9 @@ pub struct Engine {
     /// The actor's task, for a test to see how it ended.
     #[cfg(test)]
     ran: tokio::task::JoinHandle<()>,
+    /// The actor's: set as its stop begins.
+    #[cfg(test)]
+    stopping: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// An add, checked and ready to hand to librqbit.
@@ -248,6 +251,8 @@ impl Engine {
         )
         .await;
         let snapshot = actor.subscribe();
+        #[cfg(test)]
+        let stopping = actor.stopping.clone();
         let ran = tokio::spawn(actor.run(inbox));
         #[cfg(not(test))]
         drop(ran);
@@ -259,7 +264,15 @@ impl Engine {
             records_set_aside: set_aside,
             #[cfg(test)]
             ran,
+            #[cfg(test)]
+            stopping,
         })
+    }
+
+    /// Whether the actor has begun a stop (a restart's, a kill's): it answers nothing more then.
+    #[cfg(test)]
+    pub fn stopping(&self) -> bool {
+        self.stopping.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Every torrent, including those fetching info, by id.

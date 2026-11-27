@@ -57,11 +57,22 @@
      fail falsely. Check `pgrep -fl 'cargo|nextest'` for other worktrees first.
 
    **Keep tests fast.** A test's budget is 20 s on an idle machine: nextest flags one past it SLOW,
-   and `cargo nextest run --workspace --profile budget` fails it, unless `.config/nextest.toml`
-   lists it as slow, with why. Most of a test's time is waiting, so:
-   - Wait on what happens, never for a time: a status (`until`, `wait_for`), the engine's next size
-     checks (`size_checks(engine, n)`), a gate's `waiting()`. A fixed `sleep` "long enough for
-     it to happen" is slower than needed on an idle machine and too short on a loaded one.
+   and `cargo nextest run --workspace --profile budget` fails it there (the default profile kills
+   a test only at 300 s, as agents' runs share a loaded machine). Most of a test's time is waiting:
+   - Wait on what happens, with a timeout: a status (`until`, `wait_for`), a gate's `waiting()`,
+     a command handled (`engine.sent(..)`, then `engine.inspect(|_| ())`). A `sleep` is only the
+     poll interval inside such a wait; a fixed one "long enough for it to happen" is slower than
+     needed on an idle machine and too short on a loaded one.
+   - That something *doesn't* happen: wait for what proves its moment passed, then look. In the
+     engine tests: `size_checks(engine, n)`, `polls(engine, n)`, both (`settled`), a file put back
+     judged (`judged`), a look reported (`looks`), the watcher live (`watching`), a stop begun
+     (`stop_begun`), an answer still pending (`unanswered`). A test-only counter or flag on the
+     actor for a new moment is fine: small, and `cfg(test)` or harmless.
+   - A fixture that stands for something slow (a trash, a disk, a lock another process holds)
+     holds at a gate the test opens (`trash::hold`, `files::Gate`, `lock_until`).
+   - Timers that are tokio's alone, with no real I/O between them, run on paused time:
+     `#[tokio::test(start_paused = true)]` (or `tokio::time::pause()`), whose clock moves only
+     when every task waits, so a 2 s timeout takes none (`engine::bitv::tests`).
    - A test's independent cases, each with its own temp dir and engine, run side by side
      (`side_by_side(width, cases, run)` in the engine tests), not in a loop: each engine's stop
      alone waits librqbit's 1 s.
