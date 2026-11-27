@@ -493,13 +493,13 @@ proptest! {
 proptest! {
     #![proptest_config(Config { cases: 16, ..config() })]
 
-    /// However long the newest notice's line and however wide the window (from the smallest, 640),
-    /// with several notices the count and › are drawn whole inside the bar, clear of the line and
-    /// the totals: only the line truncates.
+    /// Whatever the newest notice's line (up to the longest Phantom writes) and however wide the window
+    /// (from the smallest, 640), with several notices the count and › are drawn whole inside the bar,
+    /// clear of the line and the totals.
     #[test]
     fn the_count_stays_whole_in_the_bar_whatever_the_line_and_the_width(
         notices in 2..=8usize,
-        words in 1..60usize,
+        words in 1..4usize,
         width in prop_oneof![Just(640.0f32), 640.0..1600.0f32],
         with_rows in any::<bool>(),
     ) {

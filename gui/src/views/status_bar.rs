@@ -15,8 +15,8 @@ use crate::notice::{NoticeAction, Severity};
 use crate::service::Connection;
 use crate::ui::{Icon, Tone, Ui};
 
-/// `room`: how tall the popover may be, above the bar.
-pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
+/// `room`: how tall the popover may be, above the bar; `width`: how wide the bar is.
+pub fn status_bar(s: &Phantom, ui: &Ui, width: f32, room: f32, layer: &mut Vec<El>) -> El {
     let tone = match &s.connection {
         Connection::Connected { .. } => Tone::Good,
         Connection::Lost { .. } | Connection::Outdated => Tone::Error,
@@ -34,11 +34,17 @@ pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
     }
     let down: u64 = s.torrents.iter().map(|t| t.download_bytes_per_sec).sum();
     let up: u64 = s.torrents.iter().map(|t| t.upload_bytes_per_sec).sum();
-    let totals = match s.torrents.len() {
+    let count = match s.torrents.len() {
         0 => String::new(),
-        1 => format!("1 torrent · ↓ {} · ↑ {}", speed(down), speed(up)),
-        n => format!("{n} torrents · ↓ {} · ↑ {}", speed(down), speed(up)),
+        1 => "1 torrent".to_owned(),
+        n => format!("{n} torrents"),
     };
+    let speeds = format!("{count} · ↓ {} · ↑ {}", speed(down), speed(up));
+    // A notice's line is never cut: the totals give way, first their speeds, then the count.
+    let left = ui.caption_width(client::display::connection(&s.connection))
+        + CONNECTION_ROOM
+        + s.bar.newest().map_or(0.0, |n| notice_need(s, ui, n));
+    let totals = [speeds, count].into_iter().find(|t| t.is_empty() || left + ui.caption_width(t) <= width).unwrap_or_default();
 
     let mut bar = row()
         .key("status")
@@ -52,6 +58,16 @@ pub fn status_bar(s: &Phantom, ui: &Ui, room: f32, layer: &mut Vec<El>) -> El {
         bar = bar.child(notices(s, newest.short.clone(), tone_of(newest.severity), ui, room, layer));
     }
     bar.child(el().grow(1.0)).child(ui.figures(totals).key("totals"))
+}
+
+/// What the bar keeps for the dot, the gaps and a connection's button, and the notice's padding, its
+/// pill and ›, besides the words themselves; a little more than they take.
+const CONNECTION_ROOM: f32 = 150.0;
+
+/// How wide the bar's notice is: its line, and its Undo.
+fn notice_need(s: &Phantom, ui: &Ui, newest: &crate::notice::Notice) -> f32 {
+    let undo = s.bar.newest_undo().map_or(0.0, |u| ui.caption_width(&u.title) + 24.0);
+    ui.caption_width(&newest.short) + undo
 }
 
 /// The button after the connection's words while it's wrong: Show log reveals the service's log;

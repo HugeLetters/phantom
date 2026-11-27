@@ -83,7 +83,7 @@ pub fn view(s: &Phantom, cx: &mut Cx<Phantom>) -> El {
     let under = |key: &str| cx.layout(key).map(|at| at[1] + at[3]);
     let top = under("toolbar").into_iter().chain(under("add-note-content")).fold(inset, f32::max) + sp.s4;
     let room = cx.layout("totals").map_or(400.0, |totals| totals[1] - top - sp.s2);
-    page = page.child(row().w_full().px(sp.margin).pt(sp.s4).pb(sp.s5).child(status_bar::status_bar(s, ui, room, &mut overlays)));
+    page = page.child(row().w_full().px(sp.margin).pt(sp.s4).pb(sp.s5).child(status_bar::status_bar(s, ui, width, room, &mut overlays)));
     // Last: a menu is modal, and takes what's drawn after it into its own focus.
     let window = cx.layout("app").map(|at| (at[2], at[3]));
     row_menu::overlay(s, ui, window, |key| cx.layout(key), &mut overlays);

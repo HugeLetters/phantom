@@ -115,11 +115,15 @@ window and is shown there while it holds, from the latest update, so there's not
 The notice list is only for what has no such place.
 A notice's **line** (in the status bar) holds only words Phantom writes, short and known in advance:
 "Added the torrent", "Can't open the file", "Download limit undone" (a setting's name is Phantom's).
+Every line Phantom writes fits whole in the bar at the 640 pt minimum width, and the totals (the
+speeds first, then the count) give way to it; the bar's "…" is only the last resort, for a line that
+can't be shortened. A reason, however long, is the list's ("Couldn't add the
+torrent"; "The folder it was going into was moved, renamed or deleted while it waited" under it).
 Anything from outside goes in the **list** behind it: file paths, file names, torrent names (and
 names a user gave a Look Preset), errors from macOS or a peer, a change as "old → new" ("10 MB/s →
 2 MB/s"; the setting's name stays in the line), the settings a reset reset ("Settings reset"). A
-**path or a link** has a line of its own in the list, shortened in the middle (whole on hover),
-never inside a sentence; a failed magnet add shows the link's name (`dn=`) if it has one, else the
+**path or a link** has a line of its own in the list, wrapping whole (never cut), never inside a
+sentence; a failed magnet add shows the link's name (`dn=`) if it has one, else the
 link so. A **reason** is short words under the name that never repeat the line ("The new
 destination's disk is full", not "Not moved: …"), with the path under it ("Something is already
 at"). A notice tells what happened, never why Phantom works so: a Remove says no word of its files
