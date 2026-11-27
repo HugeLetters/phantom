@@ -298,9 +298,17 @@ pub fn still_in_trash(items: &[Trashed]) -> Vec<Trashed> {
 pub struct Copies {
     pub location: PathBuf,
     pub files: Vec<PathBuf>,
+    /// The `(dev, ino)` of each of `files` as the undo was checked; a file here that isn't that
+    /// one when the undo runs (replaced since) isn't Phantom's and refuses it. Empty: not checked.
+    pub seen: std::collections::BTreeMap<PathBuf, (u64, u64)>,
 }
 
 impl Copies {
+    /// A copy replaced since it was `seen`.
+    fn replaced(&self) -> Option<&PathBuf> {
+        self.files.iter().find(|f| self.seen.get(*f).is_some_and(|s| identity(f).map(|i| (i.dev, i.ino)) != Some(*s)))
+    }
+
     /// Whether what's at `path` is only these: one of them, or a real folder of only them, litter
     /// and real folders of only those.
     fn hold_only(&self, path: &Path) -> bool {
@@ -387,6 +395,9 @@ pub fn put_back(
 ) -> Result<Vec<Trashed>, (PutBackError, Vec<PathBuf>)> {
     // The torrent's own new copies go to the Trash first, as a Move to Trash sends them; given back
     // if the undo can't finish, so a refused one changes nothing.
+    if let Some(path) = copies.replaced() {
+        return Err((PutBackError::Blocked(Blocked::Taken(path.clone())), Vec::new()));
+    }
     let sent = match copies.files.is_empty() {
         true => Carried::default(),
         false => {

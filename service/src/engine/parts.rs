@@ -1,5 +1,5 @@
-//! Kept-aside parts (#374): what librqbit writes into a file Phantom doesn't let it write (one in the
-//! Trash for an undo, one not granted yet) goes into a log of that file's in the data dir, and is read
+//! Kept-aside parts (#374): what librqbit writes into a file Phantom doesn't let it write (one set
+//! Off, one not granted yet) goes into a log of that file's in the data dir, and is read
 //! over the file, until it's written into it.
 //!
 //! ```text

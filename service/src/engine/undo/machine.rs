@@ -27,6 +27,26 @@ impl lifecycle::undo::Undoes for Entry {
     }
 }
 
+/// The torrents `stack` names, by info hash: each entry's, each part of a step under way's (an
+/// action's, an undo's), so what's kept aside of them stays while an undo may bring them back.
+pub fn info_hashes(stack: &State) -> std::collections::BTreeSet<String> {
+    use lifecycle::undo::Part;
+    let entries = stack.stack.iter().filter_map(|p| p.done.as_ref()).flat_map(|d| d.values()).map(|e| e.info_hash.clone());
+    let steps = stack.steps.values().flat_map(|step| match &step.what {
+        What::Action(parts) => parts
+            .values()
+            .filter_map(|p| match p {
+                Part::Over(Some(e)) => Some(e.info_hash.clone()),
+                Part::Doing(r) => Some(r.info_hash.clone()),
+                Part::Over(None) => None,
+            })
+            .collect(),
+        What::Undo { parts, .. } => parts.values().filter_map(Part::doing).map(|e| e.info_hash.clone()).collect(),
+        What::Command(_) => Vec::new(),
+    });
+    entries.chain(steps).collect()
+}
+
 /// `n` entries, each of its own torrent, Removes and Deletes alternating, a partial Delete among
 /// them.
 #[cfg(test)]
@@ -38,8 +58,6 @@ pub fn samples(n: usize) -> Vec<Entry> {
             let back = match i % 3 {
                 _ if i % 7 == 4 => Back::Files {
                     previous: vec![(0, proto::Priority::Normal, "/d/0".into()), (1, proto::Priority::Off, "/d/1".into())],
-                    had: Vec::new(),
-                    let_go: Vec::new(),
                     replacing: Vec::new(),
                 },
                 2 => Back::InList { stash },
@@ -71,8 +89,6 @@ pub fn sample_state() -> State {
         id: 9,
         listed: None,
         previous: Vec::new(),
-        had: Vec::new(),
-        let_go: Vec::new(),
         moved: Vec::new(),
         asked: Vec::new(),
         renaming: None,

@@ -5,8 +5,10 @@
 //! moment its command came, and its torrent's other commands wait on its lane. What moved is one
 //! entry that puts the files back and each file's priority as it was ([`Back::Files`]).
 //!
-//! Each item is written ahead into the step as it moves, as a Delete's are: a crash in between
-//! ends the step with what it moved, which Undo puts back.
+//! Each file is closed as it moves (`Trashed::take`), and its pieces are let go of once the move
+//! ends (`letgo.rs`, ADR 0014): nothing reads or seeds it from the Trash. Each item is written ahead
+//! into the step as it moves, as a Delete's are: a crash in between ends the step with what it
+//! moved, which Undo puts back, and the next start lets go of what moved (`letgo::clear_at_start`).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -81,37 +83,9 @@ impl Actor {
         // Off first: a file that goes while it's Normal would make the torrent Missing files.
         let chosen_indices: Vec<usize> = previous.iter().map(|(i, _, _)| *i).collect();
         self.set_priority(id, &chosen_indices, Priority::Off).await?;
-        self.size_check(id).await;
-        self.poll_torrent(id).await;
-        // And what librqbit has of them once Off, as they go: only a piece they share with a file it
-        // gets changes it while they're in the Trash, where they're read as they went, and the undo
-        // checks again only if that couldn't go into them (`trashed::needs_check`). Read once they're
-        // Off, a piece landing as they're set so isn't taken for one. Nothing is known of them during
-        // a check, and nothing is recorded.
-        let mut had: Vec<(usize, u64)> = match self.torrents.get(&id) {
-            Some(t) if t.lifecycle.status(t.polled.finished) != Some(proto::Status::Checking) => {
-                previous.iter().map(|(i, _, _)| (*i, t.polled.file_progress.get(*i).copied().unwrap_or(0))).collect()
-            }
-            Some(_) | None => Vec::new(),
-        };
-        // One librqbit has open that isn't the file at its path (replaced by hand) has pieces of the
-        // one it has open, not of what goes (#268): they're let go of, so it goes with none counted
-        // (`had` 0). Its undo checks the torrent (`let_go`), which reads the file put back: none of
-        // an overwritten one, all of one written back as it was (#328). Nothing is counted that
-        // can't be read, and nothing that can is left to download again.
-        let let_go = self.off_replaced(id, &chosen_indices);
-        for i in &let_go {
-            if let Some((_, was)) = had.iter_mut().find(|(file, _)| file == i) {
-                *was = 0;
-            }
-        }
-        self.log(step, id, |running| {
-            running.had = had;
-            running.let_go = let_go.into_iter().collect();
-        });
         let (trash, went) = (self.trash.clone(), self.files_went_tx.clone());
         // librqbit may be checking it, or still writing: each file moves with none of that under way,
-        // and none reaches it once it's moved (`Trashed::take`), so its undo finds it as it went.
+        // and is closed as it goes (`Trashed::take`), so nothing reaches it in the Trash.
         let trashed = self.guard.trashed().clone();
         let files: Vec<(usize, PathBuf)> = previous.iter().map(|(i, _, path)| (*i, path.clone())).collect();
         let stop = Arc::new(AtomicBool::new(false));
@@ -152,13 +126,17 @@ impl Actor {
         let Ended { id, carried: trash::Carried { moved, kept } } = ended;
         let Some(Pending { seq, previous, .. }) = self.file_trashes.remove(&id) else { return };
         let running = self.action_part(seq, id).cloned();
+        // Closed as they went: their pieces are let go of, written ahead before the step ends.
+        let gone: BTreeSet<usize> =
+            previous.iter().filter(|(_, _, path)| moved.iter().any(|t| &t.from == path)).map(|(i, _, _)| *i).collect();
+        self.let_go_of_trashed(id, &gone);
         let aborted = self.steps.machine().steps.get(&seq).is_some_and(|s| s.phase == lifecycle::undo::Phase::Aborting);
         let name = self.torrents.get(&id).map(name_of);
         let over = match (name.clone(), self.torrents.get(&id).map(|t| t.record.info_hash.clone()), running) {
             (Some(name), Some(info_hash), Some(running)) if aborted || !moved.is_empty() => {
                 // An aborted one is told as it was asked, whatever moved before it stopped.
                 let action = if aborted { running.action } else { UndoAction::TrashFiles { count: moved.len() } };
-                let back = Back::Files { previous, had: running.had, let_go: running.let_go, replacing: Vec::new() };
+                let back = Back::Files { previous, replacing: Vec::new() };
                 Over::Finished(Some(Entry { action, name, info_hash, id, back, put_back: moved, listed: running.listed }))
             }
             _ => Over::Failed,

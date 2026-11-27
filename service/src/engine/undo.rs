@@ -80,12 +80,6 @@ pub struct Running {
     /// item moved so far, written ahead as it goes, so a crash still knows what to put back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous: Vec<(usize, Priority, PathBuf)>,
-    /// A Move to Trash's: what librqbit had of each file asked about, in bytes, as it started.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub had: Vec<(usize, u64)>,
-    /// A Move to Trash's: the files it let go of as it started, replaced by hand (#268), by index.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub let_go: Vec<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub moved: Vec<Trashed>,
     /// A Move to Trash's files, by index, as asked.
@@ -172,23 +166,13 @@ pub enum Back {
     /// Only files were moved (#151): the torrent never left the list. Undoing puts back from the
     /// Trash those of them still there, and each file asked about (every file the trash was asked
     /// for, by index and path, including those that weren't on disk) back to its priority
-    /// `previous`, except a file that was moved and didn't come back, which stays Off. `had`: what
-    /// librqbit had of each, in bytes, when it moved (none: a check was under way, so nothing was
-    /// known); a file back that it has more of now, and what came couldn't go into, makes the undo
-    /// check the torrent (`trashed::needs_check`).
+    /// `previous`, except a file that was moved and didn't come back, which stays Off. Then it checks
+    /// the torrent (ADR 0014): librqbit let go of their pieces as they went.
     /// `replacing`: the paths of the torrent's own new copies (#276) that this undo sends to the
     /// Trash before it puts the old ones back, written into the step before anything moves. A
-    /// resumed undo counts as a copy only one of these whose old copy is still in the Trash, and
-    /// checks the torrent whenever there are any.
-    /// `let_go`: the files the move let go of, replaced by hand (#268): what librqbit had of them
-    /// was of the files it had open, not of those that went, so one put back makes the undo check
-    /// the torrent, which reads what's at its path (#328).
+    /// resumed undo counts as a copy only one of these whose old copy is still in the Trash.
     Files {
         previous: Vec<(usize, Priority, PathBuf)>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        had: Vec<(usize, u64)>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        let_go: Vec<usize>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         replacing: Vec<PathBuf>,
     },

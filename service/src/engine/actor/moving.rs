@@ -177,7 +177,6 @@ impl Actor {
         match step {
             StepOf::Move(seq) => self.step_ended(seq, id, Over::Finished(None), outcome.map(|_| ())),
             StepOf::Rename(seq) => {
-                self.let_go_under_rename(id, &outcome);
                 let was = self.action_part(seq, id).and_then(|r| r.renaming.as_ref()).and_then(|r| r.was.clone());
                 let over = match (&outcome, was) {
                     (Ok(true), Some(was)) => self.torrents.get(&id).map_or(Over::Failed, |t| Over::Finished(Some(renamed(t, was)))),
@@ -191,7 +190,6 @@ impl Actor {
                 self.step_ended(seq, id, over, outcome.map(|_| ()));
             }
             StepOf::Undo { seq, of, entry } => {
-                self.let_go_under_rename(id, &outcome);
                 let answer = outcome.map(|_| entry.undoable(of)).map_err(|failure| match failure {
                     Failure::Refused(proto::Refusal::Torrent { why, .. }) => {
                         let why = undo_refused(id, why);
@@ -201,15 +199,6 @@ impl Actor {
                 });
                 self.undo_ended(seq, id, answer);
             }
-        }
-    }
-
-    /// A rename of torrent `id` that renamed (`outcome` `true`) took it out of librqbit and added it
-    /// back, so what it had of a file still Off, in the Trash for a Move to Trash kept on the stack
-    /// under it, is gone: those Moves to Trash's undos check the torrent.
-    fn let_go_under_rename(&mut self, id: TorrentId, outcome: &Result<bool, Failure>) {
-        if let (Ok(true), Some(t)) = (outcome, self.torrents.get(&id)) {
-            self.steps.let_go_under(id, |i| !t.record.gets(i));
         }
     }
 

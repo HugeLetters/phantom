@@ -1,7 +1,7 @@
 //! Looking at what lives on a disk without ever waiting for one (`statfs`, `read_dir` and `stat`
 //! can hang on a network volume that stops answering): one watcher for every kind of look
 //! ([`super::space`] for each destination's disk, [`super::default_folder`] for the default
-//! folder, `actor::letgo` for the files a Move to Trash took that are gone from the Trash).
+//! folder, `actor::letgo` for the files deleted by hand that librqbit has open).
 //!
 //! [`watch`] looks at each key it's asked about every `every`, and at once when the keys change,
 //! each look in a thread of its own, at most one at a time per key, and tells `report` what it

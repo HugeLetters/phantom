@@ -513,3 +513,31 @@ async fn the_undo_of_an_older_rename_is_refused_as_moved_once_a_newer_one_was_re
     assert!(super::stack(&engine).await.is_empty(), "each press took one step");
     engine.stop().await;
 }
+
+/// a torrent of one file, renamed or not, has its file closed as a Move to Trash
+/// takes it: nothing of librqbit's has it open in the Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_one_file_torrents_file_is_closed_as_it_goes_to_the_trash() {
+    for renamed in [false, true] {
+        let dir = temp();
+        let downloads = dir.path().join("downloads");
+        let engine = engine(dir.path()).await;
+        let id = add(&engine, &downloads, one_file(dir.path()).await, false).await.unwrap().id;
+        wait_for(&engine, id, Status::Seeding).await;
+        let name = if renamed {
+            engine.command(id, rename("renamed.bin")).await.unwrap();
+            moved(&engine, id).await;
+            wait_for(&engine, id, Status::Seeding).await;
+            "renamed.bin"
+        } else {
+            "one.bin"
+        };
+        let file = downloads.join(name);
+        let open = super::super::trashed::open_on(&file);
+        assert!(open() > 0, "renamed {renamed}: open as it seeds");
+        engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+        assert!(!file.exists(), "renamed {renamed}: in the Trash");
+        assert_eq!(open(), 0, "renamed {renamed}: closed as it went");
+        engine.stop().await;
+    }
+}

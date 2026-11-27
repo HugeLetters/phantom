@@ -204,7 +204,7 @@ async fn another_torrent_added_while_the_files_go_back_refuses_the_undo() {
 /// A Delete dropped by the refusal loses only what any dropped step loses: what was kept aside to
 /// add the torrent again (its stash, with the `.torrent` and the pieces it had). Every file the
 /// Delete moved, and the one a Move to Trash below it moved, stays in the Trash, where
-/// Finder's Put Back works, and what is kept of a file in the Trash for an undo isn't erased.
+/// Finder's Put Back works.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_delete_dropped_by_the_refusal_leaves_every_file_it_moved_in_the_trash() {
     let dir = temp();
@@ -217,14 +217,13 @@ async fn a_delete_dropped_by_the_refusal_leaves_every_file_it_moved_in_the_trash
     engine.command(a, TorrentCommand::Delete).await.unwrap();
     let b = add(&engine, &downloads, album(dir.path(), "A", 2).await, false).await.unwrap().id;
     wait_for(&engine, b, Status::Seeding).await;
-    let (trash, parts) = (bytes_in(&dir.path().join("trash")), bytes_in(&dir.path().join("data/undo-parts")));
+    let trash = bytes_in(&dir.path().join("trash"));
     assert_eq!(trash.len(), 2, "x.bin from the Move to Trash, and what the Delete moved");
     assert_eq!(std::fs::read_dir(dir.path().join("data/undo")).unwrap().count(), 1, "kept aside for the Delete");
 
     let (_, why) = cant_undo(engine.undo().await);
     assert!(matches!(why, proto::CantUndo::AnotherHasFiles { .. }), "{why:?}");
     assert_eq!(bytes_in(&dir.path().join("trash")), trash, "every file still in the Trash");
-    assert_eq!(bytes_in(&dir.path().join("data/undo-parts")), parts, "no kept part erased");
     assert_eq!(std::fs::read_dir(dir.path().join("data/undo")).unwrap().count(), 0, "only what was kept aside for it is gone");
     assert_eq!(stack(&engine).await, [proto::UndoAction::TrashFiles { count: 1 }], "the Move to Trash below it stays");
     engine.stop().await;
