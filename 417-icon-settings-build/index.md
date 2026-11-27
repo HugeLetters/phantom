@@ -15,4 +15,4 @@ The real Settings window, headless, 960x600 @2x unless noted, `--at 0.5`, in Lig
 - Dark look another theme's (the debug stand-in): Dark's Follow the look is off, why on hover: ![](settings-customize-other-light.png) ![](settings-customize-other-dark.png); at 640: ![](settings-customize-other-640-dark.png)
 - The tile at a few colors set by hand, both halves: orange ![](settings-customize-orange-light.png) ![](settings-customize-orange-dark.png), purple ![](settings-customize-purple-light.png) ![](settings-customize-purple-dark.png), green ![](settings-customize-green-light.png) ![](settings-customize-green-dark.png)
 
-At 640 a Dark-half picker is squeezed to 315 pt and its saturation bar sits outside it: the same as master's Colors picker on a Dark swatch (not new here).
+At 640 wide, where the picker's 360 pt fit on neither side of a swatch, it opens below the swatch, or above it when there is no room below, shifted to stay inside the window; nothing is cut. The two 640 stills with a picker were rendered again (?v=2).
