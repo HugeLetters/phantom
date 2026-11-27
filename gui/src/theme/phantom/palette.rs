@@ -84,26 +84,27 @@ enum Seen {
     OnSurface,
 }
 
-/// A color worked out from a base, which "Every color" lists: its key and name, its group there,
-/// the base it follows, how it's picked, and the kit's colors it sets (`set`) and is read from
-/// (`get`).
+/// A color worked out by a rule, which "Every color" lists: its key and name, its group there,
+/// the key of the color its rule works it out from (a base, or Muted text for Faint text), which
+/// its swatch and Follow button name, how it's picked, and the kit's colors it sets (`set`) and is
+/// read from (`get`).
 pub struct Derived {
     pub key: &'static str,
     pub label: &'static str,
     pub group: &'static str,
-    pub base: Base,
+    pub follows: &'static str,
     seen: Seen,
     get: fn(&Palette) -> Color,
     set: fn(&mut Palette, Color),
 }
 
 macro_rules! derived {
-    ($key:literal, $label:literal, $group:literal, $base:ident, $seen:ident, $first:ident $(. $sub:ident)? $(, $more:ident)*) => {
+    ($key:literal, $label:literal, $group:literal, $follows:expr, $seen:ident, $first:ident $(. $sub:ident)? $(, $more:ident)*) => {
         Derived {
             key: $key,
             label: $label,
             group: $group,
-            base: Base::$base,
+            follows: $follows,
             seen: Seen::$seen,
             get: |p| p.$first $(. $sub)?,
             set: |p, c| {
@@ -116,24 +117,24 @@ macro_rules! derived {
 
 /// Every derived color, in the order "Every color" lists them.
 pub static DERIVED: [Derived; 18] = [
-    derived!("muted_text", "Muted text", "Text", Text, Itself, text_muted, icon_muted, text_weak, std_icon, icon_weaker),
-    derived!("faint_text", "Faint text", "Text", Text, OnSurface, text_faint),
-    derived!("window", "Window", "Surfaces", Background, Itself, page, bg_deep),
-    derived!("sheet", "Sheet and dialog", "Surfaces", Background, Itself, layer_01),
-    derived!("panel", "Panel", "Surfaces", Surface, Itself, bg_base, bg_button_neutral, surface_raised, surface_raised_base),
-    derived!("hover", "Hover", "States", Text, OnSurface, hover, surface_hover, surface_raised_hover),
-    derived!("pressed", "Pressed", "States", Text, OnSurface, pressed),
-    derived!("track", "Track", "States", Text, OnSurface, layer_02, surface_base, surface_weak, surface_disabled),
-    derived!("off", "Off", "States", Text, OnSurface, layer_03),
-    derived!("hairline", "Hairline", "Borders", Border, OnSurface, border_weak, border_muted, border_disabled),
-    derived!("strong_border", "Strong border", "Borders", Border, OnSurface, border_strong),
-    derived!("focus_ring", "Focus ring", "Borders", Accent, Itself, border_focus),
-    derived!("danger_fill", "Danger fill", "Status", Danger, Itself, danger.bg),
-    derived!("danger_edge", "Danger edge", "Status", Danger, Itself, danger.border),
-    derived!("warning_fill", "Warning fill", "Status", Warning, Itself, warning.bg),
-    derived!("warning_edge", "Warning edge", "Status", Warning, Itself, warning.border),
-    derived!("success_fill", "Success fill", "Status", Success, Itself, success.bg),
-    derived!("success_edge", "Success edge", "Status", Success, Itself, success.border),
+    derived!("muted_text", "Muted text", "Text", Base::Text.key(), Itself, text_muted, icon_muted, text_weak, std_icon, icon_weaker),
+    derived!("faint_text", "Faint text", "Text", "muted_text", OnSurface, text_faint),
+    derived!("window", "Window", "Surfaces", Base::Background.key(), Itself, page, bg_deep),
+    derived!("sheet", "Sheet and dialog", "Surfaces", Base::Background.key(), Itself, layer_01),
+    derived!("panel", "Panel", "Surfaces", Base::Surface.key(), Itself, bg_base, bg_button_neutral, surface_raised, surface_raised_base),
+    derived!("hover", "Hover", "States", Base::Text.key(), OnSurface, hover, surface_hover, surface_raised_hover),
+    derived!("pressed", "Pressed", "States", Base::Text.key(), OnSurface, pressed),
+    derived!("track", "Track", "States", Base::Text.key(), OnSurface, layer_02, surface_base, surface_weak, surface_disabled),
+    derived!("off", "Off", "States", Base::Text.key(), OnSurface, layer_03),
+    derived!("hairline", "Hairline", "Borders", Base::Border.key(), OnSurface, border_weak, border_muted, border_disabled),
+    derived!("strong_border", "Strong border", "Borders", Base::Border.key(), OnSurface, border_strong),
+    derived!("focus_ring", "Focus ring", "Borders", Base::Accent.key(), Itself, border_focus),
+    derived!("danger_fill", "Danger fill", "Status", Base::Danger.key(), Itself, danger.bg),
+    derived!("danger_edge", "Danger edge", "Status", Base::Danger.key(), Itself, danger.border),
+    derived!("warning_fill", "Warning fill", "Status", Base::Warning.key(), Itself, warning.bg),
+    derived!("warning_edge", "Warning edge", "Status", Base::Warning.key(), Itself, warning.border),
+    derived!("success_fill", "Success fill", "Status", Base::Success.key(), Itself, success.bg),
+    derived!("success_edge", "Success edge", "Status", Base::Success.key(), Itself, success.border),
 ];
 
 /// The settings Phantom's colors add: the bases, then every derived color.
@@ -141,7 +142,7 @@ pub fn settings() -> impl Iterator<Item = Setting> {
     let bases = Base::ALL.into_iter().map(|b| Setting::new(b.key(), b.label(), Kind::Color { follows: None }).in_section(&COLORS));
     let derived = DERIVED
         .iter()
-        .map(|d| Setting::new(d.key, d.label, Kind::Color { follows: Some(d.base.key()) }).in_section(&EVERY_COLOR).in_group(d.group));
+        .map(|d| Setting::new(d.key, d.label, Kind::Color { follows: Some(d.follows) }).in_section(&EVERY_COLOR).in_group(d.group));
     bases.chain(derived)
 }
 
@@ -513,6 +514,26 @@ mod tests {
         assert_eq!(resolved.color("muted_text"), Some(Rgb::of(rule)));
     }
 
+    /// Each derived color is worked out from the color its swatch and Follow button name: with
+    /// every other color set by hand, setting that one moves it (#445).
+    #[test]
+    fn each_derived_color_follows_the_color_it_names() {
+        let keys: Vec<&str> = Base::ALL.iter().map(|b| b.key()).chain(DERIVED.iter().map(|d| d.key)).collect();
+        for dark in [false, true] {
+            for d in &DERIVED {
+                let shown = |rgb: Rgb| {
+                    let set: Vec<(&str, Rgb)> = keys
+                        .iter()
+                        .filter(|k| **k != d.key)
+                        .map(|k| (*k, if *k == d.follows { rgb } else { Rgb([0x80, 0x80, 0x80]) }))
+                        .collect();
+                    kit(&with(dark, &set), dark).1.color(d.key)
+                };
+                assert_ne!(shown(Rgb([0x20, 0x40, 0xc0])), shown(Rgb([0xe0, 0x90, 0x30])), "{} follows {} (dark {dark})", d.key, d.follows);
+            }
+        }
+    }
+
     /// Reset on a base: back to the theme's default, and everything that follows it with it.
     #[test]
     fn reset_on_a_base_brings_back_todays_colors() {
@@ -576,7 +597,7 @@ mod tests {
             assert_eq!((s.key, s.section, s.group), (b.key(), Some(&COLORS), None));
         }
         for (s, d) in colors[8..].iter().zip(&DERIVED) {
-            assert_eq!((s.key, s.kind == Kind::Color { follows: Some(d.base.key()) }, s.section), (d.key, true, Some(&EVERY_COLOR)));
+            assert_eq!((s.key, s.kind == Kind::Color { follows: Some(d.follows) }, s.section), (d.key, true, Some(&EVERY_COLOR)));
             assert_eq!(s.group, Some(d.group));
         }
     }
