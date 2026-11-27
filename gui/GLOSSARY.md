@@ -146,8 +146,7 @@ on the bar always opens the list, at the newest, even for a lone notice; only ×
 dismisses. The list shows one notice at a time: with several, a top row (‹ 2 of 3 › and Dismiss
 all) over a hairline, with none for a lone notice; then the notice, its mark (✓ done, ⓘ nothing was done ("Already in the list"), ⚠, ⛔), its line
 and × on its own line, the names, why, and its buttons, the first the default. The popover is as wide as the widest notice in the list needs, the same
-on every page (it changes when a notice arrives or leaves): a path counts for its real width and is
-cut in the middle at 480 pt; never under about 240 pt, which fits the pager and Dismiss all. Its Undo is in the
+on every page (it changes when a notice arrives or leaves): a path counts for its real width, and at 480 pt it wraps whole, never cut; never under about 240 pt, which fits the pager and Dismiss all. Its Undo is in the
 bar too, and "Undo ⌘Z" in the list.
 The connection's words beside it are short and fixed too ("Connecting…", "Service unavailable",
 "Phantom was updated"), with no ›, red while the dot is, as an error notice's line is; while the

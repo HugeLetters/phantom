@@ -1100,6 +1100,19 @@ fn spec() -> AppSpec<Phantom> {
                     "It isn't on disk",
                 )));
             }),
+            // A long path and a long line: both wrap whole in the popover, at any window size.
+            ("notice-long", |s| {
+                s.service = Box::new(demo_service());
+                s.bar.tell(
+                    Notice::error("Couldn't add the torrent because the folder it was going into has been moved away, renamed or deleted while it waited")
+                        .with_listing(display::show_failed_listing(
+                            std::path::Path::new(
+                                "/Volumes/An External Drive With a Long Name/Downloads/A Folder Deep Down/And Deeper/And Deeper Still/file.torrent",
+                            ),
+                            "It isn't on disk",
+                        )),
+                );
+            }),
             ("notice-width-mixed", |s| {
                 s.service = Box::new(demo_service());
                 s.bar.tell(Notice::error("Can't open the file").with_listing(display::show_failed_listing(

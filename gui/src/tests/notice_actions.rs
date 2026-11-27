@@ -230,6 +230,44 @@ fn the_popover_is_as_wide_as_the_widest_notice_needs_on_every_page() {
     assert_eq!(width(&rt), 480.0, "the same on every page");
 }
 
+/// A long path and a long notice line are shown whole, wrapped, never cut: no ellipsis, inside the
+/// popover, the popover inside the window, at 960x600 and at the 640x320 minimum.
+#[test]
+fn a_long_path_and_a_long_notice_wrap_whole_inside_the_popover() {
+    let path = "/Volumes/An External Drive With a Long Name/Downloads/A Folder Deep Down/And Deeper/And Deeper Still/file.torrent";
+    let line = "Couldn't add the torrent because the folder it was going into has been moved away, renamed or deleted while it waited";
+    for (w, h) in [(960.0, 600.0), (640.0, 320.0)] {
+        let mut rt = app(MemoryService::new());
+        rt.set_viewport((w, h), 2.0);
+        let id = told(
+            &mut rt,
+            Notice::error(line).with_listing(client::display::show_failed_listing(std::path::Path::new(path), "It isn't on disk")),
+        );
+        show_notice(&mut rt, id);
+        for _ in 0..3 {
+            settle(&mut rt);
+        }
+        let shown = super::generated::texts_under(&rt, "notices-panel");
+        for whole in [path, line] {
+            assert!(shown.iter().any(|t| t == whole), "{w}x{h}: {whole:?} whole in {shown:?}");
+        }
+        assert!(shown.iter().all(|t| !t.contains('…')), "{w}x{h}: no ellipsis: {shown:?}");
+        let panel = super::generated::rect_of(&rt, "notices-panel").expect("the panel");
+        assert!(panel[0] >= 0.0 && panel[1] >= 0.0 && panel[0] + panel[2] <= w && panel[1] + panel[3] <= h, "{w}x{h}: panel {panel:?}");
+        let drawn = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("notice-path")).expect("the path");
+        assert!(drawn.rect[3] > 24.0, "{w}x{h}: the path wraps onto lines: {:?}", drawn.rect);
+        // Nothing outside the popover: the scrolling body holds what's tall, so the path's own
+        // width stays within the panel.
+        assert!(
+            drawn.rect[0] >= panel[0] && drawn.rect[0] + drawn.rect[2] <= panel[0] + panel[2],
+            "{w}x{h}: path {:?} in {panel:?}",
+            drawn.rect
+        );
+        let title = super::generated::rect_of(&rt, "notice-line").expect("the line");
+        assert!(title[0] + title[2] <= panel[0] + panel[2], "{w}x{h}: line {title:?} in {panel:?}");
+    }
+}
+
 /// Row: Couldn't rename, something is already there. Rename… selects the torrent and opens its name
 /// field; Reveal in Finder shows what's in the way, while it's on disk.
 #[test]
