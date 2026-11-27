@@ -11,7 +11,8 @@
 //!
 //! [ADR 0011]: ../../../../docs/adr/0011-look-presets.md
 
-use serde_json::{Map, Value as Json};
+use serde::Deserialize;
+use serde_json::{Map, Value as Json, json};
 
 /// A setting a theme declares, which the generic settings screen shows.
 #[derive(Debug, PartialEq)]
@@ -103,8 +104,9 @@ pub struct Choice {
     pub label: &'static str,
 }
 
-/// A color a person picks, stored as `"#rrggbb"`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A color a person picks, stored as three numbers, `[r, g, b]`, each 0 to 255. Hex (`#rrggbb`) is
+/// only how the hex field shows and takes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rgb(pub [u8; 3]);
 
 impl Rgb {
@@ -120,9 +122,10 @@ impl Rgb {
         format!("#{r:02x}{g:02x}{b:02x}")
     }
 
-    /// The color as Rune holds it: linear, decoded from the sRGB bytes by Rune's own `hex`.
+    /// The color as Rune holds it: linear, decoded from the sRGB bytes as Rune's `hex` does.
     pub fn color(self) -> rune::Color {
-        rune::color::hex(&self.hex()).expect("`hex` is always `#rrggbb`")
+        let [r, g, b] = self.0.map(|c| super::oklab::decode(f32::from(c) / 255.0));
+        rune::Color { r, g, b, a: 1.0 }
     }
 }
 
@@ -150,7 +153,7 @@ impl Kind {
         match self {
             Kind::Toggle { .. } => json.as_bool().map(Value::Toggle),
             Kind::Choice { choices, .. } => json.as_str().and_then(|id| choices.iter().find(|c| c.id == id)).map(|c| Value::Choice(c.id)),
-            Kind::Color { .. } => json.as_str().and_then(Rgb::parse).map(|rgb| Value::Color(Some(rgb))),
+            Kind::Color { .. } => Rgb::deserialize(json).ok().map(|rgb| Value::Color(Some(rgb))),
         }
     }
 
@@ -170,7 +173,7 @@ impl Value {
         match self {
             Value::Toggle(on) => Some(Json::Bool(on)),
             Value::Choice(id) => Some(Json::String(id.to_owned())),
-            Value::Color(rgb) => rgb.map(|rgb| Json::String(rgb.hex())),
+            Value::Color(rgb) => rgb.map(|rgb| json!(rgb.0)),
         }
     }
 
@@ -295,16 +298,58 @@ impl Values {
 #[cfg(test)]
 pub(crate) mod tests {
     use proptest::prelude::*;
-    use serde_json::json;
 
     use super::*;
 
     /// A picked color is sRGB; `rune::Color` is linear, so it is decoded as Rune decodes a hex.
     #[test]
     fn a_picked_color_is_decoded_from_srgb() {
-        let picked = Rgb::parse("#2f7fe3").unwrap().color();
+        let picked = Rgb([0x2f, 0x7f, 0xe3]).color();
         assert_eq!(picked, rune::color::hex("#2f7fe3").unwrap());
         assert!(picked.r < 0.1, "0x2f as linear is 0.18, as sRGB 0.03");
+    }
+
+    /// `color` builds from the bytes what Rune's `hex` builds from their text: each channel is
+    /// decoded alone, so every byte in every channel covers all 2^24 colors.
+    #[test]
+    fn color_agrees_with_runes_hex_for_every_byte_in_every_channel() {
+        for byte in 0..=255u8 {
+            for place in 0..3 {
+                let mut rgb = [0x12, 0x9a, 0xf0];
+                rgb[place] = byte;
+                assert_eq!(Rgb(rgb).color(), rune::color::hex(&Rgb(rgb).hex()).unwrap(), "{rgb:?}");
+            }
+        }
+    }
+
+    /// A color is stored as `[r, g, b]`; the hex string it used to be, and anything else, is no color.
+    #[test]
+    fn a_color_is_stored_as_three_numbers() {
+        let kind = Kind::Color { follows: None };
+        assert_eq!(Value::Color(Some(Rgb([47, 127, 227]))).json(), Some(json!([47, 127, 227])));
+        assert_eq!(kind.read(&json!([47, 127, 227])), Some(Value::Color(Some(Rgb([47, 127, 227])))));
+        for bad in [
+            json!("#2f7fe3"),
+            json!([47, 127, 256]),
+            json!([47, 127, -1]),
+            json!([47, 127]),
+            json!([1, 2, 3, 4]),
+            json!(3),
+            json!({}),
+            json!(null),
+            json!([1.5, 2, 3]),
+        ] {
+            assert_eq!(kind.read(&bad), None, "{bad}");
+        }
+    }
+
+    /// An old `"#rrggbb"` is reset, named, to the base's color.
+    #[test]
+    fn an_old_hex_string_is_reset_and_named() {
+        let base = Values::defaults(&SAMPLE);
+        let (read, reset) = Values::read(&base, json!({"accent": "#2f7fe3"}).as_object().unwrap());
+        assert_eq!(read, base);
+        assert_eq!(reset, ["accent"]);
     }
 
     /// One setting of every kind.
@@ -358,10 +403,17 @@ pub(crate) mod tests {
         let other = prop_oneof![Just(json!(null)), Just(json!(3)), Just(json!([])), Just(json!({})), "[a-z]{1,6}".prop_map(Json::String)];
         match setting.kind {
             Kind::Toggle { .. } => other.boxed(),
-            // Strings that aren't a color or a choice: none of these is "#" and six hex digits, or a choice's id.
-            Kind::Choice { .. } | Kind::Color { .. } => {
-                prop_oneof![Just(json!(true)), Just(json!(1.5)), "x[a-z]{0,6}".prop_map(Json::String), Just(json!("#12345"))].boxed()
-            }
+            // Strings that aren't a choice's id.
+            Kind::Choice { .. } => prop_oneof![Just(json!(true)), Just(json!(1.5)), "x[a-z]{0,6}".prop_map(Json::String)].boxed(),
+            // Anything but three bytes: a hex string (the old form) too.
+            Kind::Color { .. } => prop_oneof![
+                Just(json!(true)),
+                Just(json!(1.5)),
+                "x[a-z]{0,6}".prop_map(Json::String),
+                Just(json!("#123456")),
+                Just(json!([1, 2, 300]))
+            ]
+            .boxed(),
         }
     }
 
