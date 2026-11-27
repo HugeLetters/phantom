@@ -280,6 +280,87 @@ impl Tab {
     }
 }
 
+/// How a service setting is changed: its control's kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    /// A folder chosen in a picker, or cleared.
+    Folder,
+    /// A text field: the listening port.
+    Port,
+    Switch(Switch),
+    /// A text field: a speed limit.
+    Limit(Direction),
+    /// A text field: when seeding stops.
+    Seeding(SeedingLimit),
+}
+
+/// A service setting as the Settings screen draws it and the command palette lists it: one row of
+/// [`SERVICE`], so neither keeps a list of its own.
+#[derive(Debug)]
+pub struct ServiceSetting {
+    /// Its name in the settings file, which its row is keyed by.
+    pub key: &'static str,
+    /// The tab its row is on.
+    pub tab: Tab,
+    pub control: Control,
+    /// Other names the palette finds it by, never shown.
+    pub synonyms: &'static [&'static str],
+}
+
+impl ServiceSetting {
+    /// What Settings calls it: "Keep awake".
+    pub fn label(&self) -> &'static str {
+        display::setting_label(self.key)
+    }
+}
+
+/// Every service setting, in the order the tabs show their rows.
+pub const SERVICE: [ServiceSetting; 8] = [
+    ServiceSetting {
+        key: "default_destination",
+        tab: Tab::General,
+        control: Control::Folder,
+        synonyms: &["downloads", "destination", "save to", "location"],
+    },
+    ServiceSetting {
+        key: "keep_awake",
+        tab: Tab::General,
+        control: Control::Switch(Switch::KeepAwake),
+        synonyms: &["sleep", "caffeinate", "wake"],
+    },
+    ServiceSetting {
+        key: "seed_ratio",
+        tab: Tab::General,
+        control: Control::Seeding(SeedingLimit::Ratio),
+        synonyms: &["seeding", "share ratio"],
+    },
+    ServiceSetting {
+        key: "seed_time",
+        tab: Tab::General,
+        control: Control::Seeding(SeedingLimit::Time),
+        synonyms: &["seeding", "seed time"],
+    },
+    ServiceSetting { key: "listen_port", tab: Tab::Network, control: Control::Port, synonyms: &["port"] },
+    ServiceSetting { key: "upnp", tab: Tab::Network, control: Control::Switch(Switch::Upnp), synonyms: &["port forwarding", "nat"] },
+    ServiceSetting {
+        key: "download_limit",
+        tab: Tab::Network,
+        control: Control::Limit(Direction::Download),
+        synonyms: &["speed", "bandwidth", "throttle"],
+    },
+    ServiceSetting {
+        key: "upload_limit",
+        tab: Tab::Network,
+        control: Control::Limit(Direction::Upload),
+        synonyms: &["speed", "bandwidth", "throttle"],
+    },
+];
+
+/// The service setting keyed `key`.
+pub fn service_setting(key: &str) -> Option<&'static ServiceSetting> {
+    SERVICE.iter().find(|s| s.key == key)
+}
+
 /// Which Theme Looks a theme setting's control sets: both, while they're the same theme and the
 /// field isn't split, or one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

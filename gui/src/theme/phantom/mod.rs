@@ -44,7 +44,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
                 default: "light",
                 show: Show::Segments,
             },
-        ),
+        )
+        .with_synonyms(&["theme", "dark mode", "light mode", "night"]),
         Setting::new(
             CORNERS,
             "Corners",
@@ -58,7 +59,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
                 show: Show::Dropdown,
             },
         )
-        .in_section(&LOOK),
+        .in_section(&LOOK)
+        .with_synonyms(&["radius", "rounded", "round", "square"]),
         Setting::new(
             MOTION,
             "Motion",
@@ -72,7 +74,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
                 show: Show::Dropdown,
             },
         )
-        .in_section(&LOOK),
+        .in_section(&LOOK)
+        .with_synonyms(&["animation", "reduce motion", "animations"]),
     ];
     settings.extend(colors::settings());
     settings

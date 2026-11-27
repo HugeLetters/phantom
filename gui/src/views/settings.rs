@@ -14,12 +14,13 @@ use rune::{Cx, El, col, el, row, text};
 mod customize;
 
 use crate::changes::Target;
+use crate::model::settings::SERVICE;
 use crate::model::settings::presets;
 use crate::model::settings::{
-    AppIcon, Chip, Editor, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, add_image, chip_in_use, choose_chip, choose_folder,
-    choose_image, choose_pair, choose_theme, clear_folder, close, close_icons, close_menu, edit_icons, escape, icon_full_name, icon_name,
-    pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_color, submit_limit, submit_port, submit_seeding,
-    toggle, toggle_menu,
+    AppIcon, Chip, Control, Editor, Row, SettingsSheet, SettingsWindow, Side, Switch, Tab, add_image, chip_in_use, choose_chip,
+    choose_folder, choose_image, choose_pair, choose_theme, clear_folder, close, close_icons, close_menu, edit_icons, escape,
+    icon_full_name, icon_name, pair_in_use, pick_port_automatically, remove_image, set_theme, show_tab, submit_color, submit_limit,
+    submit_port, submit_seeding, toggle, toggle_menu,
 };
 use crate::model::settings::{Held, THEME, ThemeRow, ThemeRows, focused_side, join_row, split_row, theme_rows};
 use crate::model::settings::{close_picker, escape_picker, follow_color, follow_label, open_picker, pick, toggle_section};
@@ -60,11 +61,10 @@ fn width_of(key: &str) -> f32 {
 
 /// The tab a setting is on; a name of something in one (`look_preset.light.tone`), its tab.
 pub fn tab_of(setting: &str) -> Option<Tab> {
-    match setting_of(setting) {
-        "default_destination" | "keep_awake" | "seed_ratio" | "seed_time" => Some(Tab::General),
-        "listen_port" | "upnp" | "download_limit" | "upload_limit" => Some(Tab::Network),
-        "look_preset" | "saved_presets" | "app_icon" | "app_icon_settings" => Some(Tab::Appearance),
-        _ => None,
+    let setting = setting_of(setting);
+    match crate::model::settings::service_setting(setting) {
+        Some(service) => Some(service.tab),
+        None => matches!(setting, "look_preset" | "saved_presets" | "app_icon" | "app_icon_settings").then_some(Tab::Appearance),
     }
 }
 
@@ -146,19 +146,17 @@ fn settings(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, appearance: Appe
 }
 
 fn service_rows(tab: Tab, settings: &Settings, s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui) -> Vec<El> {
-    let rows = SETTINGS.iter().filter(|name| tab_of(name) == Some(tab));
-    rows.filter_map(|name| match *name {
-        "default_destination" => Some(default_destination(settings, s.default_unavailable.as_ref(), sheet, ui)),
-        "keep_awake" => Some(switch(Switch::KeepAwake, sheet, ui)),
-        "listen_port" => Some(listen_port(settings, sheet, ui)),
-        "upnp" => Some(switch(Switch::Upnp, sheet, ui)),
-        "seed_ratio" => Some(seeding(SeedingLimit::Ratio, sheet, ui)),
-        "seed_time" => Some(seeding(SeedingLimit::Time, sheet, ui)),
-        "download_limit" => Some(limit(Direction::Download, sheet, ui)),
-        "upload_limit" => Some(limit(Direction::Upload, sheet, ui)),
-        _ => None,
-    })
-    .collect()
+    SERVICE
+        .iter()
+        .filter(|setting| setting.tab == tab)
+        .map(|setting| match setting.control {
+            Control::Folder => default_destination(settings, s.default_unavailable.as_ref(), sheet, ui),
+            Control::Switch(which) => switch(which, sheet, ui),
+            Control::Port => listen_port(settings, sheet, ui),
+            Control::Seeding(at) => seeding(at, sheet, ui),
+            Control::Limit(direction) => limit(direction, sheet, ui),
+        })
+        .collect()
 }
 
 /// What the value means, under `row`; or, while it's refused, only why.

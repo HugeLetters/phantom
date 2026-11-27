@@ -25,12 +25,21 @@ pub struct Setting {
     pub section: Option<&'static Section>,
     /// The group of its section it's in, under the group's name ("Text"); none, ungrouped.
     pub group: Option<&'static str>,
+    /// Other names a person might type for it ("radius" for Corners): the command palette matches
+    /// them, and never shows them.
+    pub synonyms: &'static [&'static str],
 }
 
 impl Setting {
     /// A setting outside every section.
     pub const fn new(key: &'static str, label: &'static str, kind: Kind) -> Setting {
-        Setting { key, label, kind, section: None, group: None }
+        Setting { key, label, kind, section: None, group: None, synonyms: &[] }
+    }
+
+    /// Also found in the command palette by `synonyms`.
+    pub const fn with_synonyms(mut self, synonyms: &'static [&'static str]) -> Setting {
+        self.synonyms = synonyms;
+        self
     }
 
     /// In `section`.
