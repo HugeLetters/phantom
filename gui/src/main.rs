@@ -1241,6 +1241,13 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 model::settings::toggle_section(s, "every-color");
                 model::settings::open_picker(s, model::settings::Side::Only(preset::Appearance::Dark), "faint_text");
             }),
+            // The picker on a pure blue Accent in Light's half: no seam at that hue (#454).
+            ("settings-blue-picker", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "accent", "#0000ff")]);
+                model::settings::presets::edit_active(s);
+                model::settings::open_picker(s, model::settings::Side::Only(preset::Appearance::Light), "accent");
+            }),
             // The same, the picker still closed: for a script to scroll to the swatch and open it.
             ("settings-faint-sheet", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));

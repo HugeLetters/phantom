@@ -127,15 +127,52 @@ fn linear_to_lab(r: f64, g: f64, b: f64) -> [f64; 3] {
     ]
 }
 
-/// The most saturation (C / L) sRGB holds along the unit hue (a, b).
+const RED_ZERO: [f64; 5] = [1.19086277, 1.76576728, 0.59662641, 0.75515197, 0.56771245];
+const GREEN_ZERO: [f64; 5] = [0.73956515, -0.45954404, 0.08285427, 0.12541070, 0.14503204];
+const BLUE_ZERO: [f64; 5] = [1.35733652, -0.00915799, -1.15130210, -0.50559606, 0.00692167];
+
+/// How far on the cyan side of pure blue (in [`red_branch`]'s units; about 10° of hue) the edge
+/// eases from the blue corner down to where red runs out. Narrower leaves a visible ridge.
+const BLUE_EASE: f64 = 0.3;
+
+/// The most saturation (C / L) sRGB holds along the unit hue (a, b), but at pure blue.
+///
+/// sRGB's blue corner sticks out in OKLab: just on the cyan side of pure blue, red runs out at
+/// about 20% less saturation than the corner has, so the true edge jumps there, and with it every
+/// color of a picker measured against it (#454's seam). On that side the edge eases from the
+/// corner's saturation down to where red runs out instead, over [`BLUE_EASE`]; the colors it
+/// takes in past the true edge are shown clipped to sRGB.
 fn max_saturation(a: f64, b: f64) -> f64 {
-    let (k, w): ([f64; 5], [f64; 3]) = if -1.88170328 * a - 0.80936493 * b > 1.0 {
-        ([1.19086277, 1.76576728, 0.59662641, 0.75515197, 0.56771245], LMS_TO_RGB[0])
+    let red = red_branch(a, b);
+    if red > 0.0 {
+        let s = max_saturation_on(RED_ZERO, LMS_TO_RGB[0], a, b);
+        if in_blue_ease(a, b) {
+            let t = 1.0 - red / BLUE_EASE;
+            let corner = max_saturation_on(GREEN_ZERO, LMS_TO_RGB[1], a, b);
+            return s + (corner - s).max(0.0) * t * t * (3.0 - 2.0 * t);
+        }
+        s
     } else if 1.81444104 * a - 1.19445276 * b > 1.0 {
-        ([0.73956515, -0.45954404, 0.08285427, 0.12541070, 0.14503204], LMS_TO_RGB[1])
+        max_saturation_on(GREEN_ZERO, LMS_TO_RGB[1], a, b)
     } else {
-        ([1.35733652, -0.00915799, -1.15130210, -0.50559606, 0.00692167], LMS_TO_RGB[2])
-    };
+        max_saturation_on(BLUE_ZERO, LMS_TO_RGB[2], a, b)
+    }
+}
+
+/// Above 0, the hues where red runs out first (cyan to blue); how far past the line it is.
+fn red_branch(a: f64, b: f64) -> f64 {
+    -1.88170328 * a - 0.80936493 * b - 1.0
+}
+
+/// Whether the unit hue (a, b) is in the ease on the cyan side of pure blue.
+fn in_blue_ease(a: f64, b: f64) -> bool {
+    let red = red_branch(a, b);
+    b < 0.0 && red > 0.0 && red < BLUE_EASE
+}
+
+/// The saturation along the unit hue (a, b) where the channel of row `w` runs out: the fit `k`,
+/// then one Halley step.
+fn max_saturation_on(k: [f64; 5], w: [f64; 3], a: f64, b: f64) -> f64 {
     let s = k[0] + k[1] * a + k[2] * b + k[3] * a * a + k[4] * a * b;
     let [kl, km, ks] = lms_k(a, b);
     let (l_, m_, s_) = (1.0 + s * kl, 1.0 + s * km, 1.0 + s * ks);
@@ -244,19 +281,7 @@ impl Okhsl {
             return Okhsl { h: 0.0, s: 0.0, l: toe(l) as f32 };
         }
         let h = 0.5 + 0.5 * (-b).atan2(-a) / std::f64::consts::PI;
-        // The most chroma sRGB holds jumps where the hue crosses from one branch of
-        // `max_saturation` to the next, at pure blue, and a hue rounded to f32 can land on the
-        // low side of that jump, where this color is out of gamut. Take the neighbouring f32 hue
-        // that can carry it.
-        let at = |h: f32| {
-            let (ha, hb) = ((std::f64::consts::TAU * h as f64).cos(), (std::f64::consts::TAU * h as f64).sin());
-            (h, chromas(l, ha, hb))
-        };
-        let near = h as f32;
-        let up = f32::from_bits(if near > 0.0 { near.to_bits() + 1 } else { 1 });
-        let down = f32::from_bits(near.to_bits().saturating_sub(1));
-        let (h, [c0, c_mid, c_max]) =
-            [near, up, down].into_iter().map(at).find(|(_, [_, _, c_max])| c <= *c_max).unwrap_or_else(|| at(near));
+        let [c0, c_mid, c_max] = chromas(l, a / c, b / c);
         let s = if c < c_mid {
             let k1 = 0.8 * c0;
             0.8 * (c / (k1 + (1.0 - k1 / c_mid) * c))
@@ -265,7 +290,7 @@ impl Okhsl {
             let t = (c - c_mid) / (k1 + (1.0 - k1 / (c_max - c_mid)) * (c - c_mid));
             0.8 + 0.2 * t
         };
-        Okhsl { h, s: s.clamp(0.0, 1.0) as f32, l: toe(l).clamp(0.0, 1.0) as f32 }
+        Okhsl { h: h as f32, s: s.clamp(0.0, 1.0) as f32, l: toe(l).clamp(0.0, 1.0) as f32 }
     }
 }
 
@@ -276,23 +301,47 @@ mod tests {
     use super::*;
 
     /// `rgb`, to Okhsl and back, is the same bytes give or take one step of 255. The exception is a
-    /// color on the edge of the gamut (saturation 1), mostly dark blues: Okhsl draws that edge as
-    /// straight lines to the hue's cusp, which the true edge curves away from by up to four steps, so such a color reads back as the nearest one the line holds. That's a limit
-    /// of the Okhsl model (Ottosson's reference has it too), not float error: the same in f64.
+    /// color on the edge of the gamut (saturation 1), a dozen light yellows: Okhsl draws the edge
+    /// above the cusp as a line refined by one step, which misses the true edge there by up to three
+    /// steps, so such a color reads back as the nearest one the line holds. That's a limit of the
+    /// Okhsl model (Ottosson's reference has it too), not float error: the same in f64.
     fn assert_round_trips(rgb: [u8; 3]) {
         let okhsl = Okhsl::of(Rgb(rgb).color());
         let back = Rgb::of(okhsl.color());
-        let allowed = if okhsl.s >= 1.0 - 1e-5 { 4 } else { 1 };
+        let allowed = if okhsl.s >= 1.0 - 1e-5 { 3 } else { 1 };
         for (a, b) in rgb.iter().zip(back.0) {
             assert!((*a as i32 - b as i32).abs() <= allowed, "{rgb:?} came back {:?}", back.0);
         }
     }
 
-    /// Seen failing once as a property case (#454): a near-black blue, whose f32 hue fell on the
-    /// low side of the jump in the gamut edge at pure blue.
+    /// Seen failing once as a property case (#454): a near-black blue, on the cyan side of pure
+    /// blue, where the true gamut edge jumps.
     #[test]
     fn a_near_black_blue_round_trips_through_okhsl() {
         assert_round_trips([0, 0, 7]);
+    }
+
+    /// The picker's square has no seam: at every saturation and lightness, colors a hair apart in
+    /// hue are close, pure blue (#454) included.
+    #[test]
+    fn okhsl_is_continuous_across_hue() {
+        const STEPS: u32 = 4096;
+        let mut worst = (0.0f32, 0.0, 0.0, 0.0);
+        for s in [0.2f32, 0.5, 0.8, 0.9, 1.0] {
+            for l in (1..50).map(|i| i as f32 / 50.0) {
+                let mut prev = Okhsl { h: 0.0, s, l }.color();
+                for i in 1..=STEPS {
+                    let h = i as f32 / STEPS as f32;
+                    let next = Okhsl { h: h % 1.0, s, l }.color();
+                    let d = delta_e(prev, next);
+                    if d > worst.0 {
+                        worst = (d, h, s, l);
+                    }
+                    prev = next;
+                }
+            }
+        }
+        assert!(worst.0 < 1.0, "a jump of {} at (h, s, l) = {:?}", worst.0, (worst.1, worst.2, worst.3));
     }
 
     /// Every sRGB color; a few seconds in release: `cargo test -p gui --release -- --ignored every_srgb`.
@@ -316,7 +365,8 @@ mod tests {
         }
 
         /// Every Okhsl triple is a color sRGB shows, and reads back as itself (but for hue where
-        /// there's no saturation to see it by, and the ends of lightness).
+        /// there's no saturation to see it by, and the ends of lightness). In the ease at pure
+        /// blue, a color past sRGB's edge is clipped to it and reads back a little off.
         #[test]
         fn every_okhsl_is_displayable_and_reads_back(h in 0.0f32..1.0, s in 0.05f32..0.95, l in 0.05f32..0.95) {
             let c = Okhsl { h, s, l }.color();
@@ -324,10 +374,12 @@ mod tests {
                 prop_assert!((0.0..=1.0).contains(&x));
             }
             let back = Okhsl::of(c);
-            prop_assert!((back.l - l).abs() < 1e-3, "lightness {l} came back {}", back.l);
-            prop_assert!((back.s - s).abs() < 2e-3, "saturation {s} came back {}", back.s);
+            let tau = std::f64::consts::TAU * h as f64;
+            let clipped = if in_blue_ease(tau.cos(), tau.sin()) { 0.03 } else { 0.0 };
+            prop_assert!((back.l - l).abs() < 1e-3 + clipped, "lightness {l} came back {}", back.l);
+            prop_assert!((back.s - s).abs() < 2e-3 + clipped, "saturation {s} came back {}", back.s);
             let dh = (back.h - h).abs();
-            prop_assert!(dh.min(1.0 - dh) < 2e-3, "hue {h} came back {}", back.h);
+            prop_assert!(dh.min(1.0 - dh) < 2e-3 + clipped, "hue {h} came back {}", back.h);
         }
 
         /// The ink of a picked color over a surface looks like it there.
