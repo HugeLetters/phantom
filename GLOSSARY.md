@@ -106,8 +106,10 @@ Set the chosen files of a torrent that are on disk to Off, then move them to the
 the file list focused, or in the file menu, which offers it while a chosen file is on disk). Off
 comes first, so the torrent never misses a file it gets; a chosen file that isn't on disk is left as
 it is, nothing else moves, and nothing is ever erased. Files that couldn't move are still where they were,
-Off all the same, and said so. It can be undone, as a Remove or a Delete is: one step of Undo per
-Move to Trash, which puts back what's still in the Trash and each file's priority as it was.
+Off all the same, and said so. A file that went is forgotten at once: nothing of it is read from
+the Trash or offered to peers. It can be undone, as a Remove or a Delete is: one step of Undo per
+Move to Trash, which puts back what's still in the Trash and each file's priority as it was, then
+checks the torrent.
 _Avoid_: delete (a file), discard
 
 ## The app
@@ -177,8 +179,9 @@ still running: Undo never waits. One still running stops after the file in fligh
 hasn't started is dropped. Either way the list shows it undone at once: a torrent is back in its
 old place and status, and starts once its files are back. Of a Move to Trash: the files come back from the
 Trash to where they were (those still there: one emptied from the Trash stays Off) and each file
-asked about has the priority it had; one set Normal since and downloaded again has that new copy
-sent to the Trash first, and the torrent is checked. Of a Remove or Delete: the torrent comes back as
+asked about has the priority it had, then the torrent is checked. A new copy Phantom made at its path
+since (one set Normal and downloaded again) goes to the Trash first; anything else there refuses
+the undo, and the old copy stays in the Trash. Of a Remove or Delete: the torrent comes back as
 it was, with its id, its destination, its priorities and what it had downloaded, and a Delete's
 files come back from the Trash to where they were; of a selection's, every torrent in it, each on
 its own. A partial Delete undoes what it moved. Of a Rename: it's renamed back, as a Rename is (never
