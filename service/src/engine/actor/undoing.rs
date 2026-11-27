@@ -490,7 +490,8 @@ impl Actor {
             }
             Back::Gone { .. } | Back::InList { .. } | Back::Renamed { .. } => Default::default(),
         };
-        let (trashed, hash) = (self.guard.trashed().clone(), entry.info_hash.clone());
+        // Only a Move to Trash's undo holds its torrent's files still: no other has them in librqbit.
+        let holding = matches!(entry.back, Back::Files { .. }).then(|| (self.guard.trashed().clone(), entry.info_hash.clone()));
         self.putting_back.spawn_blocking(move || {
             let first = entry.put_back.first().map_or_else(|| PathBuf::from("/"), |t| t.from.clone());
             // Checked before it started; one finished after a crash may have lost it since.
@@ -499,7 +500,11 @@ impl Actor {
             };
             // A copy goes to the Trash with librqbit's changes held still, and is closed as it goes.
             let put = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                trashed.putting_back(&hash, &closing, || trash::put_back(&items, &destination, &trash, resumed, &copies, &own))
+                let put_back = || trash::put_back(&items, &destination, &trash, resumed, &copies, &own);
+                match &holding {
+                    Some((trashed, hash)) => trashed.putting_back(hash, &closing, put_back),
+                    None => put_back(),
+                }
             }));
             let put = put
                 .unwrap_or_else(|_| Err((trash::PutBackError::Failed { path: first, detail: "putting back stopped".into() }, Vec::new())));
