@@ -1,9 +1,9 @@
 //! The App icon's Customize sheet (#417): the settings of the icon shown, a Light and a Dark value
-//! each, set as they're picked and kept in `gui.json`, drawn at once in the App icon's row and
+//! each, set as they're picked, drawn at once, and kept in `gui.json` once by Done in the App icon's row and
 //! tiles. A color setting's swatch opens the color picker beside it, whose buttons set the icon's
 //! own colors (Original) or the colors of the look that half shows (Follow the look, for a look of
-//! the icon's theme only). Done keeps what was set; Cancel, and Escape once the picker is closed,
-//! put back what the sheet opened on.
+//! the icon's theme only). Done keeps what was set; Cancel, Escape once the picker is closed and the
+//! window closing put back what the sheet opened on, writing nothing; so does quitting.
 
 use rune::TextEdit;
 
@@ -64,6 +64,8 @@ pub fn open(s: &mut SettingsWindow) {
     let opened = s.app_icon.tints.clone();
     if let Some(sheet) = &mut s.sheet {
         sheet.customize = Some(Customize { icon: icon.id, opened, picker: None });
+        // What it sets is shown, and kept once Done.
+        s.app_icon.hold_tints();
         // Its picks are its own for ⌘Z, until it closes.
         s.main.post(|s, _| crate::changes::sheet_opened(s, crate::changes::session::Sheet::Customize));
     }
@@ -80,7 +82,11 @@ pub fn done(s: &mut SettingsWindow) {
     close_picker(s);
     let Some(open) = s.sheet.as_mut().and_then(|sheet| sheet.customize.take()) else { return };
     // What's left of the visit once a ⌘Z pressed just before has taken its step.
-    super::end_sheet(s, move |s| visit(s, open.opened));
+    super::end_sheet(s, move |s| {
+        // Done keeps it: written once.
+        s.app_icon.release_tints();
+        visit(s, open.opened)
+    });
 }
 
 /// Cancel, or Escape with the picker closed: what it opened on is back, and it closes, none of its
@@ -91,6 +97,7 @@ pub fn cancel(s: &mut SettingsWindow) {
     super::end_sheet(s, move |s| {
         s.app_icon.put_tints(open.opened);
         s.app_icon.redraw(&s.looks.borrow());
+        s.app_icon.release_tints();
         None
     });
 }

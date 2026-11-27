@@ -434,6 +434,8 @@ struct Model {
     sheet: Option<(Target, Ed)>,
     /// The Look Presets as they were when it opened.
     opened: Option<Presets>,
+    /// The Look Presets as they were last kept: with a sheet open, only Done keeps its edits.
+    kept: Presets,
     /// The text field with the focus: from a click in it until another step takes the focus away.
     focused: Option<Fld>,
     /// The changes ⌘Z takes back, newest last, and what each undo told, in order.
@@ -998,15 +1000,16 @@ impl ReferenceStateMachine for Sheet {
                     restarts_fail: n == 0,
                     errors: 0,
                     focus: None,
-                    preset,
+                    preset: preset.clone(),
                     dark: true,
                     sheet: None,
                     opened: None,
+                    kept: Presets { active: preset.clone(), saved: saved.clone() },
                     focused: None,
                     changes: Vec::new(),
                     told: Vec::new(),
                     rows: TORRENTS.iter().map(|(id, _)| *id).collect(),
-                    saved,
+                    saved: saved.clone(),
                     save_as: None,
                     name_refused: None,
                     name_focused: false,
@@ -1703,8 +1706,12 @@ fn act(mut m: Model, step: &Step) -> Model {
             m.name_focused = true;
         }
         Step::Close { escape: true } if m.tab == Tab::Appearance && m.save_as.is_some() => (m.save_as, m.name_refused) = (None, None),
-        Step::Close { .. } => {
+        Step::Close { escape } => {
             (m.open, m.focused, m.front, m.name_focused) = (false, None, main, false);
+            // The window closing drops what the Look Preset's sheet changed, as Cancel does.
+            if !escape {
+                m.close_editor(false);
+            }
             m.close_sheet();
         }
         // The window in front closes, a saved preset's sheet first; the other stays.
@@ -1884,6 +1891,9 @@ fn act(mut m: Model, step: &Step) -> Model {
         Step::Other(other) => m.other(*other),
         Step::OtherUndo => m.other_undo(),
         Step::Restarts { fail } => m.restarts_fail = *fail,
+    }
+    if m.sheet.is_none() {
+        m.kept = m.presets();
     }
     m
 }
@@ -2238,9 +2248,9 @@ impl StateMachineTest for Sheet {
         assert_eq!(crate::changes::menu_title(s), title, "Edit ▸ Undo names what ⌘Z takes back, whichever window is in front");
         let looks = s.looks.borrow();
         assert_eq!(looks.preset(), &m.preset, "the Active Look Preset");
-        assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&looks.preset().clone()), &m.preset, "kept as it is");
+        assert_eq!(sut.kept.borrow().as_ref().unwrap_or(&m.kept.active), &m.kept.active, "kept as it is: Done keeps a sheet's edits");
         assert_eq!(w.saved.list(), m.saved.as_slice(), "the saved Look Presets");
-        assert_eq!(sut.kept_saved.borrow().as_deref().unwrap_or(w.saved.list()), m.saved.as_slice(), "kept as they are");
+        assert_eq!(sut.kept_saved.borrow().as_deref().unwrap_or(&m.kept.saved), m.kept.saved.as_slice(), "kept as they are");
         // Both windows show a saved preset's sheet's preset while it's open, never kept; else the
         // Active look, which the Active look's sheet edits as it is.
         assert_eq!(looks.previewed(), m.previewing().then(|| m.shown_preset()).as_ref(), "the preview");
@@ -3267,10 +3277,15 @@ fn shown_label(m: &Model, key: &str) -> &'static str {
 /// Settings on the Active look's sheet, its theme the sample one with Accent black in both halves,
 /// so its field is one for both.
 fn accent_sheet() -> Desk {
+    accent_sheet_keeping(|_: &LookPreset| {})
+}
+
+/// [`accent_sheet`], each Look Preset kept through `keep`.
+fn accent_sheet_keeping(keep: impl FnMut(&LookPreset) + 'static) -> Desk {
     let mut look = crate::theme::ThemeLook::defaults(crate::theme::find("sample").unwrap());
     let _ = look.settings.set("accent", Value::Color(Some(Rgb([0, 0, 0]))));
     let mut d = desk(MemoryService::new());
-    *d.main.state.looks.borrow_mut() = Looks::new(LookPreset { light: look.clone(), dark: look }, |_: &LookPreset| {});
+    *d.main.state.looks.borrow_mut() = Looks::new(LookPreset { light: look.clone(), dark: look }, keep);
     d.main.set_viewport((960.0, 900.0), 2.0);
     d.settings.set_viewport((600.0, 900.0), 2.0);
     d.settle();
@@ -5314,3 +5329,4 @@ fn return_presses_done_on_the_app_icons_sheet() {
 
 mod customize;
 mod fit;
+mod saves;

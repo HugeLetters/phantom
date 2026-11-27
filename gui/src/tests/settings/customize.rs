@@ -18,7 +18,7 @@ const TILE: &str = "tile";
 
 /// The Appearance tab at `width`, the App icon following the theme (Phantom's), each change to
 /// the icons' settings recorded as it's kept.
-fn tab(width: f32) -> (Desk, Rc<RefCell<Vec<IconSettings>>>) {
+pub(super) fn tab(width: f32) -> (Desk, Rc<RefCell<Vec<IconSettings>>>) {
     let mut d = appearance_tab();
     let kept = Rc::new(RefCell::new(Vec::new()));
     let keep = kept.clone();
@@ -41,7 +41,7 @@ fn sheet(width: f32) -> (Desk, Rc<RefCell<Vec<IconSettings>>>) {
 }
 
 /// Presses `key`; an open picker that `key` isn't in is closed first, as a press outside it does.
-fn press(d: &mut Desk, key: &str) {
+pub(super) fn press(d: &mut Desk, key: &str) {
     let open = d.settings.state.sheet.as_ref().and_then(|s| s.customize.as_ref()).and_then(|c| c.picker.as_ref()).map(|p| p.half);
     if let Some(half) = open
         && !key.starts_with(&format!("customize-tile-{}", half.key()))
@@ -136,8 +136,7 @@ fn a_pick_sets_the_tile_by_hand_and_it_sticks() {
     let Tint::Color(rgb) = tint(&d, Appearance::Light) else { panic!("set by hand: {:?}", tint(&d, Appearance::Light)) };
     assert_eq!(tint(&d, Appearance::Dark), Tint::Original, "Dark untouched");
     assert!(d.settings.state.app_icon.drawing("phantom", Appearance::Light).is_some_and(|svg| svg.contains("stop-color")), "drawn");
-    let last = kept.borrow().last().cloned().expect("kept");
-    assert_eq!(serde_json::to_value(&last).unwrap(), serde_json::json!({"phantom": {"light": {"tile": rgb.hex()}}}));
+    assert!(kept.borrow().is_empty(), "shown, not kept, while the sheet is open");
     key(&mut d, Key::Escape);
     assert!(!picker_open(&d), "Escape closes the picker");
     assert_eq!(element(&d, "customize-tile-light-swatch").help.as_deref(), Some(format!("{} · set by hand", rgb.hex()).as_str()));
@@ -150,6 +149,13 @@ fn a_pick_sets_the_tile_by_hand_and_it_sticks() {
     press(&mut d, "customize-done");
     assert!(d.settings.state.sheet.as_ref().is_some_and(|s| s.customize.is_none()), "Done closes it");
     assert_eq!(tint(&d, Appearance::Light), Tint::Color(rgb), "and keeps what was set");
+    d.settle();
+    let kept = kept.borrow();
+    assert_eq!(kept.len(), 1, "kept once, by Done");
+    assert_eq!(
+        serde_json::to_value(&kept[0]).unwrap(),
+        serde_json::json!({"phantom": {"light": {"tile": rgb.hex()}, "dark": {"tile": "#6933c2"}}})
+    );
 }
 
 /// The picker's Original and Follow the look: each sets its half, the one in use off.

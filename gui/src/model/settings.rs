@@ -727,6 +727,10 @@ pub struct AppIcon {
     gone: Vec<String>,
     /// Each icon's own settings ([`crate::theme::icon`]), as `gui.json` keeps them.
     pub tints: IconSettings,
+    /// How many sheets are open over the tints: while any is, a change is shown but not kept.
+    tints_held: usize,
+    /// The tints as they were last kept, which [`Self::release_tints`] compares with.
+    tints_kept: IconSettings,
     /// The icons drawn from their settings, for the look each half shows ([`Self::redraw`]).
     drawn: Vec<Drawn>,
     show: Box<dyn FnMut(IconChange<'_>)>,
@@ -787,6 +791,8 @@ impl AppIcon {
             adding: Vec::new(),
             gone: Vec::new(),
             tints: IconSettings::new(),
+            tints_held: 0,
+            tints_kept: IconSettings::new(),
             drawn: Vec::new(),
             show: Box::new(show),
         };
@@ -823,6 +829,7 @@ impl AppIcon {
     /// With the icons' own settings `tints`, as `gui.json` keeps them; drawn by [`Self::redraw`].
     pub fn with_tints(mut self, tints: IconSettings) -> Self {
         self.tints = crate::theme::icon::stored(&tints);
+        self.tints_kept = self.tints.clone();
         self
     }
 
@@ -839,14 +846,36 @@ impl AppIcon {
         }
         self.tints.entry(id.to_owned()).or_default().get_mut(half).insert(key.to_owned(), tint);
         self.tints = crate::theme::icon::stored(&self.tints);
-        (self.show)(IconChange::Tints(&self.tints));
+        self.keep_tints();
+    }
+
+    /// Tells `show` the tints, unless a sheet is open: that keeps them once it's done.
+    fn keep_tints(&mut self) {
+        if self.tints_held == 0 {
+            self.tints_kept = self.tints.clone();
+            (self.show)(IconChange::Tints(&self.tints));
+        }
+    }
+
+    /// The Customize sheet opens: what it sets is kept only once [`Self::release_tints`] ends it.
+    pub fn hold_tints(&mut self) {
+        self.tints_held += 1;
+    }
+
+    /// A sheet over the tints closed. With none left open, they're kept if they aren't what was
+    /// kept last.
+    pub fn release_tints(&mut self) {
+        self.tints_held = self.tints_held.saturating_sub(1);
+        if self.tints_held == 0 && self.tints != self.tints_kept {
+            self.keep_tints();
+        }
     }
 
     /// The icons' own settings are `tints` again (a Cancel), kept.
     pub fn put_tints(&mut self, tints: IconSettings) {
         if self.tints != tints {
             self.tints = tints;
-            (self.show)(IconChange::Tints(&self.tints));
+            self.keep_tints();
         }
     }
 
@@ -1135,10 +1164,11 @@ pub fn close_front(s: &mut SettingsWindow) {
 
 /// The window closed, also by its close button: the field being edited is applied first.
 pub fn closed(s: &mut SettingsWindow) {
-    // A Look Preset's sheet keeps what was done in it, as Done does.
-    presets::close(s);
+    // A Look Preset's sheet and the Customize sheet drop what was done in them, as Cancel does;
+    // the App icon's sheet keeps its picks.
+    presets::cancel(s);
     close_icons(s);
-    customize::done(s);
+    customize::cancel(s);
     leave_all(s);
     s.sheet = None;
     // A saved preset's sheet goes with it, and so does its preview.
@@ -1546,6 +1576,8 @@ pub fn restore(s: &mut SettingsWindow, was: Presets) {
             && s.saved.get(name).is_none()
         {
             sheet.edit = None;
+            s.looks.borrow_mut().release();
+            s.saved.release();
             s.main.post(|s, _| crate::changes::sheet_dropped(s));
         }
     }

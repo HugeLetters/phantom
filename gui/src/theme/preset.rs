@@ -182,6 +182,10 @@ pub struct Looks {
     light: Rc<Look>,
     dark: Rc<Look>,
     keep: Box<dyn FnMut(&LookPreset)>,
+    /// The preset as it was last kept, which [`Self::release`] compares with.
+    kept: LookPreset,
+    /// How many sheets are open over the looks: while any is, a change is shown but not kept.
+    held: usize,
     preview: Option<Preview>,
 }
 
@@ -197,7 +201,22 @@ impl Looks {
     pub fn new(preset: LookPreset, keep: impl FnMut(&LookPreset) + 'static) -> Looks {
         let light = Rc::new(Look::build(&preset.light));
         let dark = Rc::new(Look::build(&preset.dark));
-        Looks { preset, light, dark, keep: Box::new(keep), preview: None }
+        Looks { kept: preset.clone(), preset, light, dark, keep: Box::new(keep), held: 0, preview: None }
+    }
+
+    /// A sheet opens over the looks: what it changes is shown, and kept only once [`Self::release`]
+    /// ends the last sheet open (its Done); a sheet that's cancelled or never closed keeps nothing.
+    pub fn hold(&mut self) {
+        self.held += 1;
+    }
+
+    /// A sheet closed. With none left open, the preset is kept if it isn't what was kept last.
+    pub fn release(&mut self) {
+        self.held = self.held.saturating_sub(1);
+        if self.held == 0 && self.preset != self.kept {
+            self.kept = self.preset.clone();
+            (self.keep)(&self.preset);
+        }
     }
 
     /// Shows `preset` over the active one, or, `None`, the active one again. Nothing is kept.
@@ -244,7 +263,10 @@ impl Looks {
             Appearance::Light => self.light = built,
             Appearance::Dark => self.dark = built,
         }
-        (self.keep)(&self.preset);
+        if self.held == 0 {
+            self.kept = self.preset.clone();
+            (self.keep)(&self.preset);
+        }
     }
 
     /// The App icon "Follow theme" shows: each Appearance's look's, one icon when they agree.
