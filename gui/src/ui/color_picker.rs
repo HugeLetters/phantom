@@ -10,7 +10,8 @@ use rune::{Align, Drag, El, Key, KeyEvent, Phase, Side, Tx, col, el, row, text};
 use rune_kit::{Placement, popover};
 
 use super::{Tone, Ui};
-use crate::theme::oklab::{Okhsl, encode};
+use crate::theme::oklab::Okhsl;
+use crate::theme::setting::Rgb;
 
 /// How big a swatch is, and its ring's width and its gap off the swatch.
 const SWATCH: f32 = 22.0;
@@ -109,9 +110,8 @@ impl Ui {
     ) {
         let k = &self.k;
         let (w, h) = SQUARE;
-        let square_px = image("square", (w as u32, h as u32), (quantized(at.s), 0, 0), |x, y| Okhsl { h: x, s: at.s, l: 1.0 - y });
-        let bar_px =
-            image("bar", (BAR as u32, h as u32), (quantized(at.h), quantized(at.l), 1), |_, y| Okhsl { h: at.h, s: 1.0 - y, l: at.l });
+        let square_px = image("square", (w as u32, h as u32), (quantized(at.s), 0, 0), square_at(at.s));
+        let bar_px = image("bar", (BAR as u32, h as u32), (quantized(at.h), quantized(at.l), 1), bar_at(at));
         let mark = |e: El| {
             e.border(2.0, rune::Color::WHITE)
                 .box_shadow(rune::Shadow { spread: 1.0, color: rune::Color::BLACK.alpha(0.45), ..Default::default() })
@@ -133,7 +133,7 @@ impl Ui {
             .cursor(rune::Cursor::Crosshair)
             .on_drag(move |s: &mut S, d: &mut Drag, _: &mut Tx| {
                 let (x, y) = held(d);
-                let picked = Okhsl { h: (x / d.w).clamp(0.0, 0.999), s: at.s, l: (1.0 - y / d.h).clamp(0.0, 1.0) };
+                let picked = square_pick(at.s, (x, y), (d.w, d.h));
                 pick(s, phase(d, picked));
             })
             .on_key({
@@ -166,7 +166,7 @@ impl Ui {
             .focusable(true)
             .focus_ring(2.0, 1.0, k.c.border_focus)
             .on_drag(move |s: &mut S, d: &mut Drag, _: &mut Tx| {
-                let picked = Okhsl { s: (1.0 - held(d).1 / d.h).clamp(0.0, 1.0), ..at };
+                let picked = bar_pick(at, held(d).1, d.h);
                 pick(s, phase(d, picked));
             })
             .on_key(move |s: &mut S, ev: &KeyEvent, _: &mut Tx| {
@@ -279,9 +279,43 @@ fn phase(d: &Drag, picked: Okhsl) -> Pick {
     }
 }
 
+/// What the square shows at fraction (x, y) from its top left, at saturation `s`.
+fn square_at(s: f32) -> impl Fn(f32, f32) -> Okhsl {
+    move |x, y| Okhsl { h: x, s, l: 1.0 - y }
+}
+
+/// What the bar shows at fraction (_, y) from its top, at `at`'s hue and lightness.
+fn bar_at(at: Okhsl) -> impl Fn(f32, f32) -> Okhsl {
+    move |_, y| Okhsl { h: at.h, s: 1.0 - y, l: at.l }
+}
+
+/// What a pointer at `(x, y)` in a square of `size` picks, at saturation `s`.
+fn square_pick(s: f32, (x, y): (f32, f32), (w, h): (f32, f32)) -> Okhsl {
+    Okhsl { h: (x / w).clamp(0.0, 0.999), s, l: (1.0 - y / h).clamp(0.0, 1.0) }
+}
+
+/// What a pointer `y` down a bar of height `h` picks, from `at`.
+fn bar_pick(at: Okhsl, y: f32, h: f32) -> Okhsl {
+    Okhsl { s: (1.0 - y / h).clamp(0.0, 1.0), ..at }
+}
+
 /// `x` to a thousandth, as an image's key holds it: finer than a pixel of the square.
 fn quantized(x: f32) -> u32 {
     (x.clamp(0.0, 1.0) * 1000.0).round() as u32
+}
+
+/// The RGBA bytes of an image of `size` pixels whose pixel at fraction (x, y) from the top left is
+/// `at(x, y)`: each the bytes `Rgb::of` makes of the color, as a pick's `#rrggbb` is.
+fn rgba(size: (u32, u32), at: impl Fn(f32, f32) -> Okhsl) -> Vec<u8> {
+    let (w, h) = size;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = Rgb::of(at((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32).color()).0;
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+    }
+    rgba
 }
 
 /// An image of `size` pixels whose pixel at fraction (x, y) from the top left is `at(x, y)`,
@@ -296,14 +330,7 @@ fn image(what: &'static str, size: (u32, u32), inputs: (u32, u32, u8), at: impl 
         return p;
     }
     let (w, h) = size;
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    for y in 0..h {
-        for x in 0..w {
-            let c = at((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32).color();
-            let byte = |v: f32| (encode(v.clamp(0.0, 1.0)) * 255.0).round() as u8;
-            rgba.extend_from_slice(&[byte(c.r), byte(c.g), byte(c.b), 255]);
-        }
-    }
+    let rgba = rgba(size, at);
     let pixels = rune::Pixels::new();
     pixels.set(w, h, rgba);
     KEPT.with(|k| {
@@ -316,4 +343,51 @@ fn image(what: &'static str, size: (u32, u32), inputs: (u32, u32, u8), at: impl 
         }
     });
     pixels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pixel at (px, py) of `rgba`, as `#rrggbb`.
+    fn pixel(rgba: &[u8], w: u32, (px, py): (u32, u32)) -> String {
+        let i = ((py * w + px) * 4) as usize;
+        Rgb([rgba[i], rgba[i + 1], rgba[i + 2]]).hex()
+    }
+
+    /// The saturations tried, the eased band round pure blue among the hues.
+    const SATURATIONS: [f32; 8] = [0.0, 0.1, 0.5, 0.79, 0.8, 0.95, 0.999, 1.0];
+
+    #[test]
+    fn the_square_shows_what_a_click_in_it_sets() {
+        let (w, h) = SQUARE;
+        let size = (w as u32, h as u32);
+        for s in SATURATIONS {
+            let rgba = rgba(size, square_at(s));
+            // Every 3rd column and 2nd row, and every column of the band around pure blue
+            // (hue about 0.73).
+            for px in (0..size.0).filter(|px| px % 3 == 0 || (200..250).contains(px)) {
+                for py in (0..size.1).filter(|py| py % 2 == 0) {
+                    let at = (px as f32 + 0.5, py as f32 + 0.5);
+                    let picked = square_pick(s, at, SQUARE);
+                    assert_eq!(pixel(&rgba, size.0, (px, py)), Rgb::of(picked.color()).hex(), "square at ({px}, {py}), saturation {s}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_bar_shows_what_a_click_in_it_sets() {
+        let size = (BAR as u32, SQUARE.1 as u32);
+        for (h, l) in [(0.0, 0.5), (0.73, 0.45), (0.73, 0.3), (0.7, 0.6), (0.73, 0.9), (0.9, 0.1), (0.5, 1.0)] {
+            let at = Okhsl { h, s: 0.5, l };
+            let rgba = rgba(size, bar_at(at));
+            for py in 0..size.1 {
+                let picked = bar_pick(at, py as f32 + 0.5, SQUARE.1);
+                for px in [0, size.0 - 1] {
+                    assert_eq!(pixel(&rgba, size.0, (px, py)), Rgb::of(picked.color()).hex(), "bar at y {py}, hue {h}, lightness {l}");
+                }
+            }
+        }
+    }
 }
