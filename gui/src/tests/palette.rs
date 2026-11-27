@@ -772,10 +772,10 @@ fn nothing_typed_lists_every_entry_recent_and_the_selection_first() {
     }
 }
 
-/// The panel stops growing at the field plus twelve rows however tall the window, scrolls past
+/// The panel stops growing at the field plus ten rows however tall the window, scrolls past
 /// that, fits a small window, and a short list is shorter.
 #[test]
-fn the_palette_height_is_capped_at_twelve_rows_and_fits_the_window() {
+fn the_palette_height_is_capped_at_ten_rows_and_fits_the_window() {
     let height = |size: (f32, f32), query: &str| {
         let mut rt = app(MemoryService::new());
         rt.set_viewport(size, 2.0);
@@ -787,7 +787,7 @@ fn the_palette_height_is_capped_at_twelve_rows_and_fits_the_window() {
     let (a, a_list) = height((960.0, 600.0), "");
     let (b, _) = height((1440.0, 900.0), "");
     assert!((a[3] - b[3]).abs() < 0.5, "the same cap at both sizes: {} and {}", a[3], b[3]);
-    assert!((a_list[3] - (12.0 * 28.0 + 8.0)).abs() < 0.5, "twelve rows and the list's padding: {}", a_list[3]);
+    assert!((a_list[3] - (10.0 * 28.0 + 8.0)).abs() < 0.5, "ten rows and the list's padding: {}", a_list[3]);
     let (small, _) = height((640.0, 320.0), "");
     assert!(small[1] + small[3] <= 320.0 + 0.5, "inside the window: {small:?}");
     let (short, _) = height((960.0, 600.0), "copy");

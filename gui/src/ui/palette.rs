@@ -33,7 +33,7 @@ const MIN_WIDTH: f32 = 440.0;
 const MAX_WIDTH: f32 = 720.0;
 /// How many rows the list shows before it scrolls: the panel's height is capped here, not at a
 /// share of the window.
-const VISIBLE_ROWS: f32 = 12.0;
+const VISIBLE_ROWS: f32 = 10.0;
 /// How far from the window's sides it stays.
 const SIDE: f32 = 16.0;
 /// How far below the window's top the panel is: under the toolbar, as Spotlight sits high.
