@@ -1326,7 +1326,9 @@ impl MemoryService {
         if let (false, Some(machine)) = (self.trash_refusing.contains(&name), self.machines.get_mut(&id)) {
             for (index, _) in &run.previous {
                 if let Some(stamp) = machine.on_disk.get_mut(index).and_then(Option::take) {
-                    let had = self.files.get(&id).and_then(|fs| fs.iter().find(|f| f.index == *index)).map_or(0, |f| f.progress_bytes);
+                    // Forgotten as it goes (ADR 0014): none of it is had any more.
+                    let file = self.files.get_mut(&id).and_then(|fs| fs.iter_mut().find(|f| f.index == *index));
+                    let had = file.map_or(0, |f| std::mem::take(&mut f.progress_bytes));
                     moved.push((*index, stamp, had));
                     if partly {
                         break;
@@ -1542,7 +1544,8 @@ impl MemoryService {
     }
 
     /// Undo of a Move to Trash: only for a torrent still in the list that moving files to the Trash would do
-    /// something to now; its files are back where they were and each has the priority it had.
+    /// something to now; its files are back where they were, each has the priority it had, and the
+    /// torrent is checked (ADR 0014), which finds what it had of them.
     fn files_back(&mut self, left: &Left, trashed: &FilesTrashed, of: u64) -> Result<Undoable, Failure> {
         let id = left.info.id;
         let refuse = |why| Err(Failure::Refused(Refusal::Undo { undo: left.undoable(of), why, stranded: Vec::new() }));
@@ -1555,11 +1558,9 @@ impl MemoryService {
             });
         }
         // A new copy at the path of one, set Normal and downloaded since (#276), goes to the Trash,
-        // and the old one takes its place, with what librqbit had of it; the torrent is checked.
-        let mut replaced = false;
+        // and the old one takes its place: the check finds what librqbit had of it.
         if let Some(m) = self.machines.get_mut(&id) {
             for (index, stamp, had) in &trashed.moved {
-                replaced |= m.on_disk.get(index).is_some_and(Option::is_some);
                 m.on_disk.insert(*index, Some(*stamp));
                 if let Some(f) = self.files.get_mut(&id).and_then(|fs| fs.iter_mut().find(|f| f.index == *index)) {
                     f.progress_bytes = *had;
@@ -1572,9 +1573,7 @@ impl MemoryService {
             }
         }
         self.size_check(id);
-        if replaced {
-            self.command_now(id, &TorrentCommand::Check);
-        }
+        self.command_now(id, &TorrentCommand::Check);
         self.refresh(id);
         self.changed = true;
         Ok(left.undoable(of))
