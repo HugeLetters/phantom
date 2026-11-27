@@ -553,7 +553,7 @@ mod tests {
             let got = files_back(Some(&state));
             let does = lifecycle::answer(&state, Action::TrashFiles) == Answer::Does;
             let want = match &state.phase {
-                P::DestinationUnavailable { reason } => Err(CantUndo::Destination { reason: reason.clone() }),
+                P::DestinationUnavailable { reason, .. } => Err(CantUndo::Destination { reason: reason.clone() }),
                 P::Deleting { .. } | P::DeleteFailed { .. } => Err(CantUndo::Deleting),
                 P::FetchingInfo | P::FetchFailed { .. } | P::Deleted => Err(CantUndo::NotInList),
                 // Moving, it waits its turn on its lane, then is carried out where the files are.

@@ -363,7 +363,8 @@ impl Actor {
                 _ if (interrupted || done) && record.delete_failed.is_empty() => Phase::Deleted,
                 // Its files partly in the Trash on purpose, wherever its drive is.
                 away if !record.delete_failed.is_empty() => Phase::DeleteFailed { kept: record.delete_failed.clone(), away, unchecked },
-                Some(reason) => Phase::DestinationUnavailable { reason },
+                // What was known missing still is, once it's back (#464).
+                Some(reason) => Phase::DestinationUnavailable { reason, gone: record.gone_at_start() },
                 // Whatever files went meanwhile: only a check says.
                 None if unchecked => Phase::Unchecked { gone: BTreeMap::new() },
                 None if gone.is_empty() => Phase::Ready,
@@ -1942,13 +1943,10 @@ impl Torrent {
             Phase::MissingFiles { gone: files }
             | Phase::Unchecked { gone: files }
             | Phase::CheckDue { returning: files }
-            | Phase::Checking { returning: files } => files.iter().map(|(&i, gone)| (i, gone.into())).collect(),
-            // Its files unreachable, or as they were: what was missing still is, for all that's known.
-            Phase::DestinationUnavailable { .. }
-            | Phase::Error { .. }
-            | Phase::DeleteFailed { .. }
-            | Phase::Deleting { .. }
-            | Phase::Moving { .. } => self.record.missing.clone(),
+            | Phase::Checking { returning: files }
+            | Phase::DestinationUnavailable { gone: files, .. } => files.iter().map(|(&i, gone)| (i, gone.into())).collect(),
+            // Its files as they were: what was missing still is, for all that's known.
+            Phase::Error { .. } | Phase::DeleteFailed { .. } | Phase::Deleting { .. } | Phase::Moving { .. } => self.record.missing.clone(),
             Phase::FetchingInfo | Phase::FetchFailed { .. } | Phase::Ready | Phase::Deleted => BTreeMap::new(),
         };
         let had = match phase {
@@ -2315,8 +2313,10 @@ mod uncounted_tests {
         let expected = files::Expected { index: 0, path: "/gone/b.bin".into(), size_bytes: 10, progress_bytes: 10 };
         let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected], &BTreeSet::new(), &[]).files[&0]))]);
         let error = Phase::Error { failure: Broke::Librqbit { detail: "drive gone".into() } };
-        let away =
-            Phase::DestinationUnavailable { reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() } };
+        let away = Phase::DestinationUnavailable {
+            reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() },
+            gone: Default::default(),
+        };
         let mut uncounted = BTreeSet::new();
         let mut steps = vec![(Phase::MissingFiles { gone: gone.clone() }, Phase::CheckDue { returning: gone.clone() })];
         steps.push((steps[0].1.clone(), Phase::Checking { returning: gone }));

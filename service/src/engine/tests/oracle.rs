@@ -146,8 +146,6 @@ enum Which {
     There,
     /// As `There`, and the torrent hadn't everything.
     Part,
-    /// Put where the torrent's was known missing.
-    Missing,
     /// As `Missing`, nothing of it had.
     NoneHad,
 }
@@ -177,7 +175,6 @@ const KNOWN_OPEN: &[Open] = &[
     known(SAME_SIZE, &[Route::DriveBack], Which::There, "#373"),
     known(SAME_SIZE, &[Route::Restart, Route::Crash], Which::There, "file-trust A: replaced, same size, then a start"),
     known(SHORT, &[Route::DriveBack, Route::Restart, Route::Crash], Which::Part, "file-trust A: shorter, where less was had"),
-    known(OTHERS, &[Route::DriveBack], Which::Missing, "#373: what was known missing is forgotten"),
     known(OTHERS, &[Route::Running], Which::NoneHad, "file-trust A: missing known, nothing had"),
 ];
 
@@ -188,7 +185,6 @@ impl Open {
             && match self.which {
                 Which::There => class.missing == Missing::No,
                 Which::Part => class.missing == Missing::No && !class.whole,
-                Which::Missing => class.missing != Missing::No,
                 Which::NoneHad => class.missing == Missing::NoneHad,
                 Which::Any => true,
             }
@@ -1649,8 +1645,6 @@ open! {
         [Step::By(By::TakeAway { file: 0 }), Step::Settle, Step::By(By::Put { file: 2, kind: Same }), Step::By(By::PutBack { file: 0 })];
     open_an_undone_remove_forgets_what_was_missing: "file-trust B: undo of Remove", Whole, true,
         [Step::By(By::TakeAway { file: B }), Step::Settle, put(Shorter), Step::Settle, Step::Do(Do::Remove), Step::Do(Do::Undo)];
-    open_a_drive_back_forgets_what_was_missing: "#373", Whole, true,
-        [Step::By(By::TakeAway { file: B }), Step::Settle, put(Same), Step::Settle, Step::By(By::DriveGone), Step::Settle, Step::By(By::DriveBack)];
     open_another_file_as_the_drive_is_back: "#373", Whole, true, [Step::By(By::DriveGone), Step::Settle, put(Same), Step::By(By::DriveBack)];
     open_another_file_before_a_start: "file-trust A: replaced, same size", Nothing, false, [put(Same), Step::Restart];
     open_another_file_before_a_start_after_a_crash: "file-trust A: replaced, same size", Nothing, false, [put(Same), Step::Crash];
@@ -1660,6 +1654,8 @@ open! {
 }
 
 closed! {
+    a_drive_back_keeps_what_was_missing: "#373: what was known missing is forgotten (#464)", Whole, true,
+        [Step::By(By::TakeAway { file: B }), Step::Settle, put(Same), Step::Settle, Step::By(By::DriveGone), Step::Settle, Step::By(By::DriveBack)];
     an_add_over_a_hard_link_writes_nothing: "file-trust A: hard link", Nothing, true, [Step::Do(Do::Remove), put(HardLink), Step::Do(Do::Add)];
     a_longer_file_isnt_written_as_its_folder_is_renamed_during_a_check: "#374: found by this test", Whole, true,
         [put(Longer), Step::Settle, Step::During(Do::Check, By::RenameFolder), Step::Settle];
@@ -1762,4 +1758,23 @@ async fn a_piece_put_back_as_the_torrent_is_paused_isnt_lost() {
 async fn open_a_crash_during_a_check_lets_a_shorter_file_grow() {
     let put = Step::Between { by: By::Put { file: 0, kind: Shorter }, crash: true };
     often(vec![Step::Settle, Step::Do(Do::Check), put]).await;
+}
+
+/// Found by this test (#464): a file put where one known missing was, the drive gone and back, then a
+/// crash once the other missing file is back. The check of the returning drive took the person's file
+/// for the torrent's own, so the next start downloaded into it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drive_back_keeps_a_file_put_where_one_was_missing() {
+    let steps = vec![
+        Step::By(By::TakeAway { file: 0 }),
+        Step::Settle,
+        Step::By(By::Put { file: 0, kind: OnePiece }),
+        put(Link),
+        Step::By(By::DriveGone),
+        Step::Settle,
+        Step::By(By::DriveBack),
+        Step::Settle,
+        Step::Between { by: By::Put { file: B, kind: OnePiece }, crash: true },
+    ];
+    World::run(&Peers::start().await, &Case { start: Start::Whole, peer: false, paused: false, before: None, steps }, true).await;
 }
