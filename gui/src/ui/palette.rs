@@ -70,7 +70,19 @@ impl Ui {
             .py(self.spacing.s5)
             .gap(self.spacing.s4)
             .center_y()
-            .child(icon(self.icon(Icon::Search), 16.0).color(c.icon_base).a11y_hidden())
+            .child(
+                icon(self.icon(Icon::Search), 16.0)
+                    .key("search-icon")
+                    .color(c.icon_base)
+                    .help("Run and close")
+                    .help_keys(["Return"])
+                    .help_row("Run and keep the palette open")
+                    .help_keys(["⇧", "Return"])
+                    .help_row("Show in Settings")
+                    .help_keys(["⌘", "Return"])
+                    .help_row("Back")
+                    .help_keys(["Esc"]),
+            )
             .child(field.grow(1.0).min_w(0.0));
         let mut list = col().key("rows").role("listbox").w_full().items_stretch().padding(self.spacing.s2);
         if let Some(label) = choices {

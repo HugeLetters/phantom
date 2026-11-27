@@ -13,8 +13,9 @@
 //! rows: ↑ and ↓ and Return only know the entries. Its field has the focus; typing filters by name
 //! (and by a setting's synonyms), best matches first, ↑ and ↓ move (round the ends). Escape goes
 //! back one level and a click outside closes it. With nothing typed, **Recent** (the last 3
-//! settings or places picked, kept in memory only) comes first and the settings aren't listed:
-//! typing is how they're found. Typing puts first the group with the best match.
+//! settings or places picked, kept in memory only) comes first, then the actions, then every
+//! setting and place (scrolling), each group under its heading. Typing filters them and puts first
+//! the group with the best match.
 //!
 //! | Entry | Return | ⌘Return |
 //! |---|---|---|
@@ -525,7 +526,7 @@ pub fn choices_count(s: &Phantom, sub: &Sub) -> usize {
 /// What the palette lists for its text: the entries whose name or synonyms match it, group by group
 /// (a global ranking would scatter a group's heading over the list), best first within a group, in
 /// the list's order among equals; while typing, the group with the best match first. With nothing
-/// typed: Recent, then the actions in the list's order, and no settings. A group with no match has no
+/// typed: Recent, then the actions in the list's order, then every setting and place. A group with no match has no
 /// heading. In a setting's choices ([`Sub`]): its choices that match, best first.
 pub fn listed(s: &Phantom) -> Vec<Entry> {
     let query = s.palette.query.text.trim();
@@ -545,7 +546,12 @@ pub fn listed(s: &Phantom) -> Vec<Entry> {
             .iter()
             .filter_map(|k| settings.iter().find(|e| e.kind == *k))
             .map(|e| Entry { group: Group::Recent, ..e.clone() });
-        scored.splice(0..0, recent.map(|e| (0, 0, e)));
+        let recent: Vec<Entry> = recent.collect();
+        // What Recent lists isn't listed again under Settings: one entry, one row.
+        let at = scored.len();
+        let rest = settings.into_iter().enumerate().filter(|(_, e)| !recent.iter().any(|r| r.kind == e.kind));
+        scored.extend(rest.map(|(i, e)| (0, at + i, e)));
+        scored.splice(0..0, recent.into_iter().map(|e| (0, 0, e)));
     } else {
         let at = scored.len();
         scored.extend(settings.into_iter().enumerate().filter_map(|(i, e)| setting_score(query, &e).map(|sc| (sc, at + i, e))));

@@ -370,14 +370,16 @@ fn cmd_return_in_a_settings_choices_shows_the_setting() {
 fn recent_lists_the_last_three_settings_and_places_picked() {
     let mut d = desk_with_palette();
     open(&mut d);
-    assert_eq!(headings(&d), ["Phantom"], "nothing picked yet, and no settings listed");
+    assert_eq!(headings(&d), ["Phantom", "Settings"], "nothing picked yet: the commands, then every setting");
     press(&mut d, Key::Escape);
     for typed in ["general", "keep awake", "upnp", "network"] {
         search(&mut d, typed);
         press(&mut d, Key::Enter);
     }
     open(&mut d);
-    assert_eq!(headings(&d), ["Recent", "Phantom"]);
+    assert_eq!(headings(&d), ["Recent", "Phantom", "Settings"]);
+    let all = names(&d);
+    assert_eq!(all.iter().filter(|n| *n == "Network").count(), 1, "what Recent lists isn't listed again: {all:?}");
     assert_eq!(names(&d)[..3], ["Network", "UPnP", "Keep awake"], "newest first");
     let recent = crate::model::palette::listed(&d.main.state);
     assert!(recent[..3].iter().all(|e| e.group == Group::Recent));
