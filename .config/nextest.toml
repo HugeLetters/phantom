@@ -25,3 +25,9 @@ test-group = 'cpu'
 [profile.budget]
 slow-timeout = { period = "20s", terminate-after = 1 }
 retries = 0
+
+# The long property runs (`PROPTEST_CASES=256` and up): a test is flagged every 60 s and never
+# killed. A test killed in another profile counts as failed (TIMEOUT), never as passed.
+[profile.long]
+slow-timeout = { period = "60s" }
+retries = 0
