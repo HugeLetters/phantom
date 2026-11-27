@@ -15,6 +15,15 @@ pub struct PaletteRow {
     pub hint: Option<String>,
     /// None: an empty slot, so every label starts at the same x.
     pub icon: Option<Icon>,
+    /// Muted after the label: where a setting lives, "Appearance ▸ Edit… ▸ Look".
+    pub place: Option<String>,
+    /// A setting's value, muted, at the right of the row, before its key.
+    pub value: Option<String>,
+    /// The current one of a setting's choices: highlighted for assistive technology too.
+    pub selected: bool,
+    /// What assistive technology reads for the row, where it's more than the label: its name,
+    /// value and place.
+    pub read: Option<String>,
 }
 
 /// The narrowest the panel is, however short its commands: it's placed so that, at this width, it's
@@ -32,7 +41,8 @@ impl Ui {
     /// at its top, `rows` under it with the `at`-th highlighted, `empty` in their place when
     /// there are none. It's modal: the window under it takes nothing; Escape and a press outside
     /// call `on_close`, a press on a row `on_pick` with its index. The rows scroll when the window
-    /// is too short for them; row `i` is keyed by `row_key(i)`. It is as wide as its widest row, between
+    /// is too short for them; row `i` is keyed by `row_key(i)`. `choices`: the list's label while it
+    /// lists one setting's choices ("Corners, 3 choices"). It is as wide as its widest row, between
     /// [`MIN_WIDTH`] and [`MAX_WIDTH`], inside the `window` (its width, when known), left edge fixed.
 
     #[allow(clippy::too_many_arguments)]
@@ -40,6 +50,7 @@ impl Ui {
         &self,
         key: &str,
         field: El,
+        choices: Option<String>,
         rows: Vec<PaletteRow>,
         at: usize,
         empty: &str,
@@ -62,6 +73,9 @@ impl Ui {
             .child(icon(self.icon(Icon::Search), 16.0).color(c.icon_base).a11y_hidden())
             .child(field.grow(1.0).min_w(0.0));
         let mut list = col().key("rows").role("listbox").w_full().items_stretch().padding(self.spacing.s2);
+        if let Some(label) = choices {
+            list = list.label(label);
+        }
         if rows.is_empty() {
             list = list.child(
                 row()
@@ -91,7 +105,8 @@ impl Ui {
             let mut item = row()
                 .key(row_key(i))
                 .role("option")
-                .label(r.label.clone())
+                .label(r.read.unwrap_or_else(|| r.label.clone()))
+                .focus_selected(r.selected)
                 .h(self.spacing.palette_row)
                 .px(self.spacing.s5)
                 .gap(self.spacing.s5)
@@ -102,8 +117,19 @@ impl Ui {
                     // An empty slot the icon's size.
                     None => el().w(14.0).h(14.0),
                 })
-                .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().grow(1.0).shrink())
+                .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().shrink())
                 .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx));
+            // What's left of the row is the place, which gives way first; the value and the key
+            // keep their width.
+            item = item.child(match r.place {
+                Some(place) => {
+                    text(place).key("place").font(k.ty.small_medium).color(c.text_faint).truncate().grow(1.0).shrink().a11y_hidden()
+                }
+                None => el().grow(1.0),
+            });
+            if let Some(value) = r.value {
+                item = item.child(text(value).key("value").font(k.ty.ui_compact).color(c.text_muted).a11y_hidden());
+            }
             if let Some(hint) = r.hint {
                 item = item
                     .shortcut_hint(hint.clone())
@@ -161,7 +187,9 @@ impl Ui {
                 // The row's padding (10 a side), icon slot and gap (14 and 10), the key and its gap,
                 // the list's padding (4 a side).
                 let hint = r.hint.as_deref().map_or(0.0, |h| 10.0 + rune::text::measure(h, &[], hint_style, None).0);
-                8.0 + 20.0 + 14.0 + 10.0 + self.label_width(&r.label) + hint
+                let place = r.place.as_deref().map_or(0.0, |p| 10.0 + rune::text::measure(p, &[], hint_style, None).0);
+                let value = r.value.as_deref().map_or(0.0, |v| 10.0 + self.label_width(v));
+                8.0 + 20.0 + 14.0 + 10.0 + self.label_width(&r.label) + place + value + hint
             })
             .fold(0.0, f32::max)
             .ceil()

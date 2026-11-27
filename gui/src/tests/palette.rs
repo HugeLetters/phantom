@@ -43,7 +43,11 @@ fn drawn_palette(rt: &Runtime<Phantom>) -> Vec<(String, Option<String>)> {
             // current one with a check).
             let icon = elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon"));
             let priority = matches!(row.label.as_deref(), Some("Priority: Normal" | "Priority: Off"));
-            assert_eq!(icon, !priority, "{:?} has its icon, a priority has none", row.label);
+            // A setting or a choice has none: its place and value take the room.
+            let setting = elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("place"));
+            if !setting {
+                assert_eq!(icon, !priority, "{:?} has its icon, a priority has none", row.label);
+            }
             (row.label.clone().expect("a row has its label"), hint)
         })
         .collect()
@@ -589,12 +593,12 @@ fn a_heading_is_hidden_once_nothing_under_it_matches() {
     }
     assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom"], "the text cleared, all are back");
     type_text(&mut rt, "trash");
-    assert_eq!(headings(&rt), ["Album", "front.jpg"], "the Trash commands of the torrent and of the file");
+    assert_eq!(headings(&rt), ["front.jpg", "Album"], "the Trash commands of the file, which match best, then the torrent's");
     for _ in 0.."trash".len() {
         press(&mut rt, Key::Backspace);
     }
     type_text(&mut rt, "move to t");
-    assert_eq!(headings(&rt), ["Album", "front.jpg"], "{:?}", drawn_groups(&rt));
+    assert_eq!(headings(&rt), ["front.jpg", "Album"], "{:?}", drawn_groups(&rt));
     type_text(&mut rt, "rash");
     assert_eq!(headings(&rt), ["front.jpg"], "the torrent's group has nothing left: its heading goes");
     type_text(&mut rt, "x");
@@ -707,7 +711,7 @@ fn a_torrent_command_is_not_offered_when_the_torrent_list_is_not_registered() {
     select(&mut rt, 1);
     rt.update(|s, _| s.mounted.begin());
     assert!(crate::commands::on_torrents(&rt.state).is_empty());
-    assert!(crate::model::palette::offered(&rt.state).iter().all(|e| !matches!(e.command, crate::commands::Command::Torrents(_))));
+    assert!(crate::model::palette::offered(&rt.state).iter().all(|e| !matches!(e.kind, crate::model::palette::Kind::Action(crate::commands::Command::Torrents(_)))));
     rt.key(shortcuts::keys(OnTorrents::Remove)[0].event());
     assert!(probe.commands().is_empty(), "⌫ ran nothing: {:?}", probe.commands());
 }

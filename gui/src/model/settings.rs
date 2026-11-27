@@ -247,7 +247,7 @@ impl Switch {
         }
     }
 
-    fn set(self, on: bool) -> Setting {
+    pub fn set(self, on: bool) -> Setting {
         match self {
             Switch::KeepAwake => Setting::KeepAwake(Some(on)),
             Switch::Upnp => Setting::Upnp(Some(on)),
@@ -596,13 +596,15 @@ impl SettingsSheet {
     fn answered(&mut self, row: Row, settings: Settings) {
         if matches!(row, Row::All | Row::Port) {
             self.port = TextEdit::new(port_text(&settings));
-            // A field asks for focus through its text.
+            // A field asks for focus through its text, which is selected to be typed over.
             self.port.focused = row == Row::All && self.focus == Some("listen_port");
+            select_all(&mut self.port);
         }
         for at in [SeedingLimit::Ratio, SeedingLimit::Time] {
             if matches!(row, Row::All) || row == Row::Seeding(at) {
                 let mut field = TextEdit::new(seeding_text(&settings, at));
                 field.focused = row == Row::All && self.focus == Some(seeding_name(at));
+                select_all(&mut field);
                 *self.seeding_mut(at) = field;
             }
         }
@@ -610,6 +612,7 @@ impl SettingsSheet {
             if matches!(row, Row::All) || row == Row::Limit(direction) {
                 let mut field = TextEdit::new(limit_text(&settings, direction));
                 field.focused = row == Row::All && self.focus == Some(limit_name(direction));
+                select_all(&mut field);
                 *self.limit_mut(direction) = field;
             }
         }
@@ -651,6 +654,14 @@ impl SettingsSheet {
     }
 }
 
+/// `field`'s text selected, to be typed over, while it has the focus.
+fn select_all(field: &mut TextEdit) {
+    if field.focused {
+        let len = field.text.len();
+        field.set_selection(0, len);
+    }
+}
+
 /// The rows with a text field that applies when it loses focus, in the order the tabs show them.
 const TEXT_ROWS: [Row; 5] = [
     Row::Port,
@@ -679,6 +690,21 @@ pub fn row_of(name: SettingName) -> Row {
 /// read, as Open settings does.
 pub fn show_setting(s: &mut SettingsWindow, key: &'static str, tx: Option<&mut Tx>) {
     show(s, key, None, tx);
+}
+
+/// Show in Settings (#434): [`show_setting`], and the setting's control takes the focus itself,
+/// not as the first of the Tab order: a field through its text, selected; any other by its key,
+/// once it's shown.
+pub fn show_service(s: &mut SettingsWindow, key: &'static str, tx: &mut Tx) {
+    show(s, key, None, Some(&mut *tx));
+    let control = match service_setting(key).map(|setting| setting.control) {
+        Some(Control::Switch(switch)) => Some(switch.key()),
+        Some(Control::Folder) => Some("choose-folder"),
+        Some(Control::Port | Control::Limit(_) | Control::Seeding(_)) | None => None,
+    };
+    if let Some(control) = control {
+        tx.focus_when_shown(control, true);
+    }
 }
 
 /// [`show_setting`], with `chip` the one of the saved Look Presets that takes the focus, if the
@@ -734,6 +760,7 @@ fn focus_setting(s: &mut SettingsWindow, key: &'static str, chip: Option<Chip>, 
     match field {
         Some(field) => {
             field.focused = true;
+            select_all(field);
             sheet.focus = None;
         }
         None => {
@@ -1733,6 +1760,17 @@ pub fn theme_named(label: &str, side: Side) -> String {
 pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: Value) {
     follow_focus(s);
     let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
+    change_theme(s, target, side, key, value);
+}
+
+/// [`set_theme`] for the Active look, whichever sheet is open, or none: the command palette's
+/// (#434). An open sheet of a saved preset keeps its preview.
+pub fn set_active_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: Value) {
+    follow_focus(s);
+    change_theme(s, Target::Active, side, key, value);
+}
+
+fn change_theme(s: &mut SettingsWindow, target: Target, side: Side, key: &'static str, value: Value) {
     let was = Presets::of(&s.looks.borrow(), &s.saved);
     let Some(mut preset) = was.get(&target).cloned() else { return };
     let label =
@@ -1741,7 +1779,8 @@ pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: V
         preset.get_mut(appearance).settings.set(key, value);
     }
     keep_edited(s, &target, preset);
-    if let (Side::Only(_), Some(editor)) = (side, s.sheet.as_mut().and_then(|sheet| sheet.editor_mut())) {
+    let shown = s.sheet.as_mut().filter(|sheet| sheet.target() == Some(&target));
+    if let (Side::Only(_), Some(editor)) = (side, shown.and_then(|sheet| sheet.editor_mut())) {
         editor.split.insert(key);
     }
     if let Some(label) = label {
@@ -2357,18 +2396,28 @@ fn ask(s: &mut SettingsWindow, waiting: Waiting, setting: Setting) {
     if let Some(sheet) = &mut s.sheet {
         sheet.waiting.push(waiting);
     }
-    s.main.post(move |s, _| {
-        let by = crate::changes::sent(s, setting.name());
-        let done = answer(waiting.row());
-        s.service.set_setting(
-            setting,
-            Some(by),
-            Box::new(move |s: &mut Phantom, result: Result<proto::SettingSet, Failure>, tx: &mut Tx| {
-                crate::changes::answered(s, by, result.as_ref().ok());
-                done(s, result.map(|set| set.settings), tx);
-            }),
-        );
-    });
+    s.main.post(move |s, _| send(s, waiting.row(), setting, |_| {}));
+}
+
+/// Sends `setting` from the main window, the change of `row`: Settings shows its answer if it's
+/// open, and `told` runs once it's made a change. The palette's (#434) and Settings' own.
+pub fn send(s: &mut Phantom, row: Row, setting: Setting, told: impl FnOnce(&mut Phantom) + Send + 'static) {
+    let by = crate::changes::sent(s, setting.name());
+    let done = answer(row);
+    s.service.set_setting(
+        setting,
+        Some(by),
+        Box::new(move |s: &mut Phantom, result: Result<proto::SettingSet, Failure>, tx: &mut Tx| {
+            crate::changes::answered(s, by, result.as_ref().ok());
+            if let Ok(set) = &result {
+                s.service_settings = Some(set.settings.clone());
+                if set.change.is_some() {
+                    told(s);
+                }
+            }
+            done(s, result.map(|set| set.settings), tx);
+        }),
+    );
 }
 
 /// The setting a row of the sheet changes, by its key in the settings file; none for a row that

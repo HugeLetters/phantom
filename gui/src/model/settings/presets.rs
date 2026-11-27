@@ -259,6 +259,9 @@ pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, s
         // A color's control is its picker, which opens on it, in its section opened.
         Some(field) => {
             field.text.focused = true;
+            // Its text selected, to be typed over.
+            let len = field.text.text.len();
+            field.text.set_selection(0, len);
             let side = field.side;
             let section = s
                 .looks
@@ -287,20 +290,31 @@ pub fn show_setting(s: &mut SettingsWindow, target: Target, key: &'static str, s
             if std::mem::take(&mut edit.editor.refocus) {
                 refocus(s, key, side, tx);
             }
+            // The control itself takes the focus, once it's shown: not the first of the sheet's
+            // Tab order, which `edit.focus` makes it as the sheet opens.
+            if let Some(control) = control_of(s, key, side) {
+                tx.focus_when_shown(control, true);
+            }
         }
     }
+}
+
+/// The key of the control of `key` that shows a change on `side`, in the sheet that's open:
+/// the one for both, if the row is joined; else that side's.
+fn control_of(s: &SettingsWindow, key: &str, side: Side) -> Option<String> {
+    let presets = Presets::of(&s.looks.borrow(), &s.saved);
+    let edit = s.sheet.as_ref().and_then(|sheet| sheet.edit.as_ref())?;
+    let preset = presets.get(&edit.target)?;
+    let controls = super::theme_rows(preset, &edit.editor).controls();
+    let sides: Vec<Side> = controls.into_iter().filter(|(_, setting, _)| setting.key == key).map(|(at, ..)| at).collect();
+    super::focused_side(&sides, side).map(|at| format!("edit-{key}-{}", at.key()))
 }
 
 /// An undo closed the picker: the control of `key` that shows a change on `side` takes the focus
 /// by its key, which Rune would otherwise hand back to the picker's swatch.
 fn refocus(s: &SettingsWindow, key: &str, side: Side, tx: &mut Tx) {
-    let presets = Presets::of(&s.looks.borrow(), &s.saved);
-    let Some(edit) = s.sheet.as_ref().and_then(|sheet| sheet.edit.as_ref()) else { return };
-    let Some(preset) = presets.get(&edit.target) else { return };
-    let controls = super::theme_rows(preset, &edit.editor).controls();
-    let sides: Vec<Side> = controls.into_iter().filter(|(_, setting, _)| setting.key == key).map(|(at, ..)| at).collect();
-    if let Some(at) = super::focused_side(&sides, side) {
-        tx.focus(format!("edit-{key}-{}", at.key()), true);
+    if let Some(control) = control_of(s, key, side) {
+        tx.focus(control, true);
     }
 }
 

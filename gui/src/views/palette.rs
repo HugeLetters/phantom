@@ -1,6 +1,7 @@
-//! The command palette (#33), while it's open: its field, and the commands `model::palette` lists
-//! for its text, each with its icon and key. Its keys: ↑ and ↓ move the highlight, Return runs it,
-//! Escape closes; the field keeps the rest for its text.
+//! The command palette (#33, #434), while it's open: its field, and the entries `model::palette`
+//! lists for its text, each with its icon and key, a setting with its place and value. Its keys: ↑ and
+//! ↓ move the highlight, Return picks it, ⌘Return shows a setting in Settings, Escape goes back one
+//! level; the field keeps the rest for its text.
 
 use rune::{El, Key, KeyEvent, Tx};
 
@@ -14,8 +15,8 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         return;
     }
     let field = ui
-        .text_field("palette-field", &s.palette.query, "Command")
-        .placeholder("Type a command")
+        .text_field("palette-field", &s.palette.query, "Commands and settings")
+        .placeholder(if s.palette.sub.is_some() { "Choose" } else { "Type a command or a setting" })
         .on_edit(|s: &mut Phantom| &mut s.palette.query)
         .on_submit(palette::run)
         .on_key(on_key)
@@ -26,12 +27,27 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         .map(|e| {
             let first = group != Some(e.group);
             group = Some(e.group);
-            PaletteRow { heading: first.then(|| heading(s, e.group)), label: e.label, hint: e.hint, icon: e.icon }
+            let read = e.read();
+            PaletteRow {
+                heading: first.then(|| heading(s, e.group)),
+                label: e.label,
+                hint: e.hint,
+                icon: e.icon,
+                place: e.place,
+                value: e.value,
+                selected: e.selected,
+                read,
+            }
         })
         .collect();
+    let choices = s.palette.sub.as_ref().map(|sub| {
+        let n = palette::choices_count(s, sub);
+        client::display::choices_of(&sub.name, n)
+    });
     ui.palette(
         "palette",
         field,
+        choices,
         rows,
         palette::highlighted(s),
         "No command matches",
@@ -48,7 +64,8 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Up => palette::up(s, tx),
         Key::Down => palette::down(s, tx),
-        Key::Escape => palette::dismiss(s, tx),
+        Key::Escape => palette::back(s, tx),
+        Key::Enter if ev.mods.cmd => palette::show_highlighted(s, tx),
         _ => return false,
     }
     true

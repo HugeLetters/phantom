@@ -134,6 +134,9 @@ pub struct Phantom {
     pub recent: recent::RecentFolders,
     /// The service's default folder, as its settings last said: Move to ▸'s first.
     pub default_folder: Option<proto::AbsolutePath>,
+    /// The service's settings as last told, in a snapshot or an answer: the palette's values
+    /// (#434). `None` until the first.
+    pub service_settings: Option<proto::Settings>,
     /// The row menu whose Move to ▸ is open: its submenu shows while that menu is the one open.
     pub move_sub: Option<crate::menu::Open>,
 }
@@ -384,6 +387,7 @@ impl Phantom {
             list_height: 0.0,
             recent: Default::default(),
             default_folder: None,
+            service_settings: None,
             move_sub: None,
         }
     }
