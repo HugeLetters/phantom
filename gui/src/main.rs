@@ -816,6 +816,14 @@ fn spec() -> AppSpec<Phantom> {
                 s.magnet = rune::TextEdit::new(NOBODY);
                 model::submit_url(&mut *s.service, &s.magnet, &mut s.add_note, &mut s.refocus_link, true);
             }),
+            // Nothing typed: every entry, the list scrolling.
+            ("palette-empty", |s| {
+                listed(s, moves());
+                s.table.select("1");
+                recent_demo(s);
+                model::palette::open(s);
+                s.palette.query.focused = true;
+            }),
             ("move-palette", |s| {
                 listed(s, moves());
                 s.table.select("1");

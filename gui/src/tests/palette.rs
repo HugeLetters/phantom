@@ -771,3 +771,37 @@ fn nothing_typed_lists_every_entry_recent_and_the_selection_first() {
         seen.push(pin);
     }
 }
+
+/// The panel stops growing at the field plus twelve rows however tall the window, scrolls past
+/// that, fits a small window, and a short list is shorter.
+#[test]
+fn the_palette_height_is_capped_at_twelve_rows_and_fits_the_window() {
+    let height = |size: (f32, f32), query: &str| {
+        let mut rt = app(MemoryService::new());
+        rt.set_viewport(size, 2.0);
+        cmd_p(&mut rt);
+        type_text(&mut rt, query);
+        let find = |k: &str| rt.elements().iter().find(|e| !e.exiting && e.key.as_deref() == Some(k)).map(|e| e.rect);
+        (find("palette-panel").expect("the palette"), find("scroll").expect("the list"))
+    };
+    let (a, a_list) = height((960.0, 600.0), "");
+    let (b, _) = height((1440.0, 900.0), "");
+    assert!((a[3] - b[3]).abs() < 0.5, "the same cap at both sizes: {} and {}", a[3], b[3]);
+    assert!((a_list[3] - (12.0 * 28.0 + 8.0)).abs() < 0.5, "twelve rows and the list's padding: {}", a_list[3]);
+    let (small, _) = height((640.0, 320.0), "");
+    assert!(small[1] + small[3] <= 320.0 + 0.5, "inside the window: {small:?}");
+    let (short, _) = height((960.0, 600.0), "copy");
+    assert!(short[3] < a[3] - 20.0, "a short list is shorter: {} against {}", short[3], a[3]);
+}
+
+/// A row is 28 points tall, a group heading 24.
+#[test]
+fn a_palette_row_is_28_points_and_a_heading_24() {
+    let mut rt = app(MemoryService::new());
+    cmd_p(&mut rt);
+    let rects: Vec<_> = rt.elements().iter().filter(|e| !e.exiting).map(|e| (e.role.to_string(), e.rect)).collect();
+    let option = rects.iter().find(|(r, _)| r == "option").expect("a row");
+    assert!((option.1[3] - 28.0).abs() < 0.5, "{:?}", option.1);
+    let heading = rects.iter().find(|(r, _)| r == "heading").expect("a heading");
+    assert!((heading.1[3] - 24.0).abs() < 0.5, "{:?}", heading.1);
+}

@@ -84,8 +84,8 @@ impl Spacing {
             tabs_gap: 18.0,
             tab_mark_gap: 5.0,
             dialog_gap: 14.0,
-            palette_row: 32.0,
-            palette_section: 28.0,
+            palette_row: 28.0,
+            palette_section: 24.0,
         }
     }
 }
@@ -109,7 +109,7 @@ mod tests {
         assert_eq!((t.pane_name_line, t.pane_line, t.pane_tabs), (layout::NAME_LINE, layout::LINE, layout::TABS));
         assert_eq!((t.no_files, t.info_line, t.info_pad), (layout::NO_FILES, layout::INFO_LINE, layout::INFO_PAD));
         assert_eq!((t.tabs_gap, t.tab_mark_gap, t.dialog_gap), (18.0, 5.0, 14.0));
-        assert_eq!((t.palette_row, t.palette_section), (32.0, 28.0));
+        assert_eq!((t.palette_row, t.palette_section), (28.0, 24.0));
         let kit = rune_kit::TableStyle::from_kit(&rune_kit::Kit::neutral(false));
         assert_eq!((t.row, t.table_header, t.cell_pad), (kit.row_height, kit.header_height, kit.cell_pad), "the kit's table");
     }

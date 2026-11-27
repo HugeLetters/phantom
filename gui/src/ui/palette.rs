@@ -31,6 +31,9 @@ pub struct PaletteRow {
 const MIN_WIDTH: f32 = 440.0;
 /// The widest it grows to, for a long name; a longer label is cut.
 const MAX_WIDTH: f32 = 720.0;
+/// How many rows the list shows before it scrolls: the panel's height is capped here, not at a
+/// share of the window.
+const VISIBLE_ROWS: f32 = 12.0;
 /// How far from the window's sides it stays.
 const SIDE: f32 = 16.0;
 /// How far below the window's top the panel is: under the toolbar, as Spotlight sits high.
@@ -109,7 +112,7 @@ impl Ui {
                         .w_full()
                         .h(self.spacing.palette_section)
                         .px(self.spacing.s5)
-                        .pt(self.spacing.s4)
+                        .pt(self.spacing.s3)
                         .center_y()
                         .child(text(heading).font(k.ty.small_medium).color(c.text_faint).truncate().grow(1.0).shrink()),
                 );
@@ -155,7 +158,14 @@ impl Ui {
             }
             list = list.child(item);
         }
-        let rows = col().key("scroll").w_full().shrink().min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(list);
+        let rows = col()
+            .key("scroll")
+            .w_full()
+            .shrink()
+            .min_h(0.0)
+            .max_h(VISIBLE_ROWS * self.spacing.palette_row + 2.0 * self.spacing.s2)
+            .scroll(rune::ScrollSpec { stick_bottom: false })
+            .child(list);
         let mut panel = col()
             .key(format!("{key}-panel"))
             .role("dialog")
