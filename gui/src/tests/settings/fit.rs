@@ -157,3 +157,45 @@ fn dragging_the_window_moves_rows_without_jitter() {
         assert_eq!(rows, down, "the same at {width} pt both ways");
     }
 }
+
+/// A choice shown as segments whose labels don't fit whole on a line of their own is a dropdown
+/// instead, its widest value whole there (#425); Tone's Light | Dark fit and stay segments. On the
+/// stacked line of a half at Settings' 480 pt minimum, both Tones.
+#[test]
+fn segments_too_long_for_their_line_are_a_dropdown() {
+    use crate::theme::setting::{Choice, Kind, Setting, Show};
+    use crate::views::settings::{control_width, segments_fit};
+    const LONG: Setting = Setting::new(
+        "motion",
+        "Motion",
+        Kind::Choice {
+            choices: &[
+                Choice { id: "follow", label: "Follow Reduce Motion" },
+                Choice { id: "on", label: "On" },
+                Choice { id: "off", label: "Off" },
+            ],
+            default: "follow",
+            show: Show::Segments,
+        },
+    );
+    const SHORT: Setting = Setting::new(
+        "tone",
+        "Tone",
+        Kind::Choice {
+            choices: &[Choice { id: "light", label: "Light" }, Choice { id: "dark", label: "Dark" }],
+            default: "light",
+            show: Show::Segments,
+        },
+    );
+    let d = look_sheet(480.0, false, true);
+    let elements = d.settings.elements();
+    let half = elements.iter().find(|e| e.key.as_deref() == Some("edit-theme-left")).expect("the Theme row's left half").rect[2];
+    for dark in [false, true] {
+        let ui = crate::ui::Ui::phantom(dark);
+        let room = ui.stacked_room(Some(half));
+        assert!(!segments_fit(&LONG, &ui, room), "dark {dark}: the long labels are a dropdown");
+        assert!(control_width(&LONG, &ui, false) <= room.unwrap(), "dark {dark}: its widest value whole there");
+        assert!(segments_fit(&SHORT, &ui, room), "dark {dark}: Light | Dark stay segments");
+        assert!(control_width(&SHORT, &ui, true) <= room.unwrap(), "dark {dark}: their labels whole there");
+    }
+}

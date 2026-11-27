@@ -518,7 +518,7 @@ fn same_row(
 
 /// Whether `setting`, a choice shown as segments, shows them in `ui`: only where every label fits
 /// whole in `room` (unknown, `None`: it does); else it's a dropdown. Any other setting: no matter.
-fn segments_fit(setting: &Setting, ui: &Ui, room: Option<f32>) -> bool {
+pub(crate) fn segments_fit(setting: &Setting, ui: &Ui, room: Option<f32>) -> bool {
     match &setting.kind {
         Kind::Choice { choices, show: Show::Segments, .. } => {
             room.is_none_or(|room| ui.choice_width(&choices.iter().map(|c| c.label).collect::<Vec<_>>()) <= room)
@@ -529,7 +529,7 @@ fn segments_fit(setting: &Setting, ui: &Ui, room: Option<f32>) -> bool {
 
 /// How wide `setting`'s control is in `ui`, its value whole: a choice's segments (if `segments`)
 /// or its dropdown's widest value, a switch, a color's swatch.
-fn control_width(setting: &Setting, ui: &Ui, segments: bool) -> f32 {
+pub(crate) fn control_width(setting: &Setting, ui: &Ui, segments: bool) -> f32 {
     match &setting.kind {
         Kind::Choice { choices, show, .. } => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
