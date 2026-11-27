@@ -23,6 +23,11 @@
    questions hang under its review entry: find it with `desk_list` (title "Review PR #<n>…") and
    pass it as `parent`; if it doesn't exist yet, create it first.
 
+   **Small, reversible details don't wait.** A spacing, a label, a placement within an existing
+   screen, or a default that's easy to change: decide it, build it, and file its own desk entry
+   worded "Decided X; say if you object", so work goes on while the user reads. New screens, new
+   behaviour, installs, data formats, dependencies and anything public still wait for an answer.
+
    **UI wording (Apple's rule):** "…" ends a command's label only when it needs more input before
    acting (Edit…, Save as…, Add…, Move to…), never on one that acts at once (Apply, Delete).
 4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and `cargo test` green.
