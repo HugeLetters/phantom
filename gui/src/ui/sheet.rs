@@ -468,16 +468,23 @@ impl Ui {
     pub fn halves_row(&self, key: &str, label: &str, cells: Halves, looks: [&Ui; 2], toggle: Option<El>, notes: Vec<(String, Tone)>) -> El {
         let [light, dark] = looks;
         let cell = |content: Option<El>, key: String| row().key(key).grow(1.0).min_w(0.0).min_h(44.0).center_y().children(content);
-        let (left_cell, right_cell) = match cells {
-            Halves::Joined(control) => (cell(Some(control), format!("{key}-both-cell")), cell(None, format!("{key}-dark-cell"))),
-            Halves::Split(a, b) => (cell(a, format!("{key}-light-cell")), cell(b, format!("{key}-dark-cell"))),
+        let line = |ui: &Ui, cell: El| {
+            let k = ui.tokens();
+            row()
+                .w_full()
+                .gap(self.spacing.s6)
+                .center_y()
+                .child(text(label.to_owned()).font(k.ty.ui).color(k.c.text_base).w(HALF_LABEL).wrap())
+                .child(cell)
         };
-        let line = row()
-            .w_full()
-            .gap(self.spacing.s6)
-            .center_y()
-            .child(text(label.to_owned()).font(light.tokens().ty.ui).color(light.tokens().c.text_base).w(HALF_LABEL).wrap())
-            .child(left_cell);
+        let (left_cell, right_cell, over) = match cells {
+            Halves::Joined { light: control, dark: copy } => {
+                let copy = cell(Some(copy.inert().a11y_hidden()), format!("{key}-dark-copy-cell"));
+                (cell(Some(control), format!("{key}-both-cell")), cell(None, format!("{key}-dark-cell")), Some(line(dark, copy)))
+            }
+            Halves::Split(a, b) => (cell(a, format!("{key}-light-cell")), cell(b, format!("{key}-dark-cell")), None),
+        };
+        let line = line(light, left_cell);
         let mut left = col().w_full().gap(self.spacing.s1).child(line);
         for (note, tone) in notes {
             let ink = if tone == Tone::Error { light.tokens().c.danger.fg } else { light.tone_color(tone) };
@@ -485,14 +492,30 @@ impl Ui {
                 .child(text(note).key(format!("{key}-refused")).font(light.tokens().ty.text_small).color(ink).wrap().pb(self.spacing.s2));
         }
         let right = row().w_full().gap(self.spacing.s6).center_y().child(right_cell).child(el().w(HALF_TOGGLE).center().children(toggle));
-        self.halves_line(key, left, right, [light.tokens().c.bg_base, dark.tokens().c.bg_base])
+        let over = over.map(|line| self.over_the_seam(key, line, dark.tokens().c.bg_base));
+        self.halves_line(key, left, right, [light.tokens().c.bg_base, dark.tokens().c.bg_base], over)
+    }
+
+    /// The right half's cover for what a joined row's Light control spills across the seam: `line`,
+    /// the row's left line drawn in the Dark look, placed as it is in the left half (one half's
+    /// width to the left) and clipped to the right half, over its page `page`. Keyed `<key>-over`.
+    fn over_the_seam(&self, key: &str, line: El, page: rune::Color) -> El {
+        let left = col().px(self.spacing.s4).grid_cell(0).child(line);
+        let shifted = row().pin(None, Some(0.0), Some(0.0), None).w_frac(2.0).equal_columns(2).child(left);
+        el().key(format!("{key}-over"))
+            .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+            .fill(page)
+            .clip_rounded(0.0)
+            .inert()
+            .a11y_hidden()
+            .child(shifted)
     }
 
     /// A line of the editor in two halves, `left` on `pages[0]` and `right` on `pages[1]`, each
     /// grown to the line's height so the seam runs through unbroken; keyed `key`, its halves
     /// `<key>-left` and `<key>-right`.
-    fn halves_line(&self, key: &str, left: El, right: El, pages: [rune::Color; 2]) -> El {
-        let half = |content: El, page: rune::Color, which: &str, cell: usize| {
+    fn halves_line(&self, key: &str, left: El, right: El, pages: [rune::Color; 2], over: Option<El>) -> El {
+        let half = |content: El, page: rune::Color, which: &str, cell: usize, over: Option<El>| {
             col()
                 .key(format!("{key}-{which}"))
                 .grow(1.0)
@@ -501,9 +524,15 @@ impl Ui {
                 .fill(page)
                 .justify_start()
                 .grid_cell(cell)
+                .children(over)
                 .child(content)
         };
-        row().key(key.to_owned()).w_full().equal_columns(2).child(half(left, pages[0], "left", 0)).child(half(right, pages[1], "right", 1))
+        row()
+            .key(key.to_owned())
+            .w_full()
+            .equal_columns(2)
+            .child(half(left, pages[0], "left", 0, None))
+            .child(half(right, pages[1], "right", 1, over))
     }
 
     /// The editor's rows in one card, split down the middle ([`Ui::halves_row`]): between each, one
@@ -550,7 +579,7 @@ impl Ui {
     ) -> El {
         let [light, dark] = looks;
         let left = light.section_title(key, title, open, on_press);
-        self.halves_line(&format!("{key}-header"), left, col().w_full(), [light.k.c.page, dark.k.c.page])
+        self.halves_line(&format!("{key}-header"), left, col().w_full(), [light.k.c.page, dark.k.c.page], None)
     }
 
     /// A section's title, keyed `<key>-title`; one that folds (`open` is `Some`) has a chevron and
@@ -589,7 +618,7 @@ impl Ui {
         let [light, dark] = looks;
         let k = &light.k;
         let left = text(name.to_owned()).font(k.ty.text_small_medium).color(k.c.text_muted).wrap().pt(self.spacing.s4).pb(self.spacing.s2);
-        self.halves_line(key, left, col().w_full(), [light.k.c.page, dark.k.c.page])
+        self.halves_line(key, left, col().w_full(), [light.k.c.page, dark.k.c.page], None)
     }
 
     /// The heading of a Look Preset's editor's half, drawn in that half's look (`self`): ☀ Light
@@ -615,7 +644,7 @@ impl Ui {
     pub fn halves_header(&self, light: El, dark: El, looks: [&Ui; 2]) -> El {
         let left = row().w_full().gap(self.spacing.s6).child(el().w(HALF_LABEL)).child(light.grow(1.0).min_w(0.0));
         let right = row().w_full().gap(self.spacing.s6).child(dark.grow(1.0).min_w(0.0)).child(el().w(HALF_TOGGLE));
-        self.halves_line("halves-header", left, right, looks.map(|l| l.tokens().c.bg_base))
+        self.halves_line("halves-header", left, right, looks.map(|l| l.tokens().c.bg_base), None)
     }
 
     /// A row's Join or Split: a small button that joins or splits it. Tab reaches it with Full
@@ -895,7 +924,12 @@ impl Ui {
 /// What a Look Preset's editor row holds: one control for both halves, built in each half's
 /// look, or one in each half's column (`None`: that half's theme hasn't the setting).
 pub enum Halves {
-    Joined(El),
+    /// `light` is drawn in the Light look and is the live control; `dark` is the same control in
+    /// the Dark look, keyed apart, for the part of it over the Dark half.
+    Joined {
+        light: El,
+        dark: El,
+    },
     Split(Option<El>, Option<El>),
 }
 

@@ -268,16 +268,16 @@ fn editor(
     let themes = crate::theme::themes();
     let names: Vec<&str> = themes.iter().map(|t| t.name()).collect();
     // A Theme pop-up of `side`, in the look `ui`.
-    let pop_up = |side: Side, ui: &Ui, layer: &mut Vec<El>| {
+    let pop_up = |side: Side, ui: &Ui, copy: bool, layer: &mut Vec<El>| {
         let theme = preset.get(side.appearances()[0]).theme;
         let current = themes.iter().position(|t| t.id() == theme.id()).unwrap_or(0);
         ui.popup_button(
-            format!("{EDIT}-theme-{}", side.key()),
+            format!("{EDIT}-theme-{}{}", side.key(), if copy { COPY } else { "" }),
             "Theme",
             &names,
             current,
-            editor.menu == Some((THEME, side)),
-            (first && side != Side::Only(Appearance::Dark)) || wants(THEME, side, theme_sides),
+            editor.menu == Some((THEME, side)) && !copy,
+            !copy && ((first && side != Side::Only(Appearance::Dark)) || wants(THEME, side, theme_sides)),
             move |s: &mut SettingsWindow| toggle_menu(s, THEME, side),
             close_menu,
             move |s: &mut SettingsWindow, i| choose_theme(s, side, crate::theme::themes()[i].id()),
@@ -289,10 +289,13 @@ fn editor(
     match rows {
         ThemeRows::Same { rows, .. } => {
             let theme = match theme_joined {
-                true => Halves::Joined(pop_up(Side::Both, looks[0], layer)),
+                true => Halves::Joined {
+                    light: pop_up(Side::Both, looks[0], false, layer),
+                    dark: pop_up(Side::Both, looks[1], true, &mut Vec::new()),
+                },
                 false => Halves::Split(
-                    Some(pop_up(Side::Only(Appearance::Light), looks[0], layer)),
-                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], layer)),
+                    Some(pop_up(Side::Only(Appearance::Light), looks[0], false, layer)),
+                    Some(pop_up(Side::Only(Appearance::Dark), looks[1], false, layer)),
                 ),
             };
             let toggle = join_control(looks[1], THEME, "Theme", theme_joined);
@@ -330,7 +333,8 @@ fn editor(
                 let ui = half.ui;
                 let of = preset.get(side.appearances()[0]).theme.settings();
                 let heading = ui.half_heading(side == Side::Only(Appearance::Dark));
-                let theme = ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, layer), Vec::new());
+                let theme =
+                    ui.setting_row(&format!("{EDIT}-theme-{}-row", side.key()), "Theme", pop_up(side, ui, false, layer), Vec::new());
                 let mut lines = vec![(heading, false), (theme, false)];
                 let mut at = At::default();
                 for (setting, value) in held {
@@ -359,7 +363,8 @@ fn editor(
                     );
                     lines.extend(heads.into_iter().map(|h| (h, true)));
                     if shown {
-                        let control = theme_control(setting, side, *value, editor, half, of, wants(setting.key, side, &[side]), layer);
+                        let control =
+                            theme_control(setting, side, *value, editor, half, of, wants(setting.key, side, &[side]), false, layer);
                         let notes =
                             sheet.refused(Row::Color(side, setting.key)).map(|why| (why.to_owned(), Tone::Error)).into_iter().collect();
                         let row = ui.setting_row(&format!("{EDIT}-{}-{}-row", setting.key, side.key()), setting.label, control, notes);
@@ -449,13 +454,16 @@ fn same_row(
     let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
     let (cells, sides) = match row.joined {
         true => {
-            let cells = Halves::Joined(theme_control(setting, Side::Both, row.light, editor, halves[0], of, focus(Side::Both), layer));
+            let cells = Halves::Joined {
+                light: theme_control(setting, Side::Both, row.light, editor, halves[0], of, focus(Side::Both), false, layer),
+                dark: theme_control(setting, Side::Both, row.light, editor, halves[1], of, false, true, &mut Vec::new()),
+            };
             (cells, vec![Side::Both])
         }
         false => {
             let cells = Halves::Split(
-                Some(theme_control(setting, light, row.light, editor, halves[0], of, focus(light), layer)),
-                Some(theme_control(setting, dark, row.dark, editor, halves[1], of, focus(dark), layer)),
+                Some(theme_control(setting, light, row.light, editor, halves[0], of, focus(light), false, layer)),
+                Some(theme_control(setting, dark, row.dark, editor, halves[1], of, focus(dark), false, layer)),
             );
             (cells, vec![light, dark])
         }
@@ -487,6 +495,9 @@ fn side_label(side: Side) -> &'static str {
 
 /// What the sheet's controls' keys start with: `edit-tone-light`.
 const EDIT: &str = "edit";
+
+/// What ends the keys of a joined control's copy in the Dark look: `edit-corners-both-copy`.
+const COPY: &str = "-copy";
 
 /// Save as…'s line under the Active look's row: nothing; open, the name field and Save, a blank
 /// name's refusal under them; for a name a saved preset has, the question whether to replace it.
@@ -537,11 +548,12 @@ fn theme_control(
     half: Half,
     of: &'static [Setting],
     focus: bool,
+    copy: bool,
     layer: &mut Vec<El>,
 ) -> El {
     let ui = half.ui;
     let key = setting.key;
-    let control_key = format!("{EDIT}-{key}-{}", side.key());
+    let control_key = format!("{EDIT}-{key}-{}{}", side.key(), if copy { COPY } else { "" });
     match (&setting.kind, value) {
         (Kind::Choice { choices, show, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();

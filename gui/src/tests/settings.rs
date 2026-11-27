@@ -3521,6 +3521,42 @@ fn a_joined_control_is_in_the_left_column() {
     assert_eq!(rect(&d, "edit-tone-both-cell")[0], joined[0], "a row just joined: the same");
 }
 
+/// What a joined row's control spills over the seam is drawn in the Dark look, as the rest of the
+/// Dark half is: the right half holds a cover with the control's copy in that look, as wide as the
+/// half and clipped to it, its text in the Dark look's color, while the live control, in the left
+/// half, stays in the Light look; a split row has no cover (#433).
+#[test]
+fn a_joined_controls_part_over_the_dark_half_is_drawn_in_the_dark_look() {
+    let mut d = appearance_tab();
+    press(&mut d, "active-edit");
+    let preset = d.main.state.looks.borrow().preset().clone();
+    let [light, dark] = Appearance::BOTH.map(|a| Look::build(preset.get(a)).ui.tokens().c.clone());
+    assert_ne!(light.text_base, dark.text_base, "a fresh install's halves look apart");
+    let texts = |d: &Desk, key: &str| -> Vec<rune::Color> {
+        let Some(path) = d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.path) else { return vec![] };
+        d.settings
+            .elements()
+            .into_iter()
+            .filter(|e| e.path.starts_with(&format!("{path}/")) && e.text.is_some())
+            .filter_map(|e| e.text_color)
+            .collect()
+    };
+    let rect = |key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+    // Theme is joined, Tone split, on a fresh install.
+    let (cover, right) = (texts(&d, "edit-theme-over"), rect("edit-theme-right"));
+    assert!(!cover.is_empty() && cover.iter().all(|c| *c == dark.text_base), "the copy in the Dark look: {cover:?}");
+    assert!(texts(&d, "edit-theme-both-cell").iter().all(|c| *c == light.text_base), "the live control in the Light look");
+    assert_eq!(rect("edit-theme-over"), right, "the cover is the Dark half, no more");
+    assert!(d.settings.find("edit-theme-over").is_some() && d.settings.find("edit-tone-over").is_none(), "a split row has none");
+    // Joined, then split: the Tone row.
+    press(&mut d, "edit-tone-join");
+    assert!(d.settings.find("edit-tone-over").is_some(), "a row just joined has one");
+    press(&mut d, "edit-tone-split");
+    assert!(d.settings.find("edit-tone-over").is_none(), "split again: none");
+    // The copy is no second control: one of each key, and the pointer and Tab find the live one.
+    assert_eq!(d.settings.elements().iter().filter(|e| e.key.as_deref() == Some("edit-theme-both-trigger")).count(), 1);
+}
+
 /// Night's Tone: each half's.
 fn night_tone(d: &Desk) -> [Option<Value>; 2] {
     let saved = d.settings.state.saved.list()[1].preset.clone();
