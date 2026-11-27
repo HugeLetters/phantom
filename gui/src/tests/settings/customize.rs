@@ -334,3 +334,17 @@ fn a_drag_is_one_step_and_cancel_leaves_none() {
     d.settle();
     assert_eq!(tint(&d, Appearance::Dark), Tint::Original, "one ⌘Z takes the visit");
 }
+
+/// The icon Tile's picker at the 640x320 minimum, in either half.
+#[test]
+fn the_tile_picker_fits_the_minimum_window() {
+    for half in ["light", "dark"] {
+        super::minimum_window_holds_the_popup(|y| {
+            let (mut d, _) = sheet(640.0);
+            d.settings.set_viewport((640.0, 320.0), 2.0);
+            d.settle();
+            super::press_at(&mut d, &format!("customize-tile-{half}-swatch"), y);
+            (d, format!("customize-tile-{half}-popup"))
+        });
+    }
+}

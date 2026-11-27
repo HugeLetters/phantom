@@ -25,6 +25,8 @@ const PAD: f32 = 12.0;
 const GAP: f32 = 8.0;
 /// How far the window keeps a popup from its edge.
 const WINDOW_MARGIN: f32 = 8.0;
+/// The popup's tallest, before it's been measured: the square, the field and two warnings.
+const ESTIMATE: f32 = 290.0;
 pub const POPUP_WIDTH: f32 = SQUARE.0 + 2.0 * GAP + BAR + 2.0 * PAD;
 
 /// How tall the hex field is: a regular button's height, as its Follow or Reset beside it.
@@ -209,17 +211,23 @@ impl Ui {
             .border(1.0, rune::Color::TRANSPARENT);
         // Beside the swatch if the popup's width fits on either side of it; else, as the window is
         // too narrow for that, below it, or above if it doesn't fit below (shifted to stay inside
-        // the window, never narrowed). It depends on the window's width and the swatch alone, so
-        // the choice never changes while the picker is open.
+        // the window, never narrowed). In a window too short for either, it takes the window's
+        // middle, over the swatch, its top edge kept. It depends on the window's size, the
+        // swatch and the popup's tallest alone, so the choice never changes while it's open.
         let layer_key = format!("{key}-layer");
-        let over = match (rune::memo::window_layout(anchor), rune::memo::window_layout(&layer_key)) {
+        let room_key = format!("{key}-room");
+        let tall = rune::memo::layout_size(&room_key).map_or(ESTIMATE, |s| s[1]);
+        let (a, w) = (rune::memo::window_layout(anchor), rune::memo::window_layout(&layer_key));
+        let (over, middle) = match (a, w) {
             (Some(a), Some(w)) => {
                 let need = POPUP_WIDTH + GAP + WINDOW_MARGIN;
-                a[0] + a[2] + need > w[0] + w[2] && a[0] - need < w[0]
+                let over = a[0] + a[2] + need > w[0] + w[2] && a[0] - need < w[0];
+                let below = a[1] + a[3] + GAP + tall + WINDOW_MARGIN <= w[1] + w[3];
+                let above = a[1] - GAP - tall - WINDOW_MARGIN >= w[1];
+                (over, over && !below && !above)
             }
-            _ => false,
+            _ => (false, false),
         };
-        let room_key = format!("{key}-room");
         let first = if over { (Side::Bottom, Align::Start) } else { (Side::Right, Align::Start) };
         // A side kept from before the probe said otherwise (the window was resized) isn't one.
         let (side, align) =
@@ -244,7 +252,12 @@ impl Ui {
             .h_full()
             .child(rune_kit::scrim(format!("{key}-scrim"), on_close))
             .child(room)
-            .child(popover::anchored(k, surface, anchor, placement, GAP))
+            .child(match (middle, w) {
+                (true, Some(w)) => {
+                    surface.absolute(((w[2] - POPUP_WIDTH) / 2.0).max(WINDOW_MARGIN), ((w[3] - tall) / 2.0).max(WINDOW_MARGIN))
+                }
+                _ => popover::anchored(k, surface, anchor, placement, GAP),
+            })
             .modal(false, on_escape);
         layer.push(scope);
     }
