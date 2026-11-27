@@ -1,11 +1,11 @@
 //! Phantom, the default theme: complete, and the end of every theme's parent chain. Its tokens
-//! are rune-kit's neutral kit, light or dark as its Tone says, recolored by its Colors (`palette`);
+//! are rune-kit's neutral kit, light or dark as its Tone says, recolored by its Colors (`colors`);
 //! its blocks are the building blocks as `ui` writes them, with its own icons; its App icon is the
 //! bundle's own, or drawn with a Tile color (`app_icon`).
 
 pub mod app_icon;
+pub mod colors;
 mod icons;
-pub mod palette;
 
 use std::sync::LazyLock;
 
@@ -74,7 +74,7 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         )
         .in_section(&LOOK),
     ];
-    settings.extend(palette::settings());
+    settings.extend(colors::settings());
     settings
 });
 
@@ -117,7 +117,7 @@ impl Theme for Phantom {
         let dark = settings.get(TONE) == Some(Value::Choice("dark"));
         let mut tokens = Kit::neutral(dark);
         tokens.radius = radius(settings.get(CORNERS));
-        let resolved = palette::apply(&mut tokens, settings);
+        let resolved = colors::apply(&mut tokens, settings);
         Built {
             colors: Colors::of(&tokens),
             spacing: Spacing::phantom(),
