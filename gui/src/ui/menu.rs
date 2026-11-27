@@ -76,9 +76,25 @@ impl Ui {
         on_close: impl Fn(&mut S) + 'static,
         layer: &mut Vec<El>,
     ) -> El {
+        self.menu_at_least(MIN_WIDTH, key, trigger, open, entries, on_pick, on_close, layer)
+    }
+
+    /// [`Ui::menu`] as narrow as its items allow, down to `least` (a pull-down of short words).
+    #[allow(clippy::too_many_arguments)]
+    pub fn menu_at_least<S: 'static>(
+        &self,
+        least: f32,
+        key: impl Into<String>,
+        trigger: El,
+        open: Option<At>,
+        entries: Vec<Entry>,
+        on_pick: impl Fn(&mut S, &str, &mut Tx) + Clone + 'static,
+        on_close: impl Fn(&mut S) + 'static,
+        layer: &mut Vec<El>,
+    ) -> El {
         // As wide as its widest item, so no label is cut ("Delete 3 torrents (files to the
         // Trash)"), and never narrower than a short menu has always been.
-        let width = self.menu_width(&entries).max(MIN_WIDTH);
+        let width = self.menu_width(&entries).max(least);
         let mut menu = rune_kit::Menu::new(key).trigger(trigger).open(open.is_some()).min_width(width);
         menu = match open {
             Some(At::Point(x, y)) => menu.at(x, y),

@@ -850,7 +850,8 @@ fn restore_defaults_button(preset: &LookPreset, editor: &Editor, ui: &Ui, layer:
         false => Entry::Disabled { id: id.into(), label: label.to_owned(), icon: None, checked: None },
     };
     let entries = vec![entry("light", "Light", light), entry("dark", "Dark", dark), entry("both", "Both", Side::Both)];
-    ui.menu(
+    ui.menu_at_least(
+        0.0,
         "edit-restore-menu",
         trigger,
         (editor.menu == Some((RESTORE, Side::Both))).then_some(MenuAt::Below),
