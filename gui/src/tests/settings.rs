@@ -4611,7 +4611,7 @@ fn the_colors_names_are_never_cut() {
             assert!(d.settings.find(key).is_some(), "at {width} pt {key} is drawn");
         }
         let names: BTreeSet<&str> =
-            crate::theme::phantom::palette::DERIVED.iter().map(|c| c.label).chain(["Background", "Warning"]).collect();
+            crate::theme::phantom::colors::DERIVED.iter().map(|c| c.label).chain(["Background", "Warning"]).collect();
         // The sheet scrolls: each name is checked once it's in view.
         for name in names {
             let key = d
@@ -4757,9 +4757,9 @@ fn a_swatch_says_what_it_follows() {
 /// text (#445).
 #[test]
 fn a_derived_colors_swatch_and_follow_button_name_what_it_follows() {
-    use crate::theme::phantom::palette::DERIVED;
+    use crate::theme::phantom::colors::DERIVED;
     let mut d = colors_sheet(960.0);
-    let of = |key: &str| crate::theme::phantom::palette::settings().find(|s| s.key == key).unwrap().label;
+    let of = |key: &str| crate::theme::phantom::colors::settings().find(|s| s.key == key).unwrap().label;
     for c in &DERIVED {
         let swatch = format!("edit-{}-light-swatch", c.key);
         scroll_to(&mut d.settings, &swatch);
@@ -5022,8 +5022,8 @@ fn tab_reaches_each_swatch_and_the_pickers_parts() {
         tab(&mut d);
         reached.extend(focused(&d));
     }
-    let bases = crate::theme::phantom::palette::Base::ALL.map(|b| b.key());
-    let derived = crate::theme::phantom::palette::DERIVED.iter().map(|c| c.key);
+    let bases = crate::theme::phantom::colors::Base::ALL.map(|b| b.key());
+    let derived = crate::theme::phantom::colors::DERIVED.iter().map(|c| c.key);
     let mut want: Vec<String> = bases.iter().flat_map(|k| [format!("edit-{k}-light-swatch"), format!("edit-{k}-dark-swatch")]).collect();
     want.push("edit-every-color-section".into());
     want.extend(derived.flat_map(|k| [format!("edit-{k}-light-swatch"), format!("edit-{k}-dark-swatch")]));
@@ -5103,7 +5103,7 @@ fn tab_round(d: &mut Desk, on: bool) -> Vec<String> {
 
 /// The swatches and Join of each base color's row, split as they start.
 fn base_rows() -> Vec<String> {
-    crate::theme::phantom::palette::Base::ALL
+    crate::theme::phantom::colors::Base::ALL
         .map(|b| b.key())
         .iter()
         .flat_map(|k| [format!("edit-{k}-light-swatch"), format!("edit-{k}-dark-swatch"), format!("edit-{k}-join")])
@@ -5145,7 +5145,7 @@ fn tab_reaches_every_control_on_the_look_sheet() {
     press(&mut d, "edit-theme-dark-trigger");
     press(&mut d, &format!("option{sample}"));
     let mut apart = strings(&["edit-theme-light-trigger", "edit-tone-light", "edit-corners-light-trigger", "edit-motion-light-trigger"]);
-    apart.extend(crate::theme::phantom::palette::Base::ALL.map(|b| format!("edit-{}-light-swatch", b.key())));
+    apart.extend(crate::theme::phantom::colors::Base::ALL.map(|b| format!("edit-{}-light-swatch", b.key())));
     apart.extend(strings(&[
         "edit-every-color-light-section",
         "edit-theme-dark-trigger",

@@ -202,7 +202,7 @@ fn picked(values: &Values, key: &str) -> Option<Rgb> {
     }
 }
 
-/// Phantom's palette in the Tone `dark` says, with `values`' colors, and what each color setting
+/// Phantom's colors in the Tone `dark` says, with `values`' colors, and what each color setting
 /// comes to with its warnings. `kit` is `Kit::neutral(dark)`; its colors are replaced.
 pub fn apply(kit: &mut Kit, values: &Values) -> Resolved {
     let dark = kit.dark;
@@ -462,7 +462,7 @@ mod tests {
         all
     }
 
-    /// With nothing set, the palette is `Kit::neutral`'s, color for color, and its shadows too:
+    /// With nothing set, the colors are `Kit::neutral`'s, color for color, and its shadows too:
     /// a fresh install looks as Phantom always has.
     #[test]
     fn with_nothing_set_every_color_is_todays() {
