@@ -27,14 +27,24 @@ fn type_text(rt: &mut Runtime<Phantom>, text: &str) {
     settle(rt);
 }
 
-/// What the open palette draws, in order: each command's label and the key shown beside it.
+/// What the open palette draws, in order: each command's label and the key shown beside it; with
+/// nothing typed, the commands above Settings' places and settings, which [`drawn_rows`] adds.
 fn drawn_palette(rt: &Runtime<Phantom>) -> Vec<(String, Option<String>)> {
+    drawn_rows(rt, rt.state.palette.query.text.trim().is_empty())
+}
+
+/// [`drawn_palette`] with Settings' entries too when `only_commands` is false.
+fn drawn_rows(rt: &Runtime<Phantom>, only_commands: bool) -> Vec<(String, Option<String>)> {
     let elements = rt.elements();
     let Some(panel) = elements.iter().find(|e| !e.exiting && e.key.as_deref() == Some("palette-panel")) else { return Vec::new() };
     let inside = format!("{}/", panel.path);
     let rows: Vec<&rune::ElementInfo> =
         elements.iter().filter(|e| !e.exiting && e.role == "option" && e.path.starts_with(&inside)).collect();
+    // Settings' own entries (its places and settings) come last, under their heading.
+    let heading = |e: &&rune::ElementInfo| e.role == "heading" && e.label.as_deref() == Some("Settings") && e.path.starts_with(&inside);
+    let settings_at = elements.iter().find(heading).map(|h| h.rect[1]);
     rows.iter()
+        .filter(|row| !only_commands || settings_at.is_none_or(|y| row.rect[1] < y))
         .map(|row| {
             let below = format!("{}/", row.path);
             let hint =
@@ -43,14 +53,18 @@ fn drawn_palette(rt: &Runtime<Phantom>) -> Vec<(String, Option<String>)> {
             // current one with a check).
             let icon = elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("icon"));
             let priority = matches!(row.label.as_deref(), Some("Priority: Normal" | "Priority: Off"));
-            assert_eq!(icon, !priority, "{:?} has its icon, a priority has none", row.label);
+            // A setting or a choice has none: its place and value take the room.
+            let setting = elements.iter().any(|c| c.path.starts_with(&below) && c.key.as_deref() == Some("place"));
+            if !setting && settings_at.is_none_or(|y| row.rect[1] < y) {
+                assert_eq!(icon, !priority, "{:?} has its icon, a priority has none", row.label);
+            }
             (row.label.clone().expect("a row has its label"), hint)
         })
         .collect()
 }
 
-fn labels(rt: &Runtime<Phantom>) -> Vec<String> {
-    drawn_palette(rt).into_iter().map(|(l, _)| l).collect()
+pub(super) fn labels(rt: &Runtime<Phantom>) -> Vec<String> {
+    drawn_rows(rt, false).into_iter().map(|(l, _)| l).collect()
 }
 
 /// The palette's field has the focus.
@@ -109,7 +123,7 @@ fn typing_filters_by_name_best_first() {
     let mut rt = app(with_an_album());
     select(&mut rt, 1);
     cmd_p(&mut rt);
-    let all = labels(&rt);
+    let all: Vec<String> = drawn_palette(&rt).into_iter().map(|(l, _)| l).collect();
     type_text(&mut rt, "ren");
     let listed = labels(&rt);
     assert_eq!(listed.first().map(String::as_str), Some("Rename…"));
@@ -182,7 +196,7 @@ fn the_palette_lists_the_selected_files_commands_as_the_file_menu_words_them() {
     let mut rt = app(service);
     select(&mut rt, 1);
     cmd_p(&mut rt);
-    let without = labels(&rt);
+    let without: Vec<String> = drawn_palette(&rt).into_iter().map(|(l, _)| l).collect();
     assert!(!without.iter().any(|l| l.starts_with("Priority") || l == "Move to Trash"), "no file selected: {without:?}");
     press(&mut rt, Key::Escape);
 
@@ -521,7 +535,7 @@ fn drawn_groups(rt: &Runtime<Phantom>) -> Vec<(String, Vec<String>)> {
     groups
 }
 
-fn headings(rt: &Runtime<Phantom>) -> Vec<String> {
+pub(super) fn headings(rt: &Runtime<Phantom>) -> Vec<String> {
     drawn_groups(rt).into_iter().map(|(h, _)| h).collect()
 }
 
@@ -538,12 +552,12 @@ fn select_two_files(rt: &mut Runtime<Phantom>) {
 fn the_palette_groups_its_commands_under_headings_naming_the_selection() {
     let mut rt = app(with_an_album());
     cmd_p(&mut rt);
-    assert_eq!(headings(&rt), ["Phantom"], "nothing selected: the app's alone");
+    assert_eq!(headings(&rt), ["Phantom", "Settings"], "nothing selected: the app's, then Settings'");
     press(&mut rt, Key::Escape);
 
     select(&mut rt, 1);
     cmd_p(&mut rt);
-    assert_eq!(headings(&rt), ["Album", "Phantom"], "one torrent, by its name");
+    assert_eq!(headings(&rt), ["Album", "Phantom", "Settings"], "one torrent, by its name");
     let groups = drawn_groups(&rt);
     assert!(groups[0].1.contains(&"Pause".to_owned()) && !groups[0].1.contains(&"Add file…".to_owned()));
     assert!(groups[1].1.contains(&"Add file…".to_owned()) && !groups[1].1.contains(&"Pause".to_owned()));
@@ -552,14 +566,14 @@ fn the_palette_groups_its_commands_under_headings_naming_the_selection() {
     tap(&mut rt, "files/viewport/rows/2");
     settle(&mut rt);
     cmd_p(&mut rt);
-    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom"], "one file, by its name, between the torrent's and the app's");
+    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom", "Settings"], "one file, by its name, between the torrent's and the app's");
     let groups = drawn_groups(&rt);
     assert!(groups[1].1.contains(&"Move to Trash".to_owned()) && !groups[0].1.contains(&"Move to Trash".to_owned()));
     press(&mut rt, Key::Escape);
 
     select_two_files(&mut rt);
     cmd_p(&mut rt);
-    assert_eq!(headings(&rt), ["Album", "2 files", "Phantom"]);
+    assert_eq!(headings(&rt), ["Album", "2 files", "Phantom", "Settings"]);
     press(&mut rt, Key::Escape);
 
     select(&mut rt, 1);
@@ -567,7 +581,7 @@ fn the_palette_groups_its_commands_under_headings_naming_the_selection() {
     settle(&mut rt);
     cmd_p(&mut rt);
     assert_eq!(headings(&rt).first().map(String::as_str), Some("2 torrents"), "several torrents, by count: {:?}", headings(&rt));
-    assert_eq!(headings(&rt).last().map(String::as_str), Some("Phantom"));
+    assert_eq!(headings(&rt).last().map(String::as_str), Some("Settings"), "everything else last");
 }
 
 /// While filtering, a heading shows only while one of its commands still matches; the fuzzy order
@@ -579,7 +593,7 @@ fn a_heading_is_hidden_once_nothing_under_it_matches() {
     tap(&mut rt, "files/viewport/rows/2");
     settle(&mut rt);
     cmd_p(&mut rt);
-    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom"]);
+    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom", "Settings"], "every entry, Settings' last");
     type_text(&mut rt, "add file");
     assert_eq!(headings(&rt), ["Phantom"], "only the app's command matches");
     type_text(&mut rt, "zzz");
@@ -587,14 +601,14 @@ fn a_heading_is_hidden_once_nothing_under_it_matches() {
     for _ in 0..3 + 8 {
         press(&mut rt, Key::Backspace);
     }
-    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom"], "the text cleared, all are back");
+    assert_eq!(headings(&rt), ["Album", "front.jpg", "Phantom", "Settings"], "the text cleared, all are back");
     type_text(&mut rt, "trash");
-    assert_eq!(headings(&rt), ["Album", "front.jpg"], "the Trash commands of the torrent and of the file");
+    assert_eq!(headings(&rt), ["front.jpg", "Album"], "the Trash commands of the file, which match best, then the torrent's");
     for _ in 0.."trash".len() {
         press(&mut rt, Key::Backspace);
     }
     type_text(&mut rt, "move to t");
-    assert_eq!(headings(&rt), ["Album", "front.jpg"], "{:?}", drawn_groups(&rt));
+    assert_eq!(headings(&rt), ["front.jpg", "Album"], "{:?}", drawn_groups(&rt));
     type_text(&mut rt, "rash");
     assert_eq!(headings(&rt), ["front.jpg"], "the torrent's group has nothing left: its heading goes");
     type_text(&mut rt, "x");
@@ -610,7 +624,7 @@ fn the_arrows_skip_headings_and_wrap() {
     settle(&mut rt);
     cmd_p(&mut rt);
     let groups = drawn_groups(&rt);
-    assert_eq!(groups.len(), 3, "three groups, so two headings to skip over");
+    assert_eq!(groups.len(), 4, "four groups, so three headings to skip over");
     let commands: Vec<String> = groups.iter().flat_map(|(_, l)| l.clone()).collect();
     let highlighted = |rt: &Runtime<Phantom>| labels(rt)[crate::model::palette::highlighted(&rt.state)].clone();
     assert_eq!(highlighted(&rt), commands[0], "the first command, under the first heading");
@@ -707,7 +721,87 @@ fn a_torrent_command_is_not_offered_when_the_torrent_list_is_not_registered() {
     select(&mut rt, 1);
     rt.update(|s, _| s.mounted.begin());
     assert!(crate::commands::on_torrents(&rt.state).is_empty());
-    assert!(crate::model::palette::offered(&rt.state).iter().all(|e| !matches!(e.command, crate::commands::Command::Torrents(_))));
+    assert!(
+        crate::model::palette::offered(&rt.state)
+            .iter()
+            .all(|e| !matches!(e.kind, crate::model::palette::Kind::Action(crate::commands::Command::Torrents(_))))
+    );
     rt.key(shortcuts::keys(OnTorrents::Remove)[0].event());
     assert!(probe.commands().is_empty(), "⌫ ran nothing: {:?}", probe.commands());
+}
+
+/// Resting on the magnifier lists what each key does, one line each, whole and inside the window
+/// at the default and the minimum size; the icon takes no focus.
+#[test]
+fn the_magnifier_tooltip_lists_the_keys_inside_the_window() {
+    for size in [(960.0, 600.0), (640.0, 320.0)] {
+        let mut rt = app(with_an_album());
+        select(&mut rt, 1);
+        rt.set_viewport(size, 2.0);
+        cmd_p(&mut rt);
+        let at = super::generated::rect_of(&rt, "search-icon").expect("the magnifier");
+        rt.pointer_move(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
+        wait(&mut rt, 1.0);
+        let (text, [x, y, w, h]) = rt.help_tooltip().map(|(t, r)| (t.to_owned(), r)).expect("the tooltip shows");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            ["Run and close Return", "Run and keep the palette open ⇧ Return", "Show in Settings ⌘ Return", "Back Esc"],
+            "{size:?}"
+        );
+        assert!(x >= 0.0 && y >= 0.0 && x + w <= size.0 && y + h <= size.1, "{size:?}: inside the window: {:?}", [x, y, w, h]);
+    }
+}
+
+/// With nothing typed the palette lists every entry: Recent, then the selection's commands, then
+/// the app's, then every setting and place, scrolling; typing filters as before.
+#[test]
+fn nothing_typed_lists_every_entry_recent_and_the_selection_first() {
+    let mut rt = app(with_an_album());
+    select(&mut rt, 1);
+    cmd_p(&mut rt);
+    let listed = crate::model::palette::listed(&rt.state);
+    assert_eq!(headings(&rt), ["Album", "Phantom", "Settings"]);
+    assert_eq!(labels(&rt).len(), listed.len(), "every entry is a row");
+    assert!(labels(&rt).iter().any(|l| l.starts_with("Keep awake")), "a setting, found by scrolling");
+    let mut seen = Vec::new();
+    for e in &listed {
+        let pin = (e.kind.clone(), e.to.clone());
+        assert!(!seen.contains(&pin), "one row each: {}", e.label);
+        seen.push(pin);
+    }
+}
+
+/// The panel stops growing at the field plus ten rows however tall the window, scrolls past
+/// that, fits a small window, and a short list is shorter.
+#[test]
+fn the_palette_height_is_capped_at_ten_rows_and_fits_the_window() {
+    let height = |size: (f32, f32), query: &str| {
+        let mut rt = app(MemoryService::new());
+        rt.set_viewport(size, 2.0);
+        cmd_p(&mut rt);
+        type_text(&mut rt, query);
+        let find = |k: &str| rt.elements().iter().find(|e| !e.exiting && e.key.as_deref() == Some(k)).map(|e| e.rect);
+        (find("palette-panel").expect("the palette"), find("scroll").expect("the list"))
+    };
+    let (a, a_list) = height((960.0, 600.0), "");
+    let (b, _) = height((1440.0, 900.0), "");
+    assert!((a[3] - b[3]).abs() < 0.5, "the same cap at both sizes: {} and {}", a[3], b[3]);
+    assert!((a_list[3] - (10.0 * 28.0 + 8.0)).abs() < 0.5, "ten rows and the list's padding: {}", a_list[3]);
+    let (small, _) = height((640.0, 320.0), "");
+    assert!(small[1] + small[3] <= 320.0 + 0.5, "inside the window: {small:?}");
+    let (short, _) = height((960.0, 600.0), "copy");
+    assert!(short[3] < a[3] - 20.0, "a short list is shorter: {} against {}", short[3], a[3]);
+}
+
+/// A row is 28 points tall, a group heading 24.
+#[test]
+fn a_palette_row_is_28_points_and_a_heading_24() {
+    let mut rt = app(MemoryService::new());
+    cmd_p(&mut rt);
+    let rects: Vec<_> = rt.elements().iter().filter(|e| !e.exiting).map(|e| (e.role.to_string(), e.rect)).collect();
+    let option = rects.iter().find(|(r, _)| r == "option").expect("a row");
+    assert!((option.1[3] - 28.0).abs() < 0.5, "{:?}", option.1);
+    let heading = rects.iter().find(|(r, _)| r == "heading").expect("a heading");
+    assert!((heading.1[3] - 24.0).abs() < 0.5, "{:?}", heading.1);
 }

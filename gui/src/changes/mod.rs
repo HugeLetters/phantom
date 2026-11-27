@@ -244,6 +244,7 @@ pub fn observe(s: &mut Phantom, configured: Configured) {
     let _ = s.changes.decide(Event::Observed(Observed::Listed { at: configured.at, changes: configured.changes }));
     if s.changes.state.at != before {
         let settings = configured.settings;
+        s.service_settings = Some(settings.clone());
         s.changes.see(&settings);
         s.settings.post(move |w, _| {
             if let Some(sheet) = &mut w.sheet {

@@ -88,6 +88,12 @@ impl TextField<'_> {
         self
     }
 
+    /// Called after the text changes, with the app's state already holding it.
+    pub fn on_change<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.inner = self.inner.on_change(f);
+        self
+    }
+
     pub fn build(self) -> El {
         let width = self.width;
         let field = self.field();

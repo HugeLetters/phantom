@@ -1898,12 +1898,17 @@ fn check_row_menu(s: &Phantom, drawn: &[Option<String>]) -> Vec<String> {
     drawn.iter().flatten().cloned().collect()
 }
 
-/// What the open palette lists, in order.
+/// What the open palette lists of the commands, in order: the settings (a muted place after the
+/// name) and the places (Settings…) are `tests::palette_settings`'.
 fn palette_labels(rt: &Runtime<Phantom>) -> Vec<String> {
-    rt.elements()
+    let elements = rt.elements();
+    let settings: Vec<String> = elements.iter().filter(|e| e.key.as_deref() == Some("place")).map(|e| e.path.clone()).collect();
+    elements
         .into_iter()
         .filter(|e| !e.exiting && e.role == "option" && e.path.contains("palette-panel"))
+        .filter(|e| !settings.iter().any(|p| p.starts_with(&format!("{}/", e.path))))
         .filter_map(|e| e.label)
+        .filter(|label| label != "Settings…")
         .collect()
 }
 

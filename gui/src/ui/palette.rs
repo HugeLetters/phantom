@@ -15,6 +15,15 @@ pub struct PaletteRow {
     pub hint: Option<String>,
     /// None: an empty slot, so every label starts at the same x.
     pub icon: Option<Icon>,
+    /// Muted after the label: where a setting lives, "Appearance ▸ Edit… ▸ Look".
+    pub place: Option<String>,
+    /// A setting's value, muted, at the right of the row, before its key.
+    pub value: Option<String>,
+    /// The current one of a setting's choices: highlighted for assistive technology too.
+    pub selected: bool,
+    /// What assistive technology reads for the row, where it's more than the label: its name,
+    /// value and place.
+    pub read: Option<String>,
 }
 
 /// The narrowest the panel is, however short its commands: it's placed so that, at this width, it's
@@ -22,6 +31,9 @@ pub struct PaletteRow {
 const MIN_WIDTH: f32 = 440.0;
 /// The widest it grows to, for a long name; a longer label is cut.
 const MAX_WIDTH: f32 = 720.0;
+/// How many rows the list shows before it scrolls: the panel's height is capped here, not at a
+/// share of the window.
+const VISIBLE_ROWS: f32 = 10.0;
 /// How far from the window's sides it stays.
 const SIDE: f32 = 16.0;
 /// How far below the window's top the panel is: under the toolbar, as Spotlight sits high.
@@ -32,7 +44,8 @@ impl Ui {
     /// at its top, `rows` under it with the `at`-th highlighted, `empty` in their place when
     /// there are none. It's modal: the window under it takes nothing; Escape and a press outside
     /// call `on_close`, a press on a row `on_pick` with its index. The rows scroll when the window
-    /// is too short for them; row `i` is keyed by `row_key(i)`. It is as wide as its widest row, between
+    /// is too short for them; row `i` is keyed by `row_key(i)`. `choices`: the list's label while it
+    /// lists one setting's choices ("Corners, 3 choices"). It is as wide as its widest row, between
     /// [`MIN_WIDTH`] and [`MAX_WIDTH`], inside the `window` (its width, when known), left edge fixed.
 
     #[allow(clippy::too_many_arguments)]
@@ -40,12 +53,14 @@ impl Ui {
         &self,
         key: &str,
         field: El,
+        choices: Option<String>,
         rows: Vec<PaletteRow>,
         at: usize,
         empty: &str,
         window: Option<f32>,
         row_key: impl Fn(usize) -> String,
         on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static,
+        on_hover: impl Fn(&mut S, usize, bool) + Clone + 'static,
         on_close: impl Fn(&mut S, &mut Tx) + Clone + 'static,
         layer: &mut Vec<El>,
     ) {
@@ -59,9 +74,24 @@ impl Ui {
             .py(self.spacing.s5)
             .gap(self.spacing.s4)
             .center_y()
-            .child(icon(self.icon(Icon::Search), 16.0).color(c.icon_base).a11y_hidden())
+            .child(
+                icon(self.icon(Icon::Search), 16.0)
+                    .key("search-icon")
+                    .color(c.icon_base)
+                    .help("Run and close")
+                    .help_keys(["Return"])
+                    .help_row("Run and keep the palette open")
+                    .help_keys(["⇧", "Return"])
+                    .help_row("Show in Settings")
+                    .help_keys(["⌘", "Return"])
+                    .help_row("Back")
+                    .help_keys(["Esc"]),
+            )
             .child(field.grow(1.0).min_w(0.0));
         let mut list = col().key("rows").role("listbox").w_full().items_stretch().padding(self.spacing.s2);
+        if let Some(label) = choices {
+            list = list.label(label);
+        }
         if rows.is_empty() {
             list = list.child(
                 row()
@@ -82,16 +112,18 @@ impl Ui {
                         .w_full()
                         .h(self.spacing.palette_section)
                         .px(self.spacing.s5)
-                        .pt(self.spacing.s4)
+                        .pt(self.spacing.s3)
                         .center_y()
                         .child(text(heading).font(k.ty.small_medium).color(c.text_faint).truncate().grow(1.0).shrink()),
                 );
             }
             let pick = on_pick.clone();
+            let hovered = on_hover.clone();
             let mut item = row()
                 .key(row_key(i))
                 .role("option")
-                .label(r.label.clone())
+                .label(r.read.unwrap_or_else(|| r.label.clone()))
+                .focus_selected(r.selected)
                 .h(self.spacing.palette_row)
                 .px(self.spacing.s5)
                 .gap(self.spacing.s5)
@@ -102,8 +134,20 @@ impl Ui {
                     // An empty slot the icon's size.
                     None => el().w(14.0).h(14.0),
                 })
-                .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().grow(1.0).shrink())
-                .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx));
+                .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().shrink())
+                .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx))
+                .on_hover_change(move |s: &mut S, on: bool, _: &mut Tx| hovered(s, i, on));
+            // What's left of the row is the place, which gives way first; the value and the key
+            // keep their width.
+            item = item.child(match r.place {
+                Some(place) => {
+                    text(place).key("place").font(k.ty.small_medium).color(c.text_faint).truncate().grow(1.0).shrink().a11y_hidden()
+                }
+                None => el().grow(1.0),
+            });
+            if let Some(value) = r.value {
+                item = item.child(text(value).key("value").font(k.ty.ui_compact).color(c.text_muted).a11y_hidden());
+            }
             if let Some(hint) = r.hint {
                 item = item
                     .shortcut_hint(hint.clone())
@@ -114,7 +158,14 @@ impl Ui {
             }
             list = list.child(item);
         }
-        let rows = col().key("scroll").w_full().shrink().min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(list);
+        let rows = col()
+            .key("scroll")
+            .w_full()
+            .shrink()
+            .min_h(0.0)
+            .max_h(VISIBLE_ROWS * self.spacing.palette_row + 2.0 * self.spacing.s2)
+            .scroll(rune::ScrollSpec { stick_bottom: false })
+            .child(list);
         let mut panel = col()
             .key(format!("{key}-panel"))
             .role("dialog")
@@ -161,7 +212,9 @@ impl Ui {
                 // The row's padding (10 a side), icon slot and gap (14 and 10), the key and its gap,
                 // the list's padding (4 a side).
                 let hint = r.hint.as_deref().map_or(0.0, |h| 10.0 + rune::text::measure(h, &[], hint_style, None).0);
-                8.0 + 20.0 + 14.0 + 10.0 + self.label_width(&r.label) + hint
+                let place = r.place.as_deref().map_or(0.0, |p| 10.0 + rune::text::measure(p, &[], hint_style, None).0);
+                let value = r.value.as_deref().map_or(0.0, |v| 10.0 + self.label_width(v));
+                8.0 + 20.0 + 14.0 + 10.0 + self.label_width(&r.label) + place + value + hint
             })
             .fold(0.0, f32::max)
             .ceil()

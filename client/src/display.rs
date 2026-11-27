@@ -626,6 +626,11 @@ pub fn happened_listing(action: UndoAction, count: usize, names: &[String]) -> L
     Listing::new(&names_listed(names), note)
 }
 
+/// What the command palette says as it lists a setting's choices: "Corners, 3 choices".
+pub fn choices_of(setting: &str, n: usize) -> String {
+    format!("{setting}, {n} choice{}", if n == 1 { "" } else { "s" })
+}
+
 /// The action that undoes it.
 pub fn undo() -> &'static str {
     "Undo"
