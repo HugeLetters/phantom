@@ -1376,7 +1376,7 @@ const FAMILIES: (&str, &str) = ("Inter", "Inter");
 
 /// The size Settings first opens at, then as it was left; and the smallest it gets.
 const SETTINGS_SIZE: (f32, f32) = (600.0, 460.0);
-const SETTINGS_MIN: (f32, f32) = (480.0, 320.0);
+const SETTINGS_MIN: (f32, f32) = (ui::SETTINGS_MIN_WIDTH, 320.0);
 
 /// A headless run (a still, a GIF, a script) never touches the user's own data dir, `gui.json` or
 /// Downloads: unless the caller already points `PHANTOM_DATA_DIR` and `PHANTOM_DOWNLOAD_DIR`

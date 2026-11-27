@@ -140,7 +140,7 @@ impl Ui {
         for (i, name) in labels.iter().enumerate() {
             let on = i == selected;
             let ink = if on { c.text_base } else { c.text_muted };
-            let mut label = text((*name).to_owned()).key("label").font(font).color(ink).truncate().a11y_hidden();
+            let mut label = text((*name).to_owned()).key("label").font(font).color(ink).a11y_hidden();
             if !on {
                 label = label.group_color(c.text_base);
             }
@@ -168,8 +168,45 @@ impl Ui {
             }
             group = group.child(if on && first_focus { segment.tab_index(1) } else { segment });
         }
-        // As narrow as the cell it's in (an editor's half), its labels truncated, never past it.
+        // As narrow as the cell it's in (an editor's half): [`Ui::segments_fit`] keeps its labels whole there.
         el().key(key).min_w(0.0).shrink().child(group.min_w(0.0).shrink())
+    }
+
+    /// Whether `labels` fit side by side as [`Ui::choice`]'s segments, each label whole, in the
+    /// narrowest cell of a Look Preset's editor at the smallest Settings window. It doesn't depend
+    /// on the window's live width, so a control never changes shape as the window is dragged.
+    pub fn segments_fit(&self, labels: &[&str]) -> bool {
+        let font = rune::TextStyle { line_height: 13.0, ..self.k.ty.ui };
+        let widest = labels.iter().map(|l| rune::text::measure(l, &[], font, None).0).fold(0.0, f32::max);
+        // Equal columns, each as wide as the widest label and its padding.
+        let needs = labels.len() as f32 * (widest + 2.0 * self.spacing.s4);
+        // A half of the card, less its padding, its row label and the gap after it (the left cell is narrower than the right).
+        let half = (SETTINGS_MIN_WIDTH - 2.0 * self.spacing.s7 - 2.0) / 2.0;
+        needs <= half - 2.0 * self.spacing.s4 - HALF_LABEL - self.spacing.s6
+    }
+
+    /// One of a few values as [`Ui::choice`]'s segments when `segments` is asked for and its labels
+    /// fit ([`Ui::segments_fit`]), else as a [`Ui::dropdown`]: a label is never cut or shortened.
+    /// `open`, `on_toggle`, `on_close` and `layer` are the dropdown's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn choice_or_dropdown<S: 'static>(
+        &self,
+        key: String,
+        label: &str,
+        labels: &[&str],
+        selected: usize,
+        segments: bool,
+        first_focus: bool,
+        open: bool,
+        on_toggle: impl Fn(&mut S) + Clone + 'static,
+        on_close: impl Fn(&mut S) + 'static,
+        on_pick: impl Fn(&mut S, usize) + Clone + 'static,
+        layer: &mut Vec<El>,
+    ) -> El {
+        if segments && self.segments_fit(labels) {
+            return self.choice(key, label, labels, selected, first_focus, on_pick);
+        }
+        self.dropdown(key, label, labels, selected, open, first_focus, on_toggle, on_close, on_pick, layer)
     }
 
     /// A pop-up button (`Phantom ⌄`) named `label`, showing `current` of `options`; `open`, its
@@ -904,6 +941,8 @@ const PREVIEW: f32 = 24.0;
 
 /// How wide a Look Preset's editor row's label is, and its Join or Split's cell.
 const HALF_LABEL: f32 = 96.0;
+/// How narrow the Settings window gets, in points.
+pub const SETTINGS_MIN_WIDTH: f32 = 480.0;
 const HALF_TOGGLE: f32 = 46.0;
 
 /// How big an App icon's tiles are: every one as wide, so the grid lines up in columns; an icon's

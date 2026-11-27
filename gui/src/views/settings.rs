@@ -546,18 +546,14 @@ fn theme_control(
         (Kind::Choice { choices, show, .. }, Value::Choice(id)) => {
             let labels: Vec<&str> = choices.iter().map(|c| c.label).collect();
             let selected = choices.iter().position(|c| c.id == id).unwrap_or(0);
-            if *show == Show::Segments {
-                return ui.choice(control_key, setting.label, &labels, selected, focus, move |s: &mut SettingsWindow, i| {
-                    set_theme(s, side, key, Value::Choice(choices[i].id))
-                });
-            }
-            ui.dropdown(
+            ui.choice_or_dropdown(
                 control_key,
                 setting.label,
                 &labels,
                 selected,
-                editor.menu == Some((key, side)),
+                *show == Show::Segments,
                 focus,
+                editor.menu == Some((key, side)),
                 move |s: &mut SettingsWindow| toggle_menu(s, key, side),
                 close_menu,
                 move |s: &mut SettingsWindow, i| {

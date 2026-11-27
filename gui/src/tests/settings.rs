@@ -5313,3 +5313,67 @@ fn return_presses_done_on_the_app_icons_sheet() {
 }
 
 mod customize;
+
+/// A choice shown as segments whose labels are too long for a segment is a dropdown instead
+/// (#425), its label whole; labels that fit (Tone's Light | Dark) stay segments, each label
+/// whole. In a Look Preset editor's row (both halves), at the sheet's widest and at the smallest
+/// Settings window, in both Tones.
+#[test]
+fn a_choice_too_long_for_its_segments_is_a_dropdown_with_its_labels_whole() {
+    use crate::ui::{Halves, Ui};
+
+    struct Picked(usize, bool);
+    fn row(ui: &Ui, key: &str, labels: &[&str], layer: &mut Vec<rune::El>) -> rune::El {
+        let one = |side: &str, layer: &mut Vec<rune::El>| {
+            ui.choice_or_dropdown(
+                format!("{key}-{side}"),
+                "Motion",
+                labels,
+                0,
+                true,
+                false,
+                false,
+                |_: &mut Picked| {},
+                |_: &mut Picked| {},
+                |s: &mut Picked, i| s.0 = i,
+                layer,
+            )
+        };
+        let cells = Halves::Split(Some(one("light", layer)), Some(one("dark", layer)));
+        let line = ui.halves_row(key, "Motion", cells, [ui, ui], None, Vec::new());
+        ui.halves_card(vec![(line, false)], [ui, ui])
+    }
+    const SHORT: [&str; 2] = ["Light", "Dark"];
+    const LONG: [&str; 3] = ["Follow Reduce Motion", "On", "Off"];
+    fn view(s: &Picked, _: &mut rune::Cx<Picked>) -> rune::El {
+        let ui = Ui::phantom(s.1);
+        let mut layer = Vec::new();
+        let page =
+            rune::col().w_full().px(16.0).gap(8.0).child(row(&ui, "short", &SHORT, &mut layer)).child(row(&ui, "long", &LONG, &mut layer));
+        ui.root(page, layer)
+    }
+    for dark in [false, true] {
+        for width in [960.0_f32, 640.0, 480.0] {
+            let mut rt = Runtime::new(Picked(0, dark), view, (width, 320.0), rune::Env::new(dark, 2.0));
+            rt.frame(0.0);
+            let font = Ui::phantom(dark).tokens().ty.ui;
+            let elements = rt.elements();
+            let has = |path: &str| elements.iter().any(|e| e.path.contains(path) && !e.exiting);
+            for side in ["light", "dark"] {
+                assert!(has(&format!("short-{side}/#0/segment1")), "{dark} {width}: Light | Dark stay segments ({side})");
+                assert!(!has(&format!("long-{side}/#0/segment0")), "{dark} {width}: the long labels aren't segments ({side})");
+                assert!(has(&format!("long-{side}-trigger")), "{dark} {width}: they're a dropdown ({side})");
+            }
+            let mut seen = 0;
+            for e in elements.iter().filter(|e| !e.exiting && (e.path.contains("short-") || e.path.contains("long-"))) {
+                let Some(text) = e.text.as_deref().filter(|t| !t.is_empty()) else { continue };
+                seen += 1;
+                let (needs, _) = rune::text::measure(text, &[], font, None);
+                assert!(!text.contains('…'), "{dark} {width}: {text:?} is cut");
+                assert!(needs <= e.rect[2] + 0.5, "{dark} {width}: {text:?} needs {needs}, drawn {} wide", e.rect[2]);
+                assert!(e.rect[0] >= -0.5 && e.rect[0] + e.rect[2] <= width + 0.5, "{dark} {width}: {text:?} spills out of the window");
+            }
+            assert!(seen >= 6, "{dark} {width}: the labels were found");
+        }
+    }
+}
