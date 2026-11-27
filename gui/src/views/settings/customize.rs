@@ -46,6 +46,7 @@ pub(super) fn sheet(s: &SettingsWindow, open: &Customize, ui: &Ui) -> Vec<El> {
         WIDTH,
         body,
         customize::escape,
+        None,
         Some(Box::new(customize::cancel)),
         customize::done,
     );

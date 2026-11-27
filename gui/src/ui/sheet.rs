@@ -470,6 +470,7 @@ impl Ui {
         max_w: f32,
         body: El,
         on_escape: impl Fn(&mut S) + 'static,
+        leading: Option<El>,
         on_cancel: Option<Box<dyn Fn(&mut S)>>,
         on_done: impl Fn(&mut S) + 'static,
     ) -> Vec<El> {
@@ -487,7 +488,8 @@ impl Ui {
             .w_full()
             .padding(self.spacing.s7)
             .gap(self.spacing.s4)
-            .justify_end()
+            .children(leading)
+            .child(el().grow(1.0).min_w(0.0))
             .children(cancel)
             .child(self.button(format!("{key}-done"), "Done").primary().default_button().tab_stop().on_press(on_done).build());
         let panel = col()

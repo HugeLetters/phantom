@@ -26,7 +26,7 @@ use crate::model::settings::{Held, THEME, ThemeRow, ThemeRows, focused_side, joi
 use crate::model::settings::{close_picker, escape_picker, follow_color, follow_label, open_picker, pick, toggle_section};
 use crate::theme::preset::{Appearance, LookPreset};
 use crate::theme::setting::{Kind, Resolved, Section, Setting, Show, Value};
-use crate::ui::{FIELD_HEIGHT, Halves, Icon, LookChip, PopupParts, Tone, Ui};
+use crate::ui::{At as MenuAt, Entry, FIELD_HEIGHT, Halves, Icon, LookChip, PopupParts, Tone, Ui};
 
 /// Every setting the sheet shows, by its name in its settings file.
 pub const SETTINGS: [&str; 11] = [
@@ -816,6 +816,7 @@ fn edit_sheet(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, room: Room) ->
     let [light, dark] = Appearance::BOTH.map(|a| looks.shown(a).clone());
     let halves = [Half { ui: &light.ui, resolved: &light.resolved }, Half { ui: &dark.ui, resolved: &dark.resolved }];
     let body = self::editor(&preset, &open.editor, sheet, ui, halves, room, open.focus.is_none(), open.focus, &mut menu);
+    let restore = restore_defaults_button(&preset, &open.editor, ui, &mut menu);
     let mut layers = ui.over_sheet(
         EDIT,
         &title,
@@ -824,11 +825,44 @@ fn edit_sheet(s: &SettingsWindow, sheet: &SettingsSheet, ui: &Ui, room: Room) ->
         |s: &mut SettingsWindow| {
             escape(s);
         },
+        Some(restore),
         Some(Box::new(presets::cancel)),
         presets::close,
     );
     layers.extend(menu);
     layers
+}
+
+/// The footer's Restore Defaults: one button while both halves show the same theme, resetting both;
+/// with a theme in each, a pull-down of Light, Dark and Both. Disabled while what it would reset is
+/// at its defaults (a pull-down's entry too). Tab reaches it with Full Keyboard Access off.
+fn restore_defaults_button(preset: &LookPreset, editor: &Editor, ui: &Ui, layer: &mut Vec<El>) -> El {
+    use crate::model::settings::{RESTORE, RESTORE_LABEL, restorable, restore_defaults};
+    let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
+    let button = ui.button("edit-restore", RESTORE_LABEL).tab_stop();
+    if preset.light.theme.id() == preset.dark.theme.id() {
+        return button.disabled(!restorable(preset, Side::Both)).on_press(|s: &mut SettingsWindow| restore_defaults(s, Side::Both)).build();
+    }
+    let any = restorable(preset, Side::Both);
+    let trigger = button.disabled(!any).on_press(|s: &mut SettingsWindow| toggle_menu(s, RESTORE, Side::Both)).build();
+    let entry = |id: &'static str, label: &str, side: Side| match restorable(preset, side) {
+        true => Entry::Choice { id: id.into(), label: label.to_owned(), hint: None, icon: None, checked: None },
+        false => Entry::Disabled { id: id.into(), label: label.to_owned(), icon: None, checked: None },
+    };
+    let entries = vec![entry("light", "Light", light), entry("dark", "Dark", dark), entry("both", "Both", Side::Both)];
+    ui.menu(
+        "edit-restore-menu",
+        trigger,
+        (editor.menu == Some((RESTORE, Side::Both))).then_some(MenuAt::Below),
+        entries,
+        |s: &mut SettingsWindow, id: &str, _: &mut rune::Tx| match id {
+            "light" => restore_defaults(s, Side::Only(Appearance::Light)),
+            "dark" => restore_defaults(s, Side::Only(Appearance::Dark)),
+            _ => restore_defaults(s, Side::Both),
+        },
+        close_menu,
+        layer,
+    )
 }
 
 /// How wide Save as…'s field is. It's not in [`FIELDS`]: it shows only while Save as… is open.
@@ -979,6 +1013,7 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appear
         |s: &mut SettingsWindow| {
             escape(s);
         },
+        None,
         None,
         close_icons,
     )

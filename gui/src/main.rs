@@ -1214,6 +1214,20 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 s.looks.borrow_mut().set(preset::Appearance::Light, dark);
                 model::settings::presets::edit_active(s);
             }),
+            // Restore Defaults (#417): joined with a Corners and a color changed; the pull-down open
+            // over a theme in each half, Light's changed.
+            ("settings-restore-changed", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "accent", "#c2410c"), (preset::Appearance::Dark, "accent", "#c2410c")]);
+                model::settings::presets::edit_active(s);
+            }),
+            ("settings-restore-menu", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "accent", "#c2410c")]);
+                stand_in_dark(s);
+                model::settings::presets::edit_active(s);
+                model::settings::toggle_menu(s, model::settings::RESTORE, model::settings::Side::Both);
+            }),
             ("settings-sheet-split", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 model::settings::presets::edit_active(s);
