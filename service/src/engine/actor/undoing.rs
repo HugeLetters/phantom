@@ -401,14 +401,15 @@ impl Actor {
         let Some(location) = t.record.location() else { return trash::Copies::default() };
         let trashed = self.guard.trashed();
         let (made, replaced) = (trashed.writable(&entry.info_hash), trashed.replaced(&entry.info_hash));
-        let own = |i: usize| t.record.gets(i) || (made.contains(&i) && !replaced.contains(&i));
+        let own = |i: usize| made.contains(&i) && !replaced.contains(&i);
         let files = previous
             .iter()
             .filter(|(i, _, path)| own(*i) && left.iter().any(|item| path.starts_with(&item.from)))
             .filter(|(_, _, path)| files::stamp(path).is_some())
             .map(|(_, _, path)| path.clone())
-            .collect();
-        trash::Copies { location, files }
+            .collect::<Vec<PathBuf>>();
+        let seen = files.iter().filter_map(|f| trash::identity(f).map(|i| (f.clone(), (i.dev, i.ino)))).collect();
+        trash::Copies { location, files, seen }
     }
 
     /// The copies a resumed undo wrote ahead (`replacing`) that are still to go: those at a path whose
@@ -423,7 +424,7 @@ impl Actor {
             .filter(|path| files::stamp(path).is_some())
             .cloned()
             .collect();
-        trash::Copies { location, files }
+        trash::Copies { location, files, seen: Default::default() }
     }
 
     /// A partial Delete's torrent, still in the list, is taken out first, so it comes back as any

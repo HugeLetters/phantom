@@ -5720,3 +5720,67 @@ async fn a_resumed_undo_keeps_an_old_copy_it_put_back_before_the_crash() {
     assert_eq!(at("a.bin"), Some(old_a), "the old a.bin is put back");
     engine.stop().await;
 }
+
+/// Phantom's stub at a trashed file's path, replaced by the person's own file of the
+/// same length (an editor's save: a new file renamed onto it), isn't Phantom's: ⌘Z is refused, the
+/// person's file stays, and the old copy stays in the Trash.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stub_replaced_by_the_persons_file_refuses_the_undo() {
+    let dir = temp();
+    let seeded = dir.path().join("seed/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
+        std::fs::write(seeded.join(name), (0..24576usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
+    let engine = engine_size_checking_every(dir.path(), SIZE_CHECK_EVERY).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let files = engine.details(id).await.unwrap().files;
+    let pack = dir.path().join("downloads/pack");
+    let (first, second) = (pack.join(files[0].path.file_name().unwrap()), pack.join(files[1].path.file_name().unwrap()));
+    let before = std::fs::read(&first).unwrap();
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    std::fs::remove_file(&second).unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    until(&engine, id, |s| !matches!(s, Status::Checking | Status::Seeding | Status::Done { .. })).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+    assert!(first.exists(), "a stub of the piece it shares");
+    let mine = vec![7u8; std::fs::metadata(&first).unwrap().len() as usize];
+    let new = first.with_extension("new");
+    std::fs::write(&new, &mine).unwrap();
+    std::fs::rename(&new, &first).unwrap();
+    let (_, why) = cant_undo(engine.undo().await);
+    assert!(matches!(&why, proto::CantUndo::PathTaken { .. }), "{why:?}");
+    assert_eq!(std::fs::read(&first).unwrap(), mine, "the person's file stays");
+    let trashed: Vec<Vec<u8>> =
+        std::fs::read_dir(dir.path().join("trash")).unwrap().flatten().map(|e| std::fs::read(e.path()).unwrap()).collect();
+    assert_eq!(trashed, [before], "only the old copy is in the Trash");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(std::fs::read(&first).unwrap(), mine, "nothing writes into the person's file");
+    engine.stop().await;
+}
+
+/// (ADR 0014: "anything else at the path refuses the undo"): a trashed file set Normal
+/// again while paused, so nothing of Phantom's is made at its path, then the person's own file
+/// put there: ⌘Z is refused, and the person's file isn't sent to the Trash as a new copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_persons_file_at_the_path_of_a_file_set_normal_again_refuses_the_undo() {
+    let dir = temp();
+    let engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), complete_torrent(dir.path()).await, false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let b = index_of(&engine, id, "b.bin").await;
+    let path = file(dir.path(), "b.bin");
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![b] }).await.unwrap();
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Normal }).await.unwrap();
+    std::fs::write(&path, b"mine").unwrap();
+    let undone = engine.undo().await;
+    assert_eq!(std::fs::read(&path).ok().as_deref(), Some(&b"mine"[..]), "the person's file stays: {undone:?}");
+    let (_, why) = cant_undo(undone);
+    assert!(matches!(&why, proto::CantUndo::PathTaken { .. }), "{why:?}");
+    engine.stop().await;
+}

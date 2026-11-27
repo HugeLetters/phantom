@@ -1573,7 +1573,10 @@ impl MemoryService {
             }
         }
         self.size_check(id);
-        self.command_now(id, &TorrentCommand::Check);
+        // A torrent Unchecked is left so, as the engine does.
+        if !self.machines.get(&id).is_some_and(|m| m.state.phase.unchecked()) {
+            self.command_now(id, &TorrentCommand::Check);
+        }
         self.refresh(id);
         self.changed = true;
         Ok(left.undoable(of))

@@ -784,6 +784,24 @@ mod tests {
         assert_eq!(trashed.writable("t"), BTreeSet::from([0]), "Phantom's own, open for writing");
     }
 
+    /// a granted file (open for writing) a Move to Trash takes is closed too: a late
+    /// write through a storage already taken never lands in the Trash.
+    #[test]
+    fn a_granted_file_a_move_to_trash_takes_is_never_written_in_the_trash() {
+        let dir = tempfile::tempdir().unwrap();
+        let (trashed, trash) = (kept(dir.path()), bin(dir.path()));
+        let path = dir.path().join("a.bin");
+        std::fs::write(&path, [1; 100]).unwrap();
+        let mut files = trashed.storage("t", Layout::new(dir.path().to_owned(), None), dir.path().to_owned());
+        files.files = trashed.torrent("t").slots.open(vec![(Some(path.clone()), Opened::Open(open(&path, false).unwrap()))]);
+        let late = files.take().unwrap();
+        let away = take(&trashed, &trash, dir.path(), &path).to.unwrap();
+        assert_eq!(open_on(&away)(), 0, "closed as it went");
+        let _ = late.pwrite_all(0, 0, &[9; 10]);
+        let _ = files.pwrite_all(0, 10, &[9; 10]);
+        assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "the one in the Trash as it went");
+    }
+
     /// A part of a closed file that can't be kept aside (the data dir can't be written into; a full
     /// disk alike) fails librqbit's write, so the torrent goes to Error, and nothing is read of it.
     #[test]
