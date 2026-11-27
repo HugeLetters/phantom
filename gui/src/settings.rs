@@ -16,11 +16,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::layout::{Column, ColumnOrder, ColumnWidths, PaneHeight, PaneTab};
 use crate::platform::app_icon::{Icons, Written};
+use crate::theme::icon::IconSettings;
 use crate::theme::preset::{LookPreset, Stored};
 use crate::theme::saved;
 
 /// Every key of `gui.json`: [`crate::platform::app_icon::SETTING`],
-/// [`crate::platform::app_icon::WRITTEN`], [`crate::theme::preset::SETTING`],
+/// [`crate::platform::app_icon::WRITTEN`], [`crate::theme::icon::SETTING`], [`crate::theme::preset::SETTING`],
 /// [`crate::theme::saved::SETTING`], and the main window's [`crate::model::layout::COLUMN_ORDER`],
 /// [`crate::model::layout::HIDDEN_COLUMNS`], [`crate::model::layout::COLUMN_WIDTHS`],
 /// [`crate::model::layout::PANE_HEIGHT`] and
@@ -30,6 +31,8 @@ use crate::theme::saved;
 pub struct GuiSettings {
     pub app_icon: Option<Icons>,
     pub app_icon_written: Option<Written>,
+    /// The icons' own settings ([`crate::theme::icon::SETTING`]).
+    pub app_icon_settings: IconSettings,
     pub look_preset: Stored,
     /// Each as [`saved::read`] reads it: one that's off is repaired or dropped alone.
     pub saved_presets: Vec<serde_json::Value>,
@@ -89,6 +92,7 @@ mod tests {
     use crate::model::layout::{COLUMN_ORDER, COLUMN_WIDTHS, HIDDEN_COLUMNS, PANE_HEIGHT, PANE_TAB};
     use crate::model::recent::SETTING as RECENT;
     use crate::platform::app_icon::{SETTING, WRITTEN};
+    use crate::theme::icon::SETTING as TINTS;
     use crate::theme::preset::SETTING as LOOK;
     use crate::theme::saved::SETTING as SAVED;
     use crate::theme::saved::tests::saved;
@@ -100,6 +104,17 @@ mod tests {
             "[a-z-]{1,8}".prop_map(|icon| Some(Icons::One { icon })),
             ("[a-z-]{1,8}", "[a-z-]{1,8}").prop_map(|(dark, light)| Some(Icons::Pair { dark, light })),
         ]
+    }
+
+    /// Phantom's Tile in each half, as kept: Original isn't.
+    fn tints() -> impl Strategy<Value = IconSettings> {
+        use crate::theme::icon::{IconHalves, Tint, stored};
+        use crate::theme::setting::Rgb;
+        let tint = prop_oneof![Just(Tint::Original), Just(Tint::Follow), any::<[u8; 3]>().prop_map(|c| Tint::Color(Rgb(c)))];
+        (tint.clone(), tint).prop_map(|(light, dark)| {
+            let halves = IconHalves { light: [("tile".into(), light)].into(), dark: [("tile".into(), dark)].into() };
+            stored(&[("phantom".to_owned(), halves)].into())
+        })
     }
 
     fn written() -> impl Strategy<Value = Option<Written>> {
@@ -123,18 +138,21 @@ mod tests {
     fn settings() -> impl Strategy<Value = GuiSettings> {
         let recent = proptest::collection::vec("/[a-z]{1,6}(/[a-z]{1,6})?", 0..=5)
             .prop_map(|paths| paths.into_iter().map(|p| proto::AbsolutePath::new(p).unwrap()).collect::<Vec<_>>());
-        (icons(), written(), preset(), saved(), layout(), recent).prop_map(
-            |(app_icon, app_icon_written, preset, presets, (order, hidden, widths, height, tab), recent_folders)| GuiSettings {
-                app_icon,
-                app_icon_written,
-                look_preset: preset.stored(),
-                saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
-                column_order: order,
-                hidden_columns: hidden,
-                column_widths: widths,
-                pane_height: height,
-                details_tab: tab,
-                recent_folders,
+        (icons(), written(), tints(), preset(), saved(), layout(), recent).prop_map(
+            |(app_icon, app_icon_written, app_icon_settings, preset, presets, (order, hidden, widths, height, tab), recent_folders)| {
+                GuiSettings {
+                    app_icon,
+                    app_icon_written,
+                    app_icon_settings,
+                    look_preset: preset.stored(),
+                    saved_presets: saved::stored(&presets).into_iter().map(|s| serde_json::to_value(s).unwrap()).collect(),
+                    column_order: order,
+                    hidden_columns: hidden,
+                    column_widths: widths,
+                    pane_height: height,
+                    details_tab: tab,
+                    recent_folders,
+                }
             },
         )
     }
@@ -144,7 +162,7 @@ mod tests {
         fn the_fields_are_the_keys_the_stores_use(settings in settings()) {
             let value = serde_json::to_value(settings).unwrap();
             let keys: std::collections::BTreeSet<_> = value.as_object().unwrap().keys().cloned().collect();
-            let expected = [SETTING, WRITTEN, LOOK, SAVED, COLUMN_ORDER, HIDDEN_COLUMNS, COLUMN_WIDTHS, PANE_HEIGHT, PANE_TAB, RECENT].map(String::from).into_iter().collect();
+            let expected = [SETTING, WRITTEN, TINTS, LOOK, SAVED, COLUMN_ORDER, HIDDEN_COLUMNS, COLUMN_WIDTHS, PANE_HEIGHT, PANE_TAB, RECENT].map(String::from).into_iter().collect();
             prop_assert_eq!(keys, expected);
         }
 
@@ -176,7 +194,7 @@ mod tests {
         /// Good settings read back as they are and are left alone; a bad field is reset, named and
         /// written back with the others kept, and the file as it was kept as a copy.
         #[test]
-        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..14usize) {
+        fn settings_round_trip_and_a_bad_field_is_reset_with_the_others_kept(settings in settings(), which in 0..16usize) {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("gui.json");
             let good = serde_json::to_vec(&settings).unwrap();
@@ -259,6 +277,17 @@ mod tests {
                     file[COLUMN_WIDTHS] = json!({"nonsense": 90.0});
                     expected.column_widths = ColumnWidths::default();
                     COLUMN_WIDTHS.to_owned()
+                }
+                // An icon's setting that's no tint; a half that's no half.
+                14 => {
+                    file[TINTS] = json!({"phantom": {"dark": {"tile": "blue"}}});
+                    expected.app_icon_settings = IconSettings::new();
+                    TINTS.to_owned()
+                }
+                15 => {
+                    file[TINTS] = json!({"phantom": {"sideways": {"tile": "follow"}}});
+                    expected.app_icon_settings = IconSettings::new();
+                    TINTS.to_owned()
                 }
                 _ => {
                     let mut dark = Stored::default().dark;

@@ -865,6 +865,7 @@ pub fn setting_label(key: &str) -> &str {
         "seed_ratio" => "Stop seeding at ratio",
         "seed_time" => "Stop seeding after",
         "app_icon" => "App icon",
+        "app_icon_settings" => "App icon colors",
         "look_preset" => "Theme",
         "saved_presets" => "Look Presets",
         key => key,

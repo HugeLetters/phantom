@@ -96,6 +96,14 @@ split on the diagonal, picks both, and is in use while both halves are its icons
 under its Light icon and the ☾ chip under its Dark one are in use too; any two icons can also be picked one per half.
 _Avoid_: icon set, icon variant
 
+**Icon settings**:
+Settings of an icon its theme draws (Phantom's: **Tile**, the color of the tile behind the ghost), a
+Light and a Dark value each, kept outside any Look Preset, as the App icon is. **Customize…** beside
+the App icon's Edit… opens them while the icon shown has any. A color one is **Original** (the icon's
+own colors, the default: the shipped picture), **Follow the look** (the colors of the look that half
+shows, only when it's the icon's theme's) or set by hand in the color picker.
+_Avoid_: icon theme, tint preset
+
 ## Notices
 
 **Notice**:

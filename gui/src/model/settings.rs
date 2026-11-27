@@ -15,6 +15,7 @@
 //! that can't be used isn't kept then, the stored one comes back with the reason under the row.
 //! Escape in a field being edited ([`escape`]) puts the stored value back and nothing else.
 
+pub mod customize;
 pub mod presets;
 
 use std::collections::BTreeSet;
@@ -31,6 +32,7 @@ use crate::notice::{Notice, NoticeAction};
 use crate::platform::app_icon::loader::Loader;
 use crate::platform::app_icon::{FILE, FOLLOW, Icons, Manifest};
 use crate::service::Done;
+use crate::theme::icon::{IconSettings, Tint};
 use crate::theme::oklab::Okhsl;
 use crate::theme::preset::Appearance;
 use crate::theme::preset::LookPreset;
@@ -107,6 +109,8 @@ pub struct SettingsSheet {
     /// The App icon's sheet, while it's open over the window: a tile for every icon, each with its
     /// chips.
     pub icons: Option<IconSheet>,
+    /// The App icon's Customize sheet, while it's open over the window.
+    pub customize: Option<customize::Customize>,
     /// A Look Preset being edited, in a sheet over the window, while it's open.
     pub edit: Option<EditSheet>,
     /// The chip an undo of an Apply focuses, with `focus` naming the saved presets.
@@ -354,6 +358,7 @@ impl SettingsSheet {
             seed_time: TextEdit::new(""),
             refused: Vec::new(),
             icons: None,
+            customize: None,
             edit: None,
             chip: None,
             waiting: Vec::new(),
@@ -410,9 +415,9 @@ impl SettingsSheet {
         &mut self.editor_mut().expect("it's shown").colors[i].text
     }
 
-    /// Whether a sheet is open over the window: a Look Preset's, or the App icon's.
+    /// Whether a sheet is open over the window: a Look Preset's, the App icon's, or its Customize.
     pub fn over(&self) -> bool {
-        self.edit.is_some() || self.icons.is_some()
+        self.edit.is_some() || self.icons.is_some() || self.customize.is_some()
     }
 
     /// The sheet's editor, while it's open.
@@ -720,8 +725,24 @@ pub struct AppIcon {
     adding: Vec<String>,
     /// The kept images that couldn't be read: their halves follow the theme, as no step of the user's.
     gone: Vec<String>,
+    /// Each icon's own settings ([`crate::theme::icon`]), as `gui.json` keeps them.
+    pub tints: IconSettings,
+    /// The icons drawn from their settings, for the look each half shows ([`Self::redraw`]).
+    drawn: Vec<Drawn>,
     show: Box<dyn FnMut(IconChange<'_>)>,
 }
+
+/// An icon drawn from its settings in one half: the SVG, and its image once there's a cache to
+/// render it, which renders it once (resvg, in Rune's worker) and keeps it while it's the same.
+struct Drawn {
+    id: &'static str,
+    half: Appearance,
+    svg: String,
+    image: Option<rune::Image>,
+}
+
+/// How big a drawn icon is rendered: [`crate::platform::app_icon::ICON_SIZE`] pixels, 512 pt at 2×.
+const DRAWN_PT: f32 = 512.0;
 
 /// What reading an image file came to ([`AppIcon::poll`]).
 #[derive(Debug, PartialEq, Eq)]
@@ -746,6 +767,8 @@ pub enum IconChange<'a> {
     Added(&'a [String]),
     /// An added image has been read: the Dock and the bundle show it if they were waiting for it.
     Loaded(&'a crate::platform::app_icon::Icon),
+    /// The icons' own settings, to keep.
+    Tints(&'a IconSettings),
 }
 
 impl AppIcon {
@@ -763,6 +786,8 @@ impl AppIcon {
             loading: Vec::new(),
             adding: Vec::new(),
             gone: Vec::new(),
+            tints: IconSettings::new(),
+            drawn: Vec::new(),
             show: Box::new(show),
         };
         // A half whose icon isn't there (a shipped one that's gone) follows the theme; an image
@@ -793,6 +818,80 @@ impl AppIcon {
             }
         }
         self
+    }
+
+    /// With the icons' own settings `tints`, as `gui.json` keeps them; drawn by [`Self::redraw`].
+    pub fn with_tints(mut self, tints: IconSettings) -> Self {
+        self.tints = crate::theme::icon::stored(&tints);
+        self
+    }
+
+    /// What the setting `key` of the icon `id` holds in `half`.
+    pub fn tint(&self, id: &str, half: Appearance, key: &str) -> Tint {
+        crate::theme::icon::tint(&self.tints, id, half, key)
+    }
+
+    /// The setting `key` of the icon `id` holds `tint` in `half` from now on, kept; drawn once
+    /// [`Self::redraw`] is told the looks.
+    pub fn set_tint(&mut self, id: &str, half: Appearance, key: &str, tint: Tint) {
+        if self.tint(id, half, key) == tint {
+            return;
+        }
+        self.tints.entry(id.to_owned()).or_default().get_mut(half).insert(key.to_owned(), tint);
+        self.tints = crate::theme::icon::stored(&self.tints);
+        (self.show)(IconChange::Tints(&self.tints));
+    }
+
+    /// The icons' own settings are `tints` again (a Cancel), kept.
+    pub fn put_tints(&mut self, tints: IconSettings) {
+        if self.tints != tints {
+            self.tints = tints;
+            (self.show)(IconChange::Tints(&self.tints));
+        }
+    }
+
+    /// Draws each icon that has settings for the look each half of `looks` shows: one whose SVG is
+    /// what it was keeps its image, so an icon is rendered again only when what it's drawn from
+    /// changes; one at its Original is the shipped picture, drawn by nobody.
+    pub fn redraw(&mut self, looks: &Looks) {
+        let mut drawn = Vec::new();
+        for theme in crate::theme::themes() {
+            for icon in theme.icons() {
+                for half in Appearance::BOTH {
+                    let look = crate::theme::icon::of_theme(*theme, looks.shown(half));
+                    let values = self.tints.get(icon.id).map(|h| h.get(half).clone()).unwrap_or_default();
+                    let Some(svg) = (icon.draw)(&values, look, half) else { continue };
+                    let same = self.drawn.iter().position(|d| d.id == icon.id && d.half == half && d.svg == svg);
+                    drawn.push(match same {
+                        Some(i) => self.drawn.swap_remove(i),
+                        None => Drawn { id: icon.id, half, image: self.render(&svg), svg },
+                    });
+                }
+            }
+        }
+        self.drawn = drawn;
+    }
+
+    fn render(&self, svg: &str) -> Option<rune::Image> {
+        self.cache.as_ref().map(|cache| cache.svg(svg.as_bytes().to_vec(), DRAWN_PT, 2.0))
+    }
+
+    /// The SVG the icon `id` is drawn from in `half`, if it's drawn from its settings.
+    pub fn drawing(&self, id: &str, half: Appearance) -> Option<&str> {
+        self.drawn.iter().find(|d| d.id == id && d.half == half).map(|d| d.svg.as_str())
+    }
+
+    /// The image of the icon `id` as `half` shows it: drawn from its settings, or its own.
+    pub fn image_in(&self, id: &str, half: Appearance) -> Option<&rune::Image> {
+        match self.drawn.iter().find(|d| d.id == id && d.half == half) {
+            Some(drawn) => drawn.image.as_ref(),
+            None => self.image(id),
+        }
+    }
+
+    /// Every image drawn from settings: for a headless run to wait for.
+    pub fn drawn_images(&self) -> impl Iterator<Item = &rune::Image> {
+        self.drawn.iter().filter_map(|d| d.image.as_ref())
     }
 
     /// Reads the image files kept: what [`Self::poll`] then takes as they're read. One that can't
@@ -914,6 +1013,11 @@ impl AppIcon {
             self.images = manifest.everyone().map(|icon| (icon.id.clone(), cache.load(icon.bytes.clone()))).collect();
         }
         self.cache = Some(cache);
+        for i in 0..self.drawn.len() {
+            if self.drawn[i].image.is_none() {
+                self.drawn[i].image = self.render(&self.drawn[i].svg);
+            }
+        }
     }
 
     /// What an icon is called: its name, or an image file's before it's read, its file's.
@@ -1010,10 +1114,11 @@ pub fn show_tab(s: &mut SettingsWindow, tab: Tab) {
     }
 }
 
-/// The sheet over the window closes (Escape, ⌘W): a Look Preset's, or the App icon's.
+/// The sheet over the window closes (Escape, ⌘W): a Look Preset's, the App icon's, or its Customize.
 pub fn close_over(s: &mut SettingsWindow) {
     presets::close(s);
     close_icons(s);
+    customize::done(s);
 }
 
 /// ⌘W or Escape: the window closes ([`closed`]).
@@ -1033,6 +1138,7 @@ pub fn closed(s: &mut SettingsWindow) {
     // A Look Preset's sheet keeps what was done in it, as Done does.
     presets::close(s);
     close_icons(s);
+    customize::done(s);
     leave_all(s);
     s.sheet = None;
     // A saved preset's sheet goes with it, and so does its preview.
@@ -1233,6 +1339,10 @@ pub fn escape(s: &mut SettingsWindow) -> bool {
     }
     if sheet.icons.is_some() {
         close_icons(s);
+        return true;
+    }
+    if sheet.customize.is_some() {
+        customize::escape(s);
         return true;
     }
     // Save as… shows on its tab only.
@@ -1519,6 +1629,7 @@ pub fn set_theme(s: &mut SettingsWindow, side: Side, key: &'static str, value: V
 fn looks_changed(s: &mut SettingsWindow) {
     let icons = s.looks.borrow().app_icons();
     s.app_icon.follow(icons);
+    s.app_icon.redraw(&s.looks.borrow());
     let presets = Presets::of(&s.looks.borrow(), &s.saved);
     if let Some(sheet) = &mut s.sheet {
         let preset = sheet.target().and_then(|t| presets.get(t).cloned());
