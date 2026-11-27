@@ -77,7 +77,10 @@ every!(Phase {
         Phase::MissingFiles { gone: gone() },
         Phase::MissingFiles { gone: [(0, gone_as(Seen::NotYet)), (1, gone_as(Seen::Was(None)))].into() },
     ],
-    Phase::DestinationUnavailable { .. } => [Phase::DestinationUnavailable { reason: drive() }],
+    Phase::DestinationUnavailable { .. } => [
+        Phase::DestinationUnavailable { reason: drive(), gone: BTreeMap::new() },
+        Phase::DestinationUnavailable { reason: drive(), gone: [(0, gone_as(Seen::NotYet)), (1, gone_as(Seen::Was(None)))].into() },
+    ],
     Phase::Error { .. } => [Phase::Error { failure: Broke::Librqbit { detail: "disk full".into() } }],
     Phase::DeleteFailed { .. } => [
         Phase::DeleteFailed { kept: kept(), away: None, unchecked: false },

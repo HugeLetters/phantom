@@ -80,8 +80,10 @@ pub enum Phase {
     /// Files it's getting (by index) are gone from disk; stopped in librqbit, which still holds the
     /// old files open.
     MissingFiles { gone: BTreeMap<usize, Gone> },
-    /// Its destination can't be reached; stopped in librqbit.
-    DestinationUnavailable { reason: Unavailable },
+    /// Its destination can't be reached; stopped in librqbit. `gone`: the files known missing (or
+    /// returning) as it went, which it learns nothing of while it's away: once it's back they're
+    /// judged as missing files are, not checked as its own (#464).
+    DestinationUnavailable { reason: Unavailable, gone: BTreeMap<usize, Gone> },
     /// librqbit stopped it with an error, or adding it again failed.
     Error { failure: Broke },
     /// Delete moved some of its files to the Trash but not these: stopped in librqbit, still in
@@ -244,7 +246,7 @@ impl State {
             (Phase::Unchecked { gone }, _) if gone.is_empty() => Status::Unchecked,
             (Phase::Unchecked { .. }, _) => Status::MissingFiles,
             (Phase::MissingFiles { .. }, _) => Status::MissingFiles,
-            (Phase::DestinationUnavailable { reason }, _) => Status::DestinationUnavailable { reason: reason.clone() },
+            (Phase::DestinationUnavailable { reason, .. }, _) => Status::DestinationUnavailable { reason: reason.clone() },
             (Phase::FetchFailed { detail }, _) => Status::Error { failure: TorrentFailure::FetchFailed { detail: detail.clone() } },
             (Phase::Error { failure }, _) => Status::Error { failure: failure.clone().into() },
             (Phase::DeleteFailed { away: Some(reason), .. }, _) => Status::DestinationUnavailable { reason: reason.clone() },
@@ -280,7 +282,7 @@ pub fn answer(s: &State, action: Action) -> Answer {
         ) => Answer::Does,
         (P::Unchecked { gone }, A::Open | A::Reveal) if gone.is_empty() => Answer::Does,
         (P::MissingFiles { .. } | P::Unchecked { .. }, A::Open | A::Reveal) => nothing(Why::FilesMissing),
-        (P::DestinationUnavailable { reason } | P::DeleteFailed { away: Some(reason), .. }, A::Open | A::Reveal) => {
+        (P::DestinationUnavailable { reason, .. } | P::DeleteFailed { away: Some(reason), .. }, A::Open | A::Reveal) => {
             refused(Refusal::DestinationUnavailable { action, reason: reason.clone() })
         }
         (P::FetchingInfo, A::Open | A::Reveal) => refused(Refusal::NoInfoYet),
@@ -429,7 +431,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         ) => stays(),
         (P::FetchingInfo, Command(C::Move | C::Rename)) => Err(Refusal::NoInfoYet),
         (P::FetchFailed { .. }, Command(C::Move | C::Rename)) => Err(Refusal::FetchFailed),
-        (P::DestinationUnavailable { reason }, Command(action @ (C::Move | C::Rename))) => unavailable(*action, reason),
+        (P::DestinationUnavailable { reason, .. }, Command(action @ (C::Move | C::Rename))) => unavailable(*action, reason),
         (P::DeleteFailed { .. }, Command(C::Move | C::Rename)) => Err(Refusal::PartlyDeleted),
         (P::Deleting { .. }, Command(C::Move | C::Rename)) => Err(Refusal::Deleting),
         (P::Deleted, Command(C::Move | C::Rename)) => Err(Refusal::NotInList),
@@ -624,7 +626,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::CheckDue { .. }, Observed(O::Failed(failure))) => phase(P::Error { failure: failure.clone() }),
         // librqbit checks it already, or now that it has it again.
         (P::CheckDue { returning }, Observed(O::Checking | O::AddedAgain)) => phase(P::Checking { returning: returning.clone() }),
-        (P::CheckDue { .. }, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        (P::CheckDue { returning }, Observed(O::DestinationGone { reason })) => phase(away(reason, returning)),
 
         // Nothing interrupts a check; a priority change during one is held until it ends.
         (P::Checking { .. }, Command(C::Pause)) => pause(),
@@ -642,7 +644,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Checking { .. }, Observed(O::Failed(failure))) => phase(P::Error { failure: failure.clone() }),
         // A check finds missing files for itself; they're caught once it ends.
         (P::Checking { .. }, Observed(O::Files(_))) => stays(),
-        (P::Checking { .. }, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        (P::Checking { returning }, Observed(O::DestinationGone { reason })) => phase(away(reason, returning)),
 
         (P::Ready, Command(C::Pause)) => pause(),
         (P::Ready, Command(C::Resume)) => wants(Wants::Run),
@@ -655,7 +657,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         (P::Ready, Observed(O::Checking)) => phase(checking()),
         (P::Ready, Observed(O::Failed(failure))) => phase(P::Error { failure: failure.clone() }),
         (P::Ready, Observed(O::Files(disk))) => phase(found_missing(disk).map_or(P::Ready, |gone| P::MissingFiles { gone })),
-        (P::Ready, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        (P::Ready, Observed(O::DestinationGone { reason })) => phase(away(reason, &BTreeMap::new())),
         // Seeding, it reached a seeding limit: it stops, saying which. One stopped already stays.
         (P::Ready, Observed(O::LimitReached(reached))) => match s.wants {
             Wants::Run => wants(Wants::Seeded { reached: *reached }),
@@ -685,7 +687,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
             ),
         ) => stays(),
         // Checked once the destination is back, as any other.
-        (P::Unchecked { .. }, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        (P::Unchecked { gone }, Observed(O::DestinationGone { reason })) => phase(away(reason, gone)),
 
         (P::MissingFiles { .. }, Command(C::Pause)) => pause(),
         // A check is the way back into librqbit: it opens the files afresh, keeps what's valid,
@@ -710,11 +712,11 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         ) => stays(),
         (P::MissingFiles { gone }, Observed(O::Files(disk))) => phase(missing_files(gone, disk)),
         // What was missing is out of reach too: it's checked once the destination is back.
-        (P::MissingFiles { .. }, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        (P::MissingFiles { gone }, Observed(O::DestinationGone { reason })) => phase(away(reason, gone)),
 
         // Its files are out of reach; once they're back it runs again if it's wanted to.
         (P::DestinationUnavailable { .. }, Command(C::Pause)) => pause(),
-        (P::DestinationUnavailable { reason }, Command(action @ (C::Resume | C::Check | C::Delete | C::TrashFiles))) => {
+        (P::DestinationUnavailable { reason, .. }, Command(action @ (C::Resume | C::Check | C::Delete | C::TrashFiles))) => {
             unavailable(*action, reason)
         }
         (P::DestinationUnavailable { .. }, Command(C::SetPriority | C::Remove)) => stays(),
@@ -732,16 +734,16 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
                 | O::LimitReached(_),
             ),
         ) => stays(),
-        // Its files can be size-checked again: the destination is back. Checked, librqbit would write
-        // into a file of a size it can't have: that's Missing files (#374). One not there is made
-        // again by the check.
+        // Its files can be size-checked again: the destination is back. Those known missing as it
+        // went are judged as missing files are: a check would take what's at their paths for its own
+        // (#464). Else checked, but librqbit would write into a file of a size it can't have: that's
+        // Missing files (#374). One not there is made again by the check.
+        (P::DestinationUnavailable { gone, .. }, Observed(O::Files(disk))) if !gone.is_empty() => phase(missing_files(gone, disk)),
         (P::DestinationUnavailable { .. }, Observed(O::Files(disk))) => {
             let gone = found_missing(disk).filter(|_| disk.any_impossible());
             phase(gone.map_or_else(check_due, |gone| P::MissingFiles { gone }))
         }
-        (P::DestinationUnavailable { .. }, Observed(O::DestinationGone { reason })) => {
-            phase(P::DestinationUnavailable { reason: reason.clone() })
-        }
+        (P::DestinationUnavailable { gone, .. }, Observed(O::DestinationGone { reason })) => phase(away(reason, gone)),
 
         (P::Error { .. }, Command(C::Pause)) => pause(),
         (P::Error { .. }, Command(C::Resume)) => to(Wants::Run, check_due()),
@@ -757,7 +759,7 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
             Some(gone) => phase(P::MissingFiles { gone }),
             None => stays(),
         },
-        (P::Error { .. }, Observed(O::DestinationGone { reason })) => phase(P::DestinationUnavailable { reason: reason.clone() }),
+        (P::Error { .. }, Observed(O::DestinationGone { reason })) => phase(away(reason, &BTreeMap::new())),
     }
 }
 
@@ -775,6 +777,7 @@ fn moved(was: &Phase, stage: &moving::Stage) -> Phase {
         was if adopted.is_empty() => was.clone(),
         Phase::MissingFiles { gone } => still_gone(gone, adopted).map_or_else(check_due, |gone| Phase::MissingFiles { gone }),
         Phase::Unchecked { gone } => still_gone(gone, adopted).map_or_else(check_due, |gone| Phase::Unchecked { gone }),
+        Phase::DestinationUnavailable { reason, gone } => away(reason, &still_gone(gone, adopted).unwrap_or_default()),
         _ => check_due(),
     }
 }
@@ -783,6 +786,11 @@ fn moved(was: &Phase, stage: &moving::Stage) -> Phase {
 fn still_gone(gone: &BTreeMap<usize, Gone>, adopted: &BTreeSet<usize>) -> Option<BTreeMap<usize, Gone>> {
     let still: BTreeMap<usize, Gone> = gone.iter().filter(|(i, _)| !adopted.contains(i)).map(|(&i, g)| (i, g.clone())).collect();
     (!still.is_empty()).then_some(still)
+}
+
+/// Its destination out of reach for `reason`, with the files known missing, `gone`.
+fn away(reason: &Unavailable, gone: &BTreeMap<usize, Gone>) -> Phase {
+    Phase::DestinationUnavailable { reason: reason.clone(), gone: gone.clone() }
 }
 
 fn check_due() -> Phase {
@@ -914,6 +922,21 @@ mod tests {
     use super::*;
     use machine::{Every, check, decide_table, sequences, table};
 
+    #[test]
+    fn a_move_ended_while_away_keeps_what_was_missing() {
+        let gone: BTreeMap<usize, Gone> = [(0, gone_as(Seen::Was(None))), (1, gone_as(Seen::Was(None)))].into();
+        let was = Phase::DestinationUnavailable { reason: drive(), gone };
+        let to = AbsolutePath::new("/y").unwrap();
+        let s = State::new(Wants::Run, Phase::Moving { to, stage: moving::Stage::RemovingOld { adopted: [0].into() }, was: Box::new(was) });
+        let after = decide(&s, &Event::Observed(Observation::Move(moving::Event::Ended))).unwrap();
+        let kept: Vec<usize> = match &after.phase {
+            Phase::DestinationUnavailable { gone, .. } | Phase::MissingFiles { gone } => gone.keys().copied().collect(),
+            Phase::CheckDue { returning } => returning.keys().copied().collect(),
+            _ => Vec::new(),
+        };
+        assert_eq!(kept, vec![1], "b.bin's being missing is forgotten: {:?}", after.phase);
+    }
+
     fn has_info(phase: &Phase) -> bool {
         !matches!(phase, Phase::FetchingInfo | Phase::FetchFailed { .. })
     }
@@ -1014,7 +1037,7 @@ mod tests {
     }
 
     fn unavailable(s: &State, e: &Event, r: &Decided) -> bool {
-        let Phase::DestinationUnavailable { reason } = &s.phase else { return false };
+        let Phase::DestinationUnavailable { reason, .. } = &s.phase else { return false };
         *r == Err(Refusal::DestinationUnavailable { action: command(e).unwrap(), reason: reason.clone() })
     }
 
@@ -1248,13 +1271,15 @@ mod tests {
             },
             Row {
                 says: "a size check: files gone make it Missing files, set Off or not judged yet are dropped or judged, all back is checked; \
-                       a check catches them itself, and Unchecked stays so; the destination back is checked, unless a file \
-                       there is of a size it can't have: Missing files",
+                       a check catches them itself, and Unchecked stays so; the destination back judges the files known missing \
+                       as it went as Missing files does (#464), else it's checked, unless a file there is of a size it can't have: \
+                       Missing files",
                 when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_))),
                 then: |s, e, r| {
                     let Some(Observation::Files(disk)) = observed(e) else { unreachable!() };
                     match &s.phase {
                         Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Unchecked { .. } => stays(s, r),
+                        Phase::DestinationUnavailable { gone, .. } if !gone.is_empty() => becomes(s, r, after_size_check(gone, disk)),
                         Phase::DestinationUnavailable { .. } => {
                             let wrong =
                                 |f: &disk::Found| f.at.is_some_and(|at| at.len > f.file.size_bytes || at.len < f.file.progress_bytes);
@@ -1273,11 +1298,19 @@ mod tests {
                 },
             },
             Row {
-                says: "its destination gone makes it Destination unavailable, with why, whatever it was doing",
+                says: "its destination gone makes it Destination unavailable, with why, whatever it was doing, keeping the files \
+                       known missing or returning (#464)",
                 when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::DestinationGone { .. })),
                 then: |s, e, r| {
                     let Some(Observation::DestinationGone { reason }) = observed(e) else { unreachable!() };
-                    becomes(s, r, Phase::DestinationUnavailable { reason: reason.clone() })
+                    let gone = match &s.phase {
+                        Phase::MissingFiles { gone } | Phase::Unchecked { gone } | Phase::DestinationUnavailable { gone, .. } => {
+                            gone.clone()
+                        }
+                        Phase::CheckDue { returning } | Phase::Checking { returning } => returning.clone(),
+                        _ => BTreeMap::new(),
+                    };
+                    becomes(s, r, Phase::DestinationUnavailable { reason: reason.clone(), gone })
                 },
             },
             // Moving (#24).
@@ -1532,7 +1565,7 @@ mod tests {
             Just(Phase::Error { failure: Broke::Librqbit { detail: "x".into() } }),
             Just(check_due()),
             Just(checking()),
-            Just(Phase::DestinationUnavailable { reason: drive() }),
+            Just(Phase::DestinationUnavailable { reason: drive(), gone: BTreeMap::new() }),
             gone.prop_filter_map("missing some", |gone| (!gone.is_empty()).then_some(Phase::MissingFiles { gone })),
         ];
         (phase, proptest::sample::select(Wants::every())).prop_map(|(phase, wants)| State::new(wants, phase))
@@ -1577,7 +1610,7 @@ mod tests {
                     | Phase::DeleteFailed { away: None, .. } => *r == Answer::Does,
                     Phase::Unchecked { gone } if gone.is_empty() => *r == Answer::Does,
                     Phase::MissingFiles { .. } | Phase::Unchecked { .. } => *r == Answer::DoesNothing { why: Why::FilesMissing },
-                    Phase::DestinationUnavailable { reason } | Phase::DeleteFailed { away: Some(reason), .. } => {
+                    Phase::DestinationUnavailable { reason, .. } | Phase::DeleteFailed { away: Some(reason), .. } => {
                         *r == Answer::Refused { why: Refusal::DestinationUnavailable { action: *a, reason: reason.clone() } }
                     }
                     Phase::FetchingInfo => *r == Answer::Refused { why: Refusal::NoInfoYet },

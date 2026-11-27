@@ -363,7 +363,8 @@ impl Actor {
                 _ if (interrupted || done) && record.delete_failed.is_empty() => Phase::Deleted,
                 // Its files partly in the Trash on purpose, wherever its drive is.
                 away if !record.delete_failed.is_empty() => Phase::DeleteFailed { kept: record.delete_failed.clone(), away, unchecked },
-                Some(reason) => Phase::DestinationUnavailable { reason },
+                // What was known missing still is, once it's back (#464).
+                Some(reason) => Phase::DestinationUnavailable { reason, gone: record.gone_at_start() },
                 // Whatever files went meanwhile: only a check says.
                 None if unchecked => Phase::Unchecked { gone: BTreeMap::new() },
                 None if gone.is_empty() => Phase::Ready,
@@ -1937,18 +1938,22 @@ impl Torrent {
     /// drops the pieces it saved, and a start after a crash would then take any file at a missing
     /// one's path for the torrent's own (#370).
     pub(super) fn keep_known(&mut self) {
+        // Away from an error, which keeps what was known missing in its record alone: that goes
+        // with it, to be judged once it's back, not checked as the torrent's own (#464).
+        if let Phase::DestinationUnavailable { gone, .. } = &mut self.lifecycle.phase
+            && gone.is_empty()
+        {
+            *gone = self.record.gone_at_start();
+        }
         let phase = &self.lifecycle.phase;
         let missing = match phase {
             Phase::MissingFiles { gone: files }
             | Phase::Unchecked { gone: files }
             | Phase::CheckDue { returning: files }
-            | Phase::Checking { returning: files } => files.iter().map(|(&i, gone)| (i, gone.into())).collect(),
-            // Its files unreachable, or as they were: what was missing still is, for all that's known.
-            Phase::DestinationUnavailable { .. }
-            | Phase::Error { .. }
-            | Phase::DeleteFailed { .. }
-            | Phase::Deleting { .. }
-            | Phase::Moving { .. } => self.record.missing.clone(),
+            | Phase::Checking { returning: files }
+            | Phase::DestinationUnavailable { gone: files, .. } => files.iter().map(|(&i, gone)| (i, gone.into())).collect(),
+            // Its files as they were: what was missing still is, for all that's known.
+            Phase::Error { .. } | Phase::DeleteFailed { .. } | Phase::Deleting { .. } | Phase::Moving { .. } => self.record.missing.clone(),
             Phase::FetchingInfo | Phase::FetchFailed { .. } | Phase::Ready | Phase::Deleted => BTreeMap::new(),
         };
         let had = match phase {
@@ -2315,8 +2320,10 @@ mod uncounted_tests {
         let expected = files::Expected { index: 0, path: "/gone/b.bin".into(), size_bytes: 10, progress_bytes: 10 };
         let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected], &BTreeSet::new(), &[]).files[&0]))]);
         let error = Phase::Error { failure: Broke::Librqbit { detail: "drive gone".into() } };
-        let away =
-            Phase::DestinationUnavailable { reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() } };
+        let away = Phase::DestinationUnavailable {
+            reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() },
+            gone: Default::default(),
+        };
         let mut uncounted = BTreeSet::new();
         let mut steps = vec![(Phase::MissingFiles { gone: gone.clone() }, Phase::CheckDue { returning: gone.clone() })];
         steps.push((steps[0].1.clone(), Phase::Checking { returning: gone }));
@@ -2360,5 +2367,54 @@ mod classify_tests {
                 prop_assert_eq!(broke(&detail), Broke::Librqbit { detail });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod keep_known_tests {
+    use super::super::store::{FileOf, Missing};
+    use super::*;
+
+    #[test]
+    fn a_drive_gone_after_a_check_failed_keeps_what_was_missing() {
+        let destination = AbsolutePath::new("/away").unwrap();
+        let mut record = Record::new("00".repeat(20), 1, Some("t".into()), destination, Vec::new(), Wants::Run);
+        let file = |name: &str, pieces| FileOf { path: name.into(), len: 10, padding: false, pieces };
+        record.info = Some(Info {
+            bytes: Arc::from(Vec::new()),
+            files: vec![file("a.bin", 0..1), file("b.bin", 1..2)],
+            piece_length: 10,
+            name: Some("t".into()),
+        });
+        record.missing = [(0, Missing { had: 10, seen: files::Seen::Was(None) })].into();
+        record.had = vec![10, 10];
+        let returning = record.gone_at_start();
+        let mut torrent = Torrent {
+            id: 1,
+            lifecycle: State::new(Wants::Run, Phase::Checking { returning }),
+            meter: seeding::Meter::new(record.round),
+            polled: Polled::default(),
+            lib: lib::Lib::Out,
+            there: BTreeSet::new(),
+            record,
+            added: 0,
+            started: 0,
+            chosen_running: 0,
+        };
+        let reason = proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() };
+        let failed = Event::Observed(Observation::Failed(Broke::Librqbit { detail: "Input/output error (os error 5)".into() }));
+        for event in [failed, Event::Observed(Observation::DestinationGone { reason })] {
+            torrent.lifecycle = decide(&torrent.lifecycle, &event).unwrap();
+            torrent.keep_known();
+        }
+        assert!(torrent.record.missing.contains_key(&0), "the record forgot a.bin was missing: {:?}", torrent.record.missing);
+        let paths = torrent.record.paths();
+        let found = |i: usize, inode| {
+            let file = Expected { index: i, path: paths[i].clone(), size_bytes: 10, progress_bytes: 10 };
+            (i, files::Found::of(file, Some(files::Stamp { inode, len: 10, modified: None })))
+        };
+        let disk = files::Disk { files: [found(0, 7), found(1, 8)].into() };
+        let back = decide(&torrent.lifecycle, &Event::Observed(Observation::Files(disk))).unwrap();
+        assert_ne!(back.phase, Phase::CheckDue { returning: BTreeMap::new() }, "checked in full: a.bin is taken for the torrent's");
     }
 }

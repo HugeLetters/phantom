@@ -1637,9 +1637,11 @@ fn seeded(status: &Status) -> (State, Pretend, Option<Unavailable>) {
         Status::Done { reached: Some(reached) } => (state(Wants::Seeded { reached: *reached }, Phase::Ready), Pretend::Stopped, None),
         Status::Checking => (state(Wants::Run, Phase::Checking { returning: BTreeMap::new() }), Pretend::Checking { since: None }, None),
         Status::Unchecked => (state(Wants::Stop, Phase::Unchecked { gone: BTreeMap::new() }), Pretend::Stopped, None),
-        Status::DestinationUnavailable { reason } => {
-            (state(Wants::Run, Phase::DestinationUnavailable { reason: reason.clone() }), Pretend::Stopped, Some(reason.clone()))
-        }
+        Status::DestinationUnavailable { reason } => (
+            state(Wants::Run, Phase::DestinationUnavailable { reason: reason.clone(), gone: BTreeMap::new() }),
+            Pretend::Stopped,
+            Some(reason.clone()),
+        ),
         Status::Error { failure } => {
             let phase = match failure.clone() {
                 proto::TorrentFailure::FetchFailed { detail } => Phase::FetchFailed { detail },
