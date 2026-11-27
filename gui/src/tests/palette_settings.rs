@@ -564,3 +564,174 @@ fn shift_return_on_what_opens_something_leaves_the_palette() {
     assert!(palette_open(&d), "a Choice setting lists its choices, as Return does");
     assert!(d.main.state.palette.sub.is_some());
 }
+
+// Theme, Tone, Look Presets and the App icon (#434), and the live preview of a choice.
+
+use crate::theme::preset::LookPreset;
+use crate::theme::saved::{Name, Saved, SavedPreset};
+
+/// The saved presets: "Night", every half round-cornered and Dark in both, and "Soft", round only.
+fn with_saved(d: &mut Desk) {
+    let fresh = LookPreset::fresh();
+    let round = crate::model::settings::with_theme_value(fresh.clone(), Side::Both, "corners", Value::Choice("round"));
+    let list =
+        [("Night", round.clone()), ("Soft", fresh)].map(|(n, preset)| SavedPreset { name: Name::parse(n).unwrap(), preset }).to_vec();
+    d.settings.state.saved = Saved::new(list, |_: &[SavedPreset]| {});
+}
+
+fn previewed(d: &Desk) -> Option<Value> {
+    d.main.state.looks.borrow().previewed().and_then(|p| p.light.settings.get("corners"))
+}
+
+fn undo(d: &mut Desk) {
+    d.front(Which::Main);
+    cmd(d, Key::Command('z'));
+    d.wait(0.5);
+    d.settle();
+}
+
+/// Moving the highlight over a choice previews it in the app; Escape puts the look back, and so
+/// does leaving the choices.
+#[test]
+fn an_arrow_previews_a_choice_and_escape_puts_the_look_back() {
+    let mut d = desk_with_palette();
+    search(&mut d, "corn");
+    press(&mut d, Key::Enter);
+    assert_eq!(previewed(&d), None, "the current one: nothing to preview");
+    press(&mut d, Key::Down);
+    assert_eq!(previewed(&d), Some(Value::Choice("round")), "Round, highlighted");
+    assert_eq!(look(&d, Appearance::Light, "corners"), Some(Value::Choice("small")), "nothing kept");
+    press(&mut d, Key::Up);
+    press(&mut d, Key::Up);
+    assert_eq!(previewed(&d), Some(Value::Choice("square")));
+    type_in(&mut d, "ro");
+    assert_eq!(previewed(&d), Some(Value::Choice("round")), "typing moves the highlight to the first match");
+    press(&mut d, Key::Escape);
+    assert_eq!(previewed(&d), None, "back to the list: the look as it was");
+    press(&mut d, Key::Enter);
+    press(&mut d, Key::Down);
+    assert_eq!(previewed(&d), Some(Value::Choice("round")));
+    press(&mut d, Key::Escape);
+    press(&mut d, Key::Escape);
+    assert!(!palette_open(&d));
+    assert_eq!(previewed(&d), None, "closed: nothing shown");
+    assert_eq!(look(&d, Appearance::Light, "corners"), Some(Value::Choice("small")));
+}
+
+/// Resting the pointer on an option previews it; leaving it shows the highlighted one again.
+#[test]
+fn hovering_an_option_previews_it() {
+    let mut d = desk_with_palette();
+    search(&mut d, "corn");
+    press(&mut d, Key::Enter);
+    let at = super::generated::rect_of(&d.main, &crate::model::palette::row_key(2)).expect("Round's row");
+    d.main.pointer_move(at[0] + at[2] / 2.0, at[1] + at[3] / 2.0);
+    d.settle();
+    assert_eq!(previewed(&d), Some(Value::Choice("round")), "under the pointer");
+    d.main.pointer_move(1.0, 1.0);
+    d.settle();
+    assert_eq!(previewed(&d), None, "the highlighted one is the current one again");
+}
+
+/// Return keeps what is previewed: one undo step, the notice as before, nothing left previewed;
+/// ⇧Return keeps it and stays open.
+#[test]
+fn return_keeps_the_previewed_choice_as_one_undo_step() {
+    let mut d = desk_with_palette();
+    search(&mut d, "corn");
+    press(&mut d, Key::Enter);
+    press(&mut d, Key::Down);
+    press(&mut d, Key::Enter);
+    assert_eq!(previewed(&d), None);
+    assert_eq!(look(&d, Appearance::Light, "corners"), Some(Value::Choice("round")));
+    assert_eq!(notice(&d), Some(("Corners: Round".into(), true)));
+    undo(&mut d);
+    assert_eq!(look(&d, Appearance::Light, "corners"), Some(Value::Choice("small")), "one step");
+    search(&mut d, "corn");
+    press(&mut d, Key::Enter);
+    press(&mut d, Key::Down);
+    shift_return(&mut d);
+    assert!(palette_open(&d) && d.main.state.palette.sub.is_none(), "it stays, at the top level");
+    assert_eq!(previewed(&d), None);
+    assert_eq!(look(&d, Appearance::Light, "corners"), Some(Value::Choice("round")));
+}
+
+/// Theme is a Choice of the themes, per half once they differ; picking one is one undo step.
+#[test]
+fn theme_lists_the_themes_and_a_pick_is_one_undo_step() {
+    let mut d = desk_with_palette();
+    search(&mut d, "theme");
+    assert_eq!(names(&d)[0], "Theme");
+    assert_eq!(read(&d, "Theme"), "Theme, Phantom, Appearance, Edit…, has choices");
+    press(&mut d, Key::Enter);
+    assert_eq!(names(&d), ["Phantom", "Sample", "Show in Settings"]);
+    assert_eq!(highlighted(&d), "Phantom");
+    press(&mut d, Key::Down);
+    assert_eq!(d.main.state.looks.borrow().previewed().map(|p| p.light.theme.id()), Some("sample"), "previewed");
+    press(&mut d, Key::Enter);
+    for half in Appearance::BOTH {
+        assert_eq!(d.main.state.looks.borrow().preset().get(half).theme.id(), "sample");
+    }
+    assert_eq!(notice(&d), Some(("Theme: Sample".into(), true)));
+    undo(&mut d);
+    assert_eq!(d.main.state.looks.borrow().preset().light.theme.id(), "phantom", "one step");
+}
+
+/// Tone has an entry for each half, whose choices open in the palette and preview.
+#[test]
+fn tone_has_a_choice_for_each_half_that_previews() {
+    let mut d = desk_with_palette();
+    search(&mut d, "tone");
+    assert_eq!(names(&d)[..2], ["Tone ☀", "Tone ☾"]);
+    press(&mut d, Key::Enter);
+    assert_eq!(headings(&d), ["Tone ☀"]);
+    let before = highlighted(&d);
+    press(&mut d, Key::Down);
+    assert_ne!(highlighted(&d), before);
+    assert!(d.main.state.looks.borrow().previewed().is_some(), "the other tone, previewed");
+    press(&mut d, Key::Escape);
+    assert!(d.main.state.looks.borrow().previewed().is_none());
+}
+
+/// Look Presets lists each saved one as ◐ (both halves), ☀ and ☾; arrowing previews, Return applies
+/// as the Look Presets section does (one undo step), Escape puts the look back.
+#[test]
+fn look_presets_apply_a_saved_one_with_a_preview() {
+    let mut d = desk_with_palette();
+    with_saved(&mut d);
+    search(&mut d, "look presets");
+    assert_eq!(names(&d)[0], "Look Presets");
+    press(&mut d, Key::Enter);
+    assert_eq!(names(&d), ["Night ◐", "Night ☀", "Night ☾", "Soft ◐", "Soft ☀", "Soft ☾", "Show in Settings"]);
+    assert_eq!(headings(&d), ["Look Presets"]);
+    press(&mut d, Key::Down);
+    assert_eq!(previewed(&d), Some(Value::Choice("round")), "Night, its Light half");
+    let dark = d.main.state.looks.borrow().previewed().and_then(|p| p.dark.settings.get("corners"));
+    assert_eq!(dark, Some(Value::Choice("small")), "the ☀ chip leaves the Dark half");
+    press(&mut d, Key::Escape);
+    assert_eq!(previewed(&d), None);
+    press(&mut d, Key::Enter);
+    press(&mut d, Key::Down);
+    press(&mut d, Key::Down);
+    press(&mut d, Key::Enter);
+    assert!(!palette_open(&d));
+    assert_eq!(look(&d, Appearance::Light, "corners"), Some(Value::Choice("small")), "Night's ☾ half only");
+    assert_eq!(look(&d, Appearance::Dark, "corners"), Some(Value::Choice("round")));
+    assert_eq!(notice(&d), Some(("Look Presets: Night ☾".into(), true)));
+    undo(&mut d);
+    assert_eq!(look(&d, Appearance::Dark, "corners"), Some(Value::Choice("small")), "one step");
+}
+
+/// App icon… opens Settings on Appearance with the sheet of every icon open.
+#[test]
+fn app_icon_opens_its_sheet_in_settings() {
+    let mut d = desk_with_palette();
+    search(&mut d, "app icon");
+    assert_eq!(names(&d)[0], "App icon…");
+    press(&mut d, Key::Enter);
+    d.settle();
+    assert!(!palette_open(&d));
+    let sheet = d.settings.state.sheet.as_ref().expect("Settings is open");
+    assert_eq!(sheet.tab, Tab::Appearance);
+    assert!(sheet.icons.is_some(), "the sheet of every icon is open");
+}

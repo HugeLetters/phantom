@@ -20,6 +20,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         .placeholder(if s.palette.sub.is_some() { "Choose" } else { "Type a command or a setting" })
         .on_edit(|s: &mut Phantom| &mut s.palette.query)
         .on_submit(palette::run)
+        .on_change(|s: &mut Phantom, _: &mut Tx| palette::edited(s))
         .on_key(on_key)
         .build();
     let mut group = None;
@@ -55,6 +56,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         window.map(|(w, _)| w),
         row_key,
         palette::pick,
+        palette::hover,
         palette::dismiss,
         layer,
     );

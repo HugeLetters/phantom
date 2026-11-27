@@ -36,6 +36,13 @@ pub fn apply(s: &mut SettingsWindow, i: usize, half: Option<Appearance>) {
     changed(s, was, PresetVerb::Apply(half), saved.name);
 }
 
+/// [`apply`] for the saved preset named `name`, if it's still there.
+pub fn apply_named(s: &mut SettingsWindow, name: &Name, half: Option<Appearance>) {
+    if let Some(i) = s.saved.list().iter().position(|p| p.name == *name) {
+        apply(s, i, half);
+    }
+}
+
 /// Drops the saved preset `i`.
 pub fn delete(s: &mut SettingsWindow, i: usize) {
     follow_focus(s);

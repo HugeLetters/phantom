@@ -707,6 +707,25 @@ pub fn show_service(s: &mut SettingsWindow, key: &'static str, tx: &mut Tx) {
     }
 }
 
+/// The saved Look Presets' section, on Appearance.
+pub fn show_presets(s: &mut SettingsWindow, tx: &mut Tx) {
+    show(s, presets::SETTING, None, Some(tx));
+}
+
+/// The App icon's Edit…: Settings at Appearance with the sheet of every icon open, its first chip
+/// (◐ of Follow theme) focused.
+pub fn show_icons(s: &mut SettingsWindow, tx: &mut Tx) {
+    if s.sheet.is_none() {
+        open(s);
+    }
+    s.window.raise();
+    close_over(s);
+    show_tab(s, Tab::Appearance);
+    edit_icons(s);
+    tx.blur();
+    tx.focus_when_shown("icon-follow-both", true);
+}
+
 /// [`show_setting`], with `chip` the one of the saved Look Presets that takes the focus, if the
 /// setting is them.
 fn show(s: &mut SettingsWindow, key: &'static str, chip: Option<Chip>, tx: Option<&mut Tx>) {
@@ -1770,14 +1789,39 @@ pub fn set_active_theme(s: &mut SettingsWindow, side: Side, key: &'static str, v
     change_theme(s, Target::Active, side, key, value);
 }
 
+/// `preset` with the theme setting `key` set to `value` in `side`'s halves.
+pub fn with_theme_value(mut preset: LookPreset, side: Side, key: &'static str, value: Value) -> LookPreset {
+    for &appearance in side.appearances() {
+        preset.get_mut(appearance).settings.set(key, value);
+    }
+    preset
+}
+
+/// `preset` with the theme `id` in `side`'s halves: each half that shows another theme starts at
+/// that theme's settings as a fresh install has them for that half (its defaults where a fresh
+/// install's half is another theme).
+pub fn with_theme(mut preset: LookPreset, side: Side, id: &str) -> LookPreset {
+    let Some(theme) = crate::theme::find(id) else { return preset };
+    let fresh = LookPreset::fresh();
+    for &appearance in side.appearances() {
+        if preset.get(appearance).theme.id() == theme.id() {
+            continue;
+        }
+        let settings = match fresh.get(appearance) {
+            look if look.theme.id() == theme.id() => look.settings.clone(),
+            _ => crate::theme::setting::Values::defaults(theme.settings()),
+        };
+        *preset.get_mut(appearance) = crate::theme::ThemeLook { theme, settings };
+    }
+    preset
+}
+
 fn change_theme(s: &mut SettingsWindow, target: Target, side: Side, key: &'static str, value: Value) {
     let was = Presets::of(&s.looks.borrow(), &s.saved);
     let Some(mut preset) = was.get(&target).cloned() else { return };
     let label =
         side.appearances().iter().find_map(|a| preset.get(*a).settings.iter().find(|(st, _)| st.key == key)).map(|(st, _)| st.label);
-    for &appearance in side.appearances() {
-        preset.get_mut(appearance).settings.set(key, value);
-    }
+    preset = with_theme_value(preset, side, key, value);
     keep_edited(s, &target, preset);
     let shown = s.sheet.as_mut().filter(|sheet| sheet.target() == Some(&target));
     if let (Side::Only(_), Some(editor)) = (side, shown.and_then(|sheet| sheet.editor_mut())) {
@@ -2082,21 +2126,23 @@ pub fn follow_label(setting: &crate::theme::setting::Setting, of: &[crate::theme
 pub fn choose_theme(s: &mut SettingsWindow, side: Side, id: &str) {
     follow_focus(s);
     close_menu(s);
-    let Some(theme) = crate::theme::find(id) else { return };
     let Some(target) = s.sheet.as_ref().and_then(|sheet| sheet.target().cloned()) else { return };
-    let was = Presets::of(&s.looks.borrow(), &s.saved);
-    let Some(mut preset) = was.get(&target).cloned() else { return };
-    let fresh = LookPreset::fresh();
-    for &appearance in side.appearances() {
-        if preset.get(appearance).theme.id() == theme.id() {
-            continue;
-        }
-        let settings = match fresh.get(appearance) {
-            look if look.theme.id() == theme.id() => look.settings.clone(),
-            _ => crate::theme::setting::Values::defaults(theme.settings()),
-        };
-        *preset.get_mut(appearance) = crate::theme::ThemeLook { theme, settings };
+    change_theme_id(s, target, side, id);
+}
+
+/// [`choose_theme`] for the Active look, whichever sheet is open, or none: the command palette's.
+pub fn choose_active_theme(s: &mut SettingsWindow, side: Side, id: &str) {
+    follow_focus(s);
+    change_theme_id(s, Target::Active, side, id);
+}
+
+fn change_theme_id(s: &mut SettingsWindow, target: Target, side: Side, id: &str) {
+    if crate::theme::find(id).is_none() {
+        return;
     }
+    let was = Presets::of(&s.looks.borrow(), &s.saved);
+    let Some(preset) = was.get(&target).cloned() else { return };
+    let preset = with_theme(preset, side, id);
     keep_edited(s, &target, preset);
     if let (Side::Only(_), Some(editor)) = (side, s.sheet.as_mut().and_then(|sheet| sheet.editor_mut())) {
         editor.split.insert(THEME);

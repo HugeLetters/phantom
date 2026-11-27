@@ -7,7 +7,13 @@
 //! - a *setting*, a service setting (one row of the table `model::settings::SERVICE`, which the
 //!   Settings screen draws from too) or a theme setting (declared by the Active look's theme), with
 //!   its value on the right and where it lives muted after its name;
-//! - a *place*: Settings, one of its tabs, the editor sheet of the Active look.
+//! - a *place*: Settings, one of its tabs, the editor sheet of the Active look, the App icon's
+//!   sheet of every icon (App icon…).
+//!
+//! The Theme, Tone and the other Choice settings list their options in the palette, and so do the
+//! saved **Look Presets** (each as ◐ for both halves, ☀ or ☾). In a list of choices, the highlighted
+//! option, or the one under the pointer, is *previewed* in both windows (`Looks::preview`, nothing
+//! kept); Return keeps it as one undo step, Escape or leaving the list puts the look back.
 //!
 //! Each group is under a muted heading naming what it acts on ([`heading`]); the headings aren't
 //! rows: ↑ and ↓ and Return only know the entries. Its field has the focus; typing filters by name
@@ -55,7 +61,8 @@ use super::{Phantom, details_torrent, look_at_disk, look_at_file, reveal_target,
 use crate::changes::Target;
 use crate::commands::{Command, InApp, OnFiles, OnTorrents, Selected, on_files, on_torrents};
 use crate::notice::{Notice, NoticeAction};
-use crate::theme::preset::Appearance;
+use crate::theme::preset::{Appearance, LookPreset};
+use crate::theme::saved::{Name, SavedPreset};
 use crate::theme::setting::{Kind as ThemeKind, Value};
 use crate::ui::Icon;
 
@@ -117,6 +124,10 @@ pub struct Palette {
     pub sub: Option<Sub>,
     /// The settings and places last picked, newest first, at most [`RECENT`]: in memory only.
     recent: Vec<Kind>,
+    /// The saved Look Presets, as Settings had them when the palette opened (it owns them).
+    saved: Vec<SavedPreset>,
+    /// The choice the pointer rests on, if any: previewed in place of the highlighted one.
+    hover: Option<usize>,
 }
 
 /// How many settings and places Recent lists.
@@ -210,6 +221,8 @@ pub enum SettingRef {
         key: &'static str,
         side: Side,
     },
+    /// The saved Look Presets: its choices apply one, its ☀ or ☾ half or both.
+    Presets,
 }
 
 /// Somewhere in Settings.
@@ -220,6 +233,8 @@ pub enum Place {
     Tab(Tab),
     /// The editor sheet of the Active look, on Appearance.
     EditLook,
+    /// The App icon's Edit…, with the sheet of every icon open.
+    AppIcon,
 }
 
 /// What an entry is, and so what picking it does.
@@ -230,6 +245,8 @@ pub enum Kind {
     Place(Place),
     /// One of the choices of the setting whose choices are listed.
     Choice(SettingRef, &'static str),
+    /// One of the saved Look Presets' choices: the preset applied, to both halves (`None`) or one.
+    Apply(Name, Option<Appearance>),
     /// Last in a setting's choices: the setting in Settings.
     Show(SettingRef),
 }
@@ -384,6 +401,16 @@ pub fn settings_entries(s: &Phantom) -> Vec<Entry> {
     };
     let mut out = vec![place(Kind::Place(Place::Settings), "Settings…", None, Some("⌘,"), &["preferences", "options"])];
     out.extend(Tab::ALL.into_iter().map(|tab| place(Kind::Place(Place::Tab(tab)), tab.label(), Some("Settings"), None, &[])));
+    out.push(place(Kind::Place(Place::AppIcon), "App icon…", Some("Appearance"), None, &["icon", "dock icon"]));
+    let mut presets = setting_entry(
+        "Look Presets".to_owned(),
+        Kind::Setting(SettingRef::Presets),
+        "Appearance".to_owned(),
+        None,
+        &["saved looks", "preset", "apply look"],
+    );
+    presets.has_choices = true;
+    out.push(presets);
     out.push(place(
         Kind::Place(Place::EditLook),
         "Edit…",
@@ -414,6 +441,25 @@ fn theme_entries(s: &Phantom) -> Vec<Entry> {
     let (light, dark) = (&preset.light, &preset.dark);
     let (lr, dr) = (light.resolved(), dark.resolved());
     let mut out = Vec::new();
+    // The Theme itself: one entry while both halves show the same, else one for each.
+    let place = "Appearance ▸ Edit…".to_owned();
+    let theme_entry = |side: Side, name: &str, theme: &str| {
+        let mut entry = setting_entry(
+            name.to_owned(),
+            Kind::Setting(SettingRef::Theme { key: st::THEME, side }),
+            place.clone(),
+            Some(theme.to_owned()),
+            &[],
+        );
+        entry.has_choices = true;
+        entry
+    };
+    if light.theme.id() == dark.theme.id() {
+        out.push(theme_entry(Side::Both, "Theme", light.theme.name()));
+    } else {
+        out.push(theme_entry(Side::Only(Appearance::Light), "Theme ☀", light.theme.name()));
+        out.push(theme_entry(Side::Only(Appearance::Dark), "Theme ☾", dark.theme.name()));
+    }
     let mut add =
         |setting: &'static crate::theme::setting::Setting, side: Side, value: Value, resolved: &crate::theme::setting::Resolved| {
             let place = match setting.section {
@@ -486,6 +532,8 @@ fn how(s: &Phantom, of: SettingRef) -> How {
             Some(Control::Switch(_)) => How::Flip,
             _ => How::Show,
         },
+        SettingRef::Presets => How::Choose,
+        SettingRef::Theme { key, .. } if key == st::THEME => How::Choose,
         SettingRef::Theme { key, side } => match theme_setting(s, key, side).map(|(setting, _)| &setting.kind) {
             Some(ThemeKind::Toggle { .. }) => How::Flip,
             Some(ThemeKind::Choice { .. }) => How::Choose,
@@ -496,9 +544,6 @@ fn how(s: &Phantom, of: SettingRef) -> How {
 
 /// The choices of the setting listed, the current one ticked, then Show in Settings.
 fn choices(s: &Phantom, sub: &Sub) -> Vec<Entry> {
-    let SettingRef::Theme { key, side } = sub.of else { return Vec::new() };
-    let Some((setting, value)) = theme_setting(s, key, side) else { return Vec::new() };
-    let ThemeKind::Choice { choices, .. } = &setting.kind else { return Vec::new() };
     let entry = |kind: Kind, label: &str, hint: Option<&str>, selected: bool| Entry {
         kind,
         group: Group::Choices,
@@ -512,15 +557,35 @@ fn choices(s: &Phantom, sub: &Sub) -> Vec<Entry> {
         has_choices: false,
         selected,
     };
-    let mut out: Vec<Entry> =
-        choices.iter().map(|c| entry(Kind::Choice(sub.of, c.id), c.label, None, value == Value::Choice(c.id))).collect();
+    let mut out: Vec<Entry> = match sub.of {
+        SettingRef::Presets => s
+            .palette
+            .saved
+            .iter()
+            .flat_map(|p| [(None, ""), (Some(Appearance::Light), " ☀"), (Some(Appearance::Dark), " ☾")].map(|(half, mark)| (p, half, mark)))
+            .map(|(p, half, mark)| {
+                let label = format!("{}{}", p.name.as_str(), if half.is_none() { " ◐" } else { mark });
+                entry(Kind::Apply(p.name.clone(), half), &label, None, false)
+            })
+            .collect(),
+        SettingRef::Service(_) => return Vec::new(),
+        SettingRef::Theme { key, side } if key == st::THEME => {
+            let current = s.looks.borrow().preset().get(side.appearances()[0]).theme.id();
+            crate::theme::themes().iter().map(|t| entry(Kind::Choice(sub.of, t.id()), t.name(), None, t.id() == current)).collect()
+        }
+        SettingRef::Theme { key, side } => {
+            let Some((setting, value)) = theme_setting(s, key, side) else { return Vec::new() };
+            let ThemeKind::Choice { choices, .. } = &setting.kind else { return Vec::new() };
+            choices.iter().map(|c| entry(Kind::Choice(sub.of, c.id), c.label, None, value == Value::Choice(c.id))).collect()
+        }
+    };
     out.push(entry(Kind::Show(sub.of), "Show in Settings", Some("⌘↩"), false));
     out
 }
 
 /// How many choices `sub`'s setting has, whatever's typed (Show in Settings isn't one).
 pub fn choices_count(s: &Phantom, sub: &Sub) -> usize {
-    choices(s, sub).iter().filter(|e| matches!(e.kind, Kind::Choice(..))).count()
+    choices(s, sub).iter().filter(|e| matches!(e.kind, Kind::Choice(..) | Kind::Apply(..))).count()
 }
 
 /// What the palette lists for its text: the entries whose name or synonyms match it, group by group
@@ -657,7 +722,12 @@ pub fn open(s: &mut Phantom) {
     s.palette.query = TextEdit::new("");
     s.palette.query.focused = true;
     s.palette.then(Event::Open);
+    s.palette.hover = None;
     s.palette.on = listed(s).first().map(Entry::pin);
+    s.settings.post(|w, _| {
+        let saved = w.saved.list().to_vec();
+        w.main.post(move |m, _| m.palette.saved = saved);
+    });
     s.service.settings(Box::new(|s: &mut Phantom, result, _| {
         if let Ok(settings) = result {
             s.service_settings = Some(settings);
@@ -676,6 +746,8 @@ pub fn dismiss(s: &mut Phantom, tx: &mut Tx) {
 /// [`dismiss`]ed, a command picked, or another overlay opening.
 pub fn close(s: &mut Phantom) {
     s.palette.sub = None;
+    s.palette.hover = None;
+    sync_preview(s);
     s.palette.then(Event::Close);
     s.palette.query = TextEdit::default();
 }
@@ -685,6 +757,7 @@ pub fn close(s: &mut Phantom) {
 pub fn back(s: &mut Phantom, tx: &mut Tx) {
     match s.palette.sub.take() {
         Some(sub) => {
+            s.palette.hover = None;
             s.palette.query = TextEdit::new(sub.before);
             s.palette.query.focused = true;
             s.palette.state = State::Open { at: 0 };
@@ -694,6 +767,7 @@ pub fn back(s: &mut Phantom, tx: &mut Tx) {
             s.palette.state = State::Open { at: 0 };
             s.palette.seen = s.palette.query.text.clone();
             s.palette.on = list.first().map(Entry::pin);
+            sync_preview(s);
         }
         None => dismiss(s, tx),
     }
@@ -722,7 +796,60 @@ fn arrow(s: &mut Phantom, tx: &mut Tx, event: impl FnOnce(usize) -> Event) {
     s.palette.then(event(list.len()));
     let at = s.palette.at();
     s.palette.on = list.get(at).map(Entry::pin);
+    s.palette.hover = None;
+    sync_preview(s);
     tx.scroll_into_view(row_key(at));
+}
+
+/// The Active look as picking `entry` would leave it, for the preview: a choice of a theme
+/// setting or of the Theme, a saved Look Preset applied.
+fn candidate(s: &Phantom, entry: &Entry) -> Option<LookPreset> {
+    let active = s.looks.borrow().preset().clone();
+    let preset = match &entry.kind {
+        Kind::Choice(SettingRef::Theme { key, side }, id) if *key == st::THEME => st::with_theme(active.clone(), *side, id),
+        Kind::Choice(SettingRef::Theme { key, side }, id) => st::with_theme_value(active.clone(), *side, key, Value::Choice(id)),
+        Kind::Apply(name, half) => {
+            let saved = s.palette.saved.iter().find(|p| p.name == *name)?;
+            let mut preset = active.clone();
+            for a in half.map_or(Appearance::BOTH.to_vec(), |h| vec![h]) {
+                *preset.get_mut(a) = saved.preset.get(a).clone();
+            }
+            preset
+        }
+        _ => return None,
+    };
+    (preset != active).then_some(preset)
+}
+
+/// Shows in both windows what the choice under the pointer, or else the highlighted one, would
+/// leave the Active look as, nothing kept; with no choices listed, or the palette closed, the Active
+/// look as it is. Called wherever the highlight or the pointer moves.
+pub fn sync_preview(s: &Phantom) {
+    let shown = match &s.palette.sub {
+        Some(_) if s.palette.is_open() => {
+            let list = listed(s);
+            let at = s.palette.hover.filter(|i| *i < list.len()).unwrap_or_else(|| highlighted(s));
+            list.get(at).and_then(|e| candidate(s, e))
+        }
+        _ => None,
+    };
+    s.looks.borrow_mut().preview(shown.as_ref());
+}
+
+/// The pointer came onto (`on`) or left the `i`-th entry listed: previews that choice, or, leaving it,
+/// the highlighted one again.
+pub fn hover(s: &mut Phantom, i: usize, on: bool) {
+    let now = if on { Some(i) } else { s.palette.hover.filter(|h| *h != i) };
+    if s.palette.hover != now {
+        s.palette.hover = now;
+        sync_preview(s);
+    }
+}
+
+/// The text changed: the highlight is on the first match again, previewed.
+pub fn edited(s: &mut Phantom) {
+    s.palette.hover = None;
+    sync_preview(s);
 }
 
 /// ↑: the highlight up one, the first going to the last.
@@ -777,6 +904,8 @@ fn pick_highlighted(s: &mut Phantom, pick: Pick, tx: &mut Tx) {
 fn done(s: &mut Phantom, pick: Pick, tx: &mut Tx) {
     if pick == Pick::Keep {
         s.palette.sub = None;
+        s.palette.hover = None;
+        sync_preview(s);
         s.palette.query = TextEdit::new("");
         s.palette.query.focused = true;
         s.palette.state = State::Open { at: 0 };
@@ -829,7 +958,14 @@ fn pick_entry(s: &mut Phantom, entry: Entry, pick: Pick, tx: &mut Tx) {
             done(s, pick, tx);
             choose(s, of, id, &name, &entry.label);
         }
+        Kind::Apply(name, half) if !show => {
+            done(s, pick, tx);
+            let words = format!("Look Presets: {}", entry.label);
+            s.settings.post(move |w, _| presets::apply_named(w, &name, half));
+            tell_changed(s, words);
+        }
         Kind::Choice(of, _) | Kind::Show(of) => show_in_settings(s, of, tx),
+        Kind::Apply(..) => show_in_settings(s, SettingRef::Presets, tx),
     }
 }
 
@@ -856,6 +992,8 @@ fn enter(s: &mut Phantom, of: SettingRef, name: String, tx: &mut Tx) {
     let n = s.palette.sub.as_ref().map_or(0, |sub| choices_count(s, sub));
     tx.announce(client::display::choices_of(&name, n), rune::LiveRegion::Polite);
     tx.scroll_into_view(row_key(at));
+    s.palette.hover = None;
+    sync_preview(s);
 }
 
 /// Tells what a setting was changed to, with Undo, which is ⌘Z's too.
@@ -878,6 +1016,7 @@ fn flip(s: &mut Phantom, of: SettingRef, name: &str) {
             let Some(Control::Switch(switch)) = st::service_setting(key).map(|setting| setting.control) else { return };
             flip_switch(s, switch, name);
         }
+        SettingRef::Presets => {}
         SettingRef::Theme { key, side } => {
             let Some((_, Value::Toggle(on))) = theme_setting(s, key, side) else { return };
             set_theme(s, side, key, Value::Toggle(!on));
@@ -896,13 +1035,17 @@ fn flip_switch(s: &mut Phantom, switch: Switch, name: &str) {
 /// Sets the choice `id` of a setting, and tells so.
 fn choose(s: &mut Phantom, of: SettingRef, id: &'static str, name: &str, label: &str) {
     let SettingRef::Theme { key, side } = of else { return };
+    if key == st::THEME {
+        s.settings.post(move |w, _| st::choose_active_theme(w, side, id));
+        return tell_changed(s, format!("{name}: {label}"));
+    }
     set_theme(s, side, key, Value::Choice(id));
     tell_changed(s, format!("{name}: {label}"));
 }
 
 /// Settings, at a place.
 fn open_place(s: &mut Phantom, place: Place) {
-    s.settings.post(move |w, _| {
+    s.settings.post(move |w, tx| {
         st::open(w);
         match place {
             Place::Settings => {}
@@ -914,6 +1057,7 @@ fn open_place(s: &mut Phantom, place: Place) {
                 st::show_tab(w, Tab::Appearance);
                 presets::edit_active(w);
             }
+            Place::AppIcon => st::show_icons(w, tx),
         }
     });
 }
@@ -925,6 +1069,7 @@ fn show_in_settings(s: &mut Phantom, of: SettingRef, tx: &mut Tx) {
     s.settings.post(move |w, tx| match of {
         SettingRef::Service(key) => st::show_service(w, key, tx),
         SettingRef::Theme { key, side } => presets::show_setting(w, Target::Active, key, side, tx),
+        SettingRef::Presets => st::show_presets(w, tx),
     });
 }
 

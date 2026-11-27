@@ -57,6 +57,7 @@ impl Ui {
         window: Option<f32>,
         row_key: impl Fn(usize) -> String,
         on_pick: impl Fn(&mut S, usize, &mut Tx) + Clone + 'static,
+        on_hover: impl Fn(&mut S, usize, bool) + Clone + 'static,
         on_close: impl Fn(&mut S, &mut Tx) + Clone + 'static,
         layer: &mut Vec<El>,
     ) {
@@ -114,6 +115,7 @@ impl Ui {
                 );
             }
             let pick = on_pick.clone();
+            let hovered = on_hover.clone();
             let mut item = row()
                 .key(row_key(i))
                 .role("option")
@@ -130,7 +132,8 @@ impl Ui {
                     None => el().w(14.0).h(14.0),
                 })
                 .child(text(r.label).key("label").font(k.ty.ui_compact).color(c.text_base).truncate().shrink())
-                .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx));
+                .on_press_tx(move |s: &mut S, tx: &mut Tx| pick(s, i, tx))
+                .on_hover_change(move |s: &mut S, on: bool, _: &mut Tx| hovered(s, i, on));
             // What's left of the row is the place, which gives way first; the value and the key
             // keep their width.
             item = item.child(match r.place {
