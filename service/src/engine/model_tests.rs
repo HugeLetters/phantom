@@ -1208,13 +1208,15 @@ impl Model {
         deletes.sort_by_key(|(at, _)| *at);
         self.came.clear();
         // Then what waited behind the rollbacks, in the order it came, each once what ran before it
-        // has started, its files granted (#374).
-        let behind = std::mem::take(&mut self.behind)
-            .into_iter()
-            .map(|b| {
-                self.reopen();
+        // has started, its files granted (#374). A torrent with more on its lane lets go of nothing
+        // meanwhile: that waits for its lane to be idle.
+        let behind = std::mem::take(&mut self.behind);
+        let behind = (0..behind.len())
+            .map(|n| {
+                let busy: BTreeSet<TorrentId> = behind[n..].iter().map(|b| b.id).collect();
+                self.reopen_but(&busy);
                 self.grant_running();
-                self.after_rollback(b)
+                self.after_rollback(behind[n].clone())
             })
             .collect();
         Answer::Released { deletes: deletes.into_iter().map(|(_, d)| d).collect(), undos, behind }
@@ -2240,10 +2242,22 @@ impl Model {
     /// A torrent added again, or added back as it let go of pieces, has its files open as they are
     /// now; one missing is closed.
     fn reopen(&mut self) {
-        for t in self.torrents.values_mut() {
+        self.reopen_but(&BTreeSet::new());
+    }
+
+    /// [`Model::reopen`], but the torrents `busy`, with steps waiting on their lanes, aren't added
+    /// back as they let go of pieces: that waits for an idle lane.
+    fn reopen_but(&mut self, busy: &BTreeSet<TorrentId>) {
+        for (id, t) in self.torrents.iter_mut() {
             let Torrent::Pack(p) = t else { continue };
             let disk = &self.disk[p.pack];
-            let ready = p.missing.is_empty() && !p.unchecked && p.checking.is_none() && !p.unavailable && !p.delete_failed && !p.deleting;
+            let ready = p.missing.is_empty()
+                && !p.unchecked
+                && p.checking.is_none()
+                && !p.unavailable
+                && !p.delete_failed
+                && !p.deleting
+                && !busy.contains(id);
             if p.letting_go && ready {
                 (p.letting_go, p.reopens) = (false, true);
             }
@@ -3545,6 +3559,22 @@ fn a_file_in_the_trash_with_another_at_its_path_is_checked_as_that_one() {
         Step::TrashFiles { id: 0, files: vec![2] },
         Step::Overwrite { pack: 0, file: 2 },
         Step::Check(0),
+    ]);
+}
+
+/// Found at 256 cases (ADR 0014): a Move to Trash, a file set Normal and a Pause, all waiting behind
+/// an aborted Delete's rollback. The file moved is let go of, which waits for an idle lane: so it
+/// isn't made again as the Normal applies, and once the torrent is paused it isn't made at all.
+#[test]
+fn a_let_go_behind_a_rollback_waits_for_the_steps_after_it() {
+    replay(&[
+        Step::Add { pack: Some(0), paused: false },
+        Step::Burst(vec![Step::HoldTrash, Step::Delete(0)]),
+        Step::Undo,
+        Step::TrashFiles { id: 0, files: vec![2] },
+        Step::SetPriority { id: 0, file: 2, priority: Priority::Normal },
+        Step::Pause(0),
+        Step::ReleaseTrash,
     ]);
 }
 
