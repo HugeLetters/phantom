@@ -1,8 +1,9 @@
 //! Phantom, the default theme: complete, and the end of every theme's parent chain. Its tokens
 //! are rune-kit's neutral kit, light or dark as its Tone says, recolored by its Colors (`palette`);
 //! its blocks are the building blocks as `ui` writes them, with its own icons; its App icon is the
-//! bundle's own.
+//! bundle's own, or drawn with a Tile color (`app_icon`).
 
+pub mod app_icon;
 mod icons;
 pub mod palette;
 
@@ -127,6 +128,10 @@ impl Theme for Phantom {
             motion: motion(settings.get(MOTION)),
             resolved,
         }
+    }
+
+    fn icons(&self) -> &'static [super::icon::ThemeIcon] {
+        &app_icon::ICONS
     }
 }
 
