@@ -64,6 +64,15 @@
      so the keys pressed and the cursor show, turned into a GIF with
      `ffmpeg -framerate 30 -i frames/frame_%04d.png -vf "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse" out.gif`.
 
+   **Check your own stills before anyone else sees them.** Look at every still and GIF frame you
+   rendered for: text cut off or shortened, anything spilling out of its box, misalignment, both
+   Tones, and 960x600, 640x600 and 640x320. Then have a second, cheap agent look only at the
+   stills and list problems; fix what either of you finds before the PR goes up. Most of the
+   user's UI notes so far were things the author's own stills already showed.
+
+   **Stills before code only for a new screen** (or a new sheet, popover or window). A change to
+   an existing screen is built directly and its stills go in the PR.
+
    Publish them with `scripts/pr-artifacts.sh <branch> <files>…`, which prints the Markdown.
 6. **Pull request:** push the branch and open it as a draft (`gh pr create --draft`). The body
    shows rather than tells: short, visual, focused on interfaces and architecture. In order:
@@ -82,6 +91,12 @@
    sensitive (a new dependency, data formats on disk, anything hard to undo); the rest merge
    once the coordinator's review passes.
 
+   **Review depth follows risk.** Engine, gate and data-format PRs get an adversarial review. Every
+   other PR gets one review, whose reviewer fixes small findings itself rather than reporting
+   them back. A new mechanism (a new state, a new stored file, a new way the engine and the gate
+   talk) gets a short design note on the desk before it's built, so a design the user would drop
+   is dropped at the note.
+
    **Show, don't tell** (PR *Shape* and desk questions alike; after humanlayer's `show-me`): pick
    the smallest view that makes the point, put it beside the one line it supports, and cut the
    preamble. Keep only the calls, types, files and states the reader needs to judge this change
@@ -99,8 +114,8 @@
      so the user compares shapes instead of reading descriptions.
 
 7. **After merge:** GitHub deletes the branch; `scripts/prune-merged.sh` in the main checkout
-   removes the local branch and its worktree, and any copies a killed Chrome left behind. A
-   merge that changes the app (anything outside `.opencode/` and docs) is followed by
-   `scripts/install-mac.sh`, so the user's installed Phantom is always master.
+   removes the local branch and its worktree, and any copies a killed Chrome left behind.
+   Installing (`scripts/install-mac.sh`) restarts the user's Phantom, so only the coordinator
+   installs, and only after the user says go on the desk.
    Headless Chrome (tests, artifacts) is always closed normally (`browser.close()`), never
    killed.
