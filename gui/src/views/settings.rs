@@ -11,6 +11,8 @@ use client::display;
 use proto::{Direction, ListenPort, SeedingLimit, Settings};
 use rune::{Cx, El, col, el, row, text};
 
+mod customize;
+
 use crate::changes::Target;
 use crate::model::settings::presets;
 use crate::model::settings::{
@@ -61,7 +63,7 @@ pub fn tab_of(setting: &str) -> Option<Tab> {
     match setting_of(setting) {
         "default_destination" | "keep_awake" | "seed_ratio" | "seed_time" => Some(Tab::General),
         "listen_port" | "upnp" | "download_limit" | "upload_limit" => Some(Tab::Network),
-        "look_preset" | "saved_presets" | "app_icon" => Some(Tab::Appearance),
+        "look_preset" | "saved_presets" | "app_icon" | "app_icon_settings" => Some(Tab::Appearance),
         _ => None,
     }
 }
@@ -96,6 +98,9 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     });
     let mut overlays = edit_sheet(s, sheet, ui);
     overlays.extend(icon_sheet(&s.app_icon, sheet, ui, appearance));
+    if let Some(open) = &sheet.customize {
+        overlays.extend(customize::sheet(s, open, ui));
+    }
     ui.root(page, overlays)
 }
 
@@ -773,11 +778,20 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         return ui.setting_row("app_icon", label, el(), unread);
     }
     let [dark, light] = icon.sides().unwrap_or_default();
-    let shown: Vec<(Option<&rune::Image>, Option<bool>)> = match dark == light {
-        true => vec![(icon.image(&light), None)],
-        false => vec![(icon.image(&light), Some(false)), (icon.image(&dark), Some(true))],
+    // One icon while both halves draw the same.
+    let same = dark == light && icon.drawing(&light, Appearance::Light) == icon.drawing(&dark, Appearance::Dark);
+    let shown: Vec<(Option<&rune::Image>, Option<bool>)> = match same {
+        true => vec![(icon.image_in(&light, Appearance::Light), None)],
+        false => vec![(icon.image_in(&light, Appearance::Light), Some(false)), (icon.image_in(&dark, Appearance::Dark), Some(true))],
     };
     let preview = ui.icon_preview(&shown, chip_faces());
+    // Only an icon with settings of its own has them to customize.
+    let customize = crate::model::settings::customize::customizable(icon).map(|_| {
+        ui.button("app-icon-customize", "Customize…")
+            .accessible("Customize the App icon")
+            .on_press(crate::model::settings::customize::open)
+            .build()
+    });
     let edit = ui
         .button("app-icon-edit", "Edit…")
         .accessible("Edit the App icon")
@@ -786,7 +800,7 @@ fn app_icon(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui) -> El {
         .build();
     // One line: the caption (whole on hover), the previews, Edit….
     let caption = ui.caption(icon_name(icon, icon.choice.as_ref())).key("app_icon-note").help(icon_full_name(icon, icon.choice.as_ref()));
-    let controls = row().gap(ui.spacing().s4).center_y().child(caption).child(preview).child(edit);
+    let controls = row().gap(ui.spacing().s4).center_y().child(caption).child(preview).children(customize).child(edit);
     ui.setting_row("app_icon", label, controls, Vec::new())
 }
 
@@ -817,8 +831,8 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appear
         let help = display::use_icon_pair(&name(&pair.light), &name(&pair.dark));
         ui.pair_tile(
             format!("icon-pair-{i}"),
-            icon.image(&pair.light),
-            icon.image(&pair.dark),
+            icon.image_in(&pair.light, Appearance::Light),
+            icon.image_in(&pair.dark, Appearance::Dark),
             &pair.name,
             &help,
             pair_in_use(icon, i),
@@ -849,13 +863,13 @@ fn icon_sheet(icon: &AppIcon, sheet: &SettingsSheet, ui: &Ui, appearance: Appear
     let mut tiles = vec![tile(
         "icon-follow".into(),
         None,
-        icon.image(&icon.theme_icon(appearance == Appearance::Dark).unwrap_or_else(|| manifest.default().id.clone())),
+        icon.image_in(&icon.theme_icon(appearance == Appearance::Dark).unwrap_or_else(|| manifest.default().id.clone()), appearance),
         "Follow theme",
         "The icon of the look each Appearance shows",
         None,
     )];
     for one in manifest.icons() {
-        tiles.push(tile(format!("icon-{}", one.id), Some(&one.id), icon.image(&one.id), &one.name, &one.name, None));
+        tiles.push(tile(format!("icon-{}", one.id), Some(&one.id), icon.image_in(&one.id, appearance), &one.name, &one.name, None));
     }
     for (i, id) in icon.added.iter().enumerate() {
         let gone = id.clone();

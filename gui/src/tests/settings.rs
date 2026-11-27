@@ -5227,3 +5227,5 @@ fn return_presses_done_on_the_app_icons_sheet() {
         assert!(!icons(&d), "Return presses Done (focus in the sheet: {tab})");
     }
 }
+
+mod customize;
