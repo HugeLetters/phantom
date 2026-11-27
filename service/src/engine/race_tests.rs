@@ -563,6 +563,17 @@ impl Sut {
         self.engine.as_ref().expect("running")
     }
 
+    /// Waits, checks open, till librqbit has sampled every torrent: checks held from here on don't
+    /// hold that, nor what's asked of it behind that sampling (#465).
+    fn sampled(&self) {
+        let deadline = Instant::now() + SETTLE;
+        let resuming = |a: &mut Actor| a.torrents.values().any(|t| matches!(t.lib, super::machine::lib::Lib::Resuming(_)));
+        while !self.checks.is_held() && self.rt.block_on(self.engine().inspect(resuming)) {
+            assert!(Instant::now() < deadline, "librqbit never sampled a torrent");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     /// Runs a client call, which must be answered.
     fn call<T, E>(&self, call: impl Future<Output = Result<T, E>>) -> Result<T, E> {
         self.rt.block_on(async { tokio::time::timeout(SETTLE, call).await.expect("every command is answered") })
@@ -816,10 +827,10 @@ impl Sut {
                 self.command(pack, TorrentCommand::Check)
             }
             Step::CancelCheck { pack } => self.command(pack, TorrentCommand::CancelCheck),
-            // Not while a move is under way, as no move starts while checks are held: once it ends,
-            // librqbit samples the torrent's pieces through the gate, and what's asked of it waits
-            // behind that sampling (its lane), on a gate only the test opens.
-            Step::HoldChecks if self.moving.is_some() => {}
+            // Not while a move or an undo is under way, as neither starts while checks are held: once
+            // it ends, librqbit samples the torrent's pieces through the gate, and what's asked of it
+            // waits behind that sampling (its lane), on a gate only the test opens.
+            Step::HoldChecks if self.moving.is_some() || self.undoing.is_some() => {}
             Step::HoldChecks => self.checks.hold(true),
             Step::ReleaseChecks => self.checks.hold(false),
             Step::Resume { pack } => {
@@ -913,6 +924,8 @@ impl Sut {
             // One asked while another is under way waits its turn: the model has no queue, so the
             // steps don't ask (`a_second_undo_while_the_first_is_held_waits_its_turn` does).
             Step::Undo { .. } if self.undoing.as_ref().is_some_and(|u| !u.is_finished()) => {}
+            // Nor while checks are held: librqbit samples what it brings back through their gate (#465).
+            Step::Undo { .. } if self.checks.is_held() => {}
             Step::Undo { held } => {
                 drop(disk);
                 // One answered already ends first.
@@ -946,11 +959,13 @@ impl Sut {
                 self.undoing = Some(undoing);
                 if !held {
                     self.undo_ends();
+                    self.sampled();
                 }
             }
             Step::UndoEnds => {
                 drop(disk);
                 self.undo_ends();
+                self.sampled();
             }
             Step::KillMidUndo { block, empty, lose_stash, at } => {
                 drop(disk);
@@ -1587,6 +1602,17 @@ fn a_cancelled_check_stays_not_checked_whatever_follows() {
         DestinationGone { pack: 1 },
         DestinationBack { pack: 1 },
     ]);
+}
+
+/// #465, found by a 256-case run: an undo asked, or ended, while checks are held. librqbit samples
+/// the pieces of what it brings back through the checks' gate, and what's asked of the torrent
+/// waits behind that sampling: the test's own gate, never opened. No undo starts while checks are
+/// held, nor are they held while one is under way.
+#[test]
+fn a_command_after_an_undo_with_checks_held_is_answered() {
+    let removed = [Add { pack: 1, paused: false }, Arrive { pack: 1 }];
+    run(&[&removed[..], &[Remove { pack: 1, delete: false }, HoldChecks, Undo { held: false }, CancelCheck { pack: 1 }]].concat());
+    run(&[&removed[..], &[Remove { pack: 1, delete: true }, Undo { held: true }, HoldChecks, UndoEnds, Pause { pack: 1 }]].concat());
 }
 
 #[test]
