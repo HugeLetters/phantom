@@ -1679,6 +1679,18 @@ closed! {
         [Step::Do(Do::Off { file: B }), put(Same), Step::Restart];
 }
 
+/// ADR 0014: a file a Move to Trash takes is closed as it goes, so nothing writes into it in the
+/// Trash, a person's file put at the torrent's path too, while the pieces it shares with its
+/// neighbours are downloaded, and once the torrent lets go of its pieces.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_moved_to_the_trash_is_never_written_there() {
+    let peers = Peers::start().await;
+    for kind in [Same, Edit, OnePiece] {
+        let steps = vec![put(kind), Step::Do(Do::TrashFile { file: B }), Step::Settle, Step::PeerOpens, Step::Settle];
+        World::run(&peers, &Case { start: Start::Nothing, peer: true, paused: false, before: None, steps }, true).await;
+    }
+}
+
 /// Found by this test at 256 cases (#374): a hard link to the torrent's own bytes, put while none of
 /// them was had, its neighbours not there, is Missing files until a check reads it; then it's whole but
 /// for the piece it shares with them, which only they complete, so it's read only, not Missing files,
