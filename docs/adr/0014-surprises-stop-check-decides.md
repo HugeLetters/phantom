@@ -1,6 +1,6 @@
 # Surprises stop; Check decides
 
-Status: proposed. Amends [ADR 0008](0008-undo-is-inverse-commands-in-the-service.md): its no-check undo, all-or-nothing undo, crash-finishing and trashed-file reading are superseded, as marked there.
+Status: accepted. Amends [ADR 0008](0008-undo-is-inverse-commands-in-the-service.md): its no-check undo, all-or-nothing undo, crash-finishing and trashed-file reading are superseded, as marked there.
 
 ## Context
 
