@@ -3557,6 +3557,41 @@ fn a_joined_controls_part_over_the_dark_half_is_drawn_in_the_dark_look() {
     assert_eq!(d.settings.elements().iter().filter(|e| e.key.as_deref() == Some("edit-theme-both-trigger")).count(), 1);
 }
 
+/// A joined control that spills over the seam answers the pointer there as it does left of it:
+/// a press over the Dark half's part opens its menu, in a window narrow enough that Corners,
+/// Motion and the Theme pop-up reach across (#433).
+#[test]
+fn a_press_on_a_joined_controls_part_over_the_dark_half_opens_its_menu() {
+    for (row, trigger, menu) in [("corners", "edit-corners-both", Some("corners")), ("theme", "edit-theme-both-trigger", None)] {
+        let mut d = appearance_tab();
+        press(&mut d, "active-edit");
+        d.settings.set_viewport((300.0, 700.0), 2.0);
+        d.settle();
+        let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key}"));
+        let (control, seam) = (rect(&d, trigger), rect(&d, &format!("edit-{row}-right"))[0]);
+        assert!(control[0] < seam && seam + 4.0 < control[0] + control[2], "{row}: the control spans the seam ({control:?}, {seam})");
+        let (x, y) = (seam + 4.0, control[1] + control[3] / 2.0);
+        // Nothing of the copy takes the pointer, focus or Tab: all of it passes through to the live control.
+        let over =
+            d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(&format!("edit-{row}-over"))).expect("the cover").path;
+        let reachable: Vec<_> = d
+            .settings
+            .elements()
+            .into_iter()
+            .filter(|e| e.path.starts_with(&format!("{over}/")) && e.focusable && !e.inert)
+            .filter_map(|e| e.key)
+            .collect();
+        assert!(reachable.is_empty(), "{row}: the copy takes the pointer or Tab: {reachable:?}");
+        d.front(Which::Settings);
+        d.settings.pointer_move(x, y);
+        d.settings.pointer_down(x, y);
+        d.settings.pointer_up(x, y);
+        d.settle();
+        let open = d.settings.state.sheet.as_ref().and_then(|s| s.editor()).and_then(|e| e.menu);
+        assert!(open.is_some_and(|(key, side)| side == Side::Both && menu.is_none_or(|m| m == key)), "{row}: its menu opens, not {open:?}");
+    }
+}
+
 /// Night's Tone: each half's.
 fn night_tone(d: &Desk) -> [Option<Value>; 2] {
     let saved = d.settings.state.saved.list()[1].preset.clone();
