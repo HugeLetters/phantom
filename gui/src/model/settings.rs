@@ -1488,11 +1488,25 @@ pub fn undo_app(s: &mut SettingsWindow, of: crate::changes::machine::AppSetting,
                 }
             }
         }
+        // The App icon's colors back to `was`: Customize, open, shows them and stays open (⌘Z in it
+        // is its own); else Settings shows them at the App icon's row.
+        (AppSetting::Tints, Was::Tints(was)) => {
+            s.app_icon.put_tints(was);
+            s.app_icon.redraw(&s.looks.borrow());
+            if s.sheet.as_ref().is_some_and(|sheet| sheet.customize.is_some()) {
+                customize::refresh(s);
+                s.window.raise();
+            } else {
+                show_setting(s, "app_icon", Some(tx));
+            }
+            Notice::new(display::setting_undone_short(display::setting_short("app_icon_settings"))).brief()
+        }
         // A change's `was` is always of its setting (`app_changed`'s callers).
-        (AppSetting::Icon, Was::Theme(..) | Was::Presets(..) | Was::Edit(..))
-        | (AppSetting::Theme { .. }, Was::Icon(..) | Was::Presets(..) | Was::Edit(..))
-        | (AppSetting::Presets, Was::Icon(..) | Was::Theme(..) | Was::Edit(..))
-        | (AppSetting::Edit, Was::Icon(..) | Was::Theme(..) | Was::Presets(..)) => return,
+        (AppSetting::Icon, Was::Theme(..) | Was::Presets(..) | Was::Edit(..) | Was::Tints(..))
+        | (AppSetting::Theme { .. }, Was::Icon(..) | Was::Presets(..) | Was::Edit(..) | Was::Tints(..))
+        | (AppSetting::Presets, Was::Icon(..) | Was::Theme(..) | Was::Edit(..) | Was::Tints(..))
+        | (AppSetting::Edit, Was::Icon(..) | Was::Theme(..) | Was::Presets(..) | Was::Tints(..))
+        | (AppSetting::Tints, Was::Icon(..) | Was::Theme(..) | Was::Presets(..) | Was::Edit(..)) => return,
     };
     s.main.post(move |s, _| s.bar.tell(told));
 }

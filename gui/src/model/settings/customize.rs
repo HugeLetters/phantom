@@ -8,6 +8,8 @@
 use rune::TextEdit;
 
 use super::{SettingsWindow, follow_focus};
+use crate::changes::Was;
+use crate::changes::machine::AppSetting;
 use crate::theme::icon::{IconSettings, ThemeIcon, Tint, find, of_theme};
 use crate::theme::oklab::Okhsl;
 use crate::theme::preset::Appearance;
@@ -31,8 +33,9 @@ pub struct TintPicker {
     pub at: Okhsl,
     /// Its hex field: the color shown, or what's typed over it until it's applied.
     pub field: TextEdit,
-    /// What the setting held as a drag began, which a drag called off puts back.
-    drag: Option<Tint>,
+    /// The icons' settings as a drag began: the drag is one step of Undo, from these, and one
+    /// called off puts them back.
+    drag: Option<IconSettings>,
 }
 
 /// The icon with settings each Appearance shows, Light's first: what Customize… customizes.
@@ -61,22 +64,35 @@ pub fn open(s: &mut SettingsWindow) {
     let opened = s.app_icon.tints.clone();
     if let Some(sheet) = &mut s.sheet {
         sheet.customize = Some(Customize { icon: icon.id, opened, picker: None });
+        // Its picks are its own for ⌘Z, until it closes.
+        s.main.post(|s, _| crate::changes::sheet_opened(s, crate::changes::session::Sheet::Customize));
     }
 }
 
-/// Done, Return, ⌘W: it closes, keeping what was set (a hex typed in the picker too).
+/// What a visit left of the sheet, which `opened` it: one step of Undo if it changed anything.
+fn visit(s: &SettingsWindow, opened: IconSettings) -> Option<(AppSetting, Was)> {
+    (s.app_icon.tints != opened).then_some((AppSetting::Tints, Was::Tints(opened)))
+}
+
+/// Done, Return, ⌘W: it closes, keeping what was set (a hex typed in the picker too). What it
+/// changed since it opened is one step of Undo.
 pub fn done(s: &mut SettingsWindow) {
     close_picker(s);
-    if let Some(sheet) = &mut s.sheet {
-        sheet.customize = None;
-    }
+    let Some(open) = s.sheet.as_mut().and_then(|sheet| sheet.customize.take()) else { return };
+    // What's left of the visit once a ⌘Z pressed just before has taken its step.
+    super::end_sheet(s, move |s| visit(s, open.opened));
 }
 
-/// Cancel, or Escape with the picker closed: what it opened on is back, and it closes.
+/// Cancel, or Escape with the picker closed: what it opened on is back, and it closes, none of its
+/// steps left for ⌘Z.
 pub fn cancel(s: &mut SettingsWindow) {
     let Some(open) = s.sheet.as_mut().and_then(|sheet| sheet.customize.take()) else { return };
-    s.app_icon.put_tints(open.opened);
-    s.app_icon.redraw(&s.looks.borrow());
+    // Put back once a ⌘Z pressed just before has taken its step, which would otherwise come last.
+    super::end_sheet(s, move |s| {
+        s.app_icon.put_tints(open.opened);
+        s.app_icon.redraw(&s.looks.borrow());
+        None
+    });
 }
 
 /// Escape in the sheet: a hex being typed goes back to the color shown, else the picker closes,
@@ -135,12 +151,26 @@ pub fn escape_picker(s: &mut SettingsWindow) -> bool {
     true
 }
 
-/// `tint` set on the open picker's setting, drawn at once; its field and markers show the color
-/// it comes to.
+/// `tint` set on the open picker's setting, drawn at once, one step of Undo unless it's part of a
+/// drag; its field and markers show the color it comes to.
 fn set(s: &mut SettingsWindow, tint: Tint, at: Option<Okhsl>) {
     let Some((icon, half, key)) = picker(s) else { return };
+    let was = s.app_icon.tints.clone();
     s.app_icon.set_tint(icon, half, key, tint);
     s.app_icon.redraw(&s.looks.borrow());
+    if s.app_icon.tints != was && open_sheet(s).and_then(|o| o.picker.as_ref()).is_some_and(|p| p.drag.is_none()) {
+        super::app_changed(s, AppSetting::Tints, Was::Tints(was));
+    }
+    show_color(s, at);
+}
+
+/// After an undo: the picker's field and markers show the color its setting came back to.
+pub fn refresh(s: &mut SettingsWindow) {
+    show_color(s, None);
+}
+
+fn show_color(s: &mut SettingsWindow, at: Option<Okhsl>) {
+    let Some((icon, half, key)) = picker(s) else { return };
     let rgb = shown(s, icon, half, key);
     if let (Some(picker), Some(rgb)) = (open_sheet(s).and_then(|o| o.picker.as_mut()), rgb) {
         picker.at = at.unwrap_or_else(|| Okhsl::of(rgb.color()));
@@ -163,19 +193,32 @@ pub fn follow(s: &mut SettingsWindow) {
 /// A pick in the open picker: the color, set by hand as the pointer goes down and moves; one
 /// called off puts back what was there.
 pub fn pick(s: &mut SettingsWindow, pick: Pick) {
-    let Some((icon, half, key)) = picker(s) else { return };
-    let was = s.app_icon.tint(icon, half, key);
+    if picker(s).is_none() {
+        return;
+    }
     match pick {
         Pick::Down(at) => {
+            let tints = s.app_icon.tints.clone();
             if let Some(picker) = open_sheet(s).and_then(|o| o.picker.as_mut()) {
-                picker.drag = Some(was);
+                picker.drag = Some(tints);
             }
             set(s, Tint::Color(Rgb::of(at.color())), Some(at));
         }
-        Pick::Move(at) | Pick::Up(at) => set(s, Tint::Color(Rgb::of(at.color())), Some(at)),
+        Pick::Move(at) => set(s, Tint::Color(Rgb::of(at.color())), Some(at)),
+        Pick::Up(at) => {
+            set(s, Tint::Color(Rgb::of(at.color())), Some(at));
+            // The drag ends: what it changed is one step.
+            if let Some(was) = open_sheet(s).and_then(|o| o.picker.as_mut()).and_then(|p| p.drag.take())
+                && s.app_icon.tints != was
+            {
+                super::app_changed(s, AppSetting::Tints, Was::Tints(was));
+            }
+        }
         Pick::Cancelled => {
             if let Some(was) = open_sheet(s).and_then(|o| o.picker.as_mut()).and_then(|p| p.drag.take()) {
-                set(s, was, None);
+                s.app_icon.put_tints(was);
+                s.app_icon.redraw(&s.looks.borrow());
+                refresh(s);
             }
         }
     }

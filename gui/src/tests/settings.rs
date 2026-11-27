@@ -4629,21 +4629,45 @@ fn the_colors_names_are_never_cut() {
     }
 }
 
+/// Everything in the popup keyed `popup` (the square, the bar, the hex field, the buttons, the
+/// warnings) lies inside the popup's own frame: nothing is cut or spills.
+pub(super) fn popup_holds_its_parts(d: &Desk, popup: &str, width: f32) {
+    let all = d.settings.elements();
+    let frame = super::generated::rect_of(&d.settings, popup).unwrap_or_else(|| panic!("{popup} at {width}"));
+    let mut parts = 0;
+    for e in all.iter().filter(|e| !e.exiting && e.path.split('/').any(|p| p == popup) && e.key.as_deref() != Some(popup)) {
+        parts += 1;
+        let r = e.rect;
+        assert!(
+            r[0] >= frame[0] - 0.5
+                && r[1] >= frame[1] - 0.5
+                && r[0] + r[2] <= frame[0] + frame[2] + 0.5
+                && r[1] + r[3] <= frame[1] + frame[3] + 0.5,
+            "at {width} pt {:?} {r:?} spills out of {popup} {frame:?}",
+            e.key
+        );
+    }
+    assert!(parts >= 4, "the parts of {popup} were found");
+}
+
 /// A swatch's picker opens beside it, inside the window, at both widths, wherever its swatch is:
 /// the square, the bar, the hex field and the button, each named for screen readers.
 #[test]
 fn the_picker_opens_inside_the_window() {
     for width in [960.0, 640.0] {
         // Light and Dark's colors differ: each row is split, a swatch in each half.
-        for (swatch, field) in
-            [("edit-accent-dark-swatch", "edit-accent-dark"), ("edit-success_edge-dark-swatch", "edit-success_edge-dark")]
-        {
+        for (swatch, field) in [
+            ("edit-accent-light-swatch", "edit-accent-light"),
+            ("edit-accent-dark-swatch", "edit-accent-dark"),
+            ("edit-success_edge-dark-swatch", "edit-success_edge-dark"),
+        ] {
             let mut d = colors_sheet(width);
             press(&mut d, swatch);
             let rect = |d: &Desk, key: &str| super::generated::rect_of(&d.settings, key).unwrap_or_else(|| panic!("{key} at {width}"));
             let popup = rect(&d, &format!("{field}-popup"));
             assert!(popup[0] >= 0.0 && popup[1] >= 0.0, "at {width} pt {popup:?} inside");
             assert!(popup[0] + popup[2] <= width + 0.5 && popup[1] + popup[3] <= 900.5, "at {width} pt {popup:?} inside");
+            popup_holds_its_parts(&d, &format!("{field}-popup"), width);
             let label = |key: &str| d.settings.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.label);
             assert_eq!(label(&format!("{field}-square")).as_deref(), Some("Hue and lightness"));
             assert_eq!(label(&format!("{field}-bar")).as_deref(), Some("Saturation"));

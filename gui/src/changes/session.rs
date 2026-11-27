@@ -22,12 +22,17 @@ pub enum Sheet {
     Editor,
     /// The App icon's sheet: its picks.
     Icons,
+    /// The App icon's Customize sheet: its color picks.
+    Customize,
 }
 
 impl Sheet {
     /// Whether a change of `of` made while the sheet is open is a step of it.
     fn owns(self, of: &AppSetting) -> bool {
-        matches!((self, of), (Sheet::Editor, AppSetting::Theme { .. }) | (Sheet::Icons, AppSetting::Icon))
+        matches!(
+            (self, of),
+            (Sheet::Editor, AppSetting::Theme { .. }) | (Sheet::Icons, AppSetting::Icon) | (Sheet::Customize, AppSetting::Tints)
+        )
     }
 }
 

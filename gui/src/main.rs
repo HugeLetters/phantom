@@ -1223,6 +1223,14 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 model::settings::presets::edit_active(s);
                 model::settings::toggle_section(s, "every-color");
             }),
+            // The picker on a hand-set Faint text in Dark's half: two warnings under it (#417).
+            ("settings-faint-picker", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                set_colors(s, &[(preset::Appearance::Light, "faint_text", "#a3a6ab"), (preset::Appearance::Dark, "faint_text", "#5f656f")]);
+                model::settings::presets::edit_active(s);
+                model::settings::toggle_section(s, "every-color");
+                model::settings::open_picker(s, model::settings::Side::Only(preset::Appearance::Dark), "faint_text");
+            }),
             ("settings-accent-set", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 set_colors(s, &[(preset::Appearance::Light, "accent", "#6526d4")]);

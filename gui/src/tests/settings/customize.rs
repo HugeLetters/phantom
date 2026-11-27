@@ -261,6 +261,7 @@ fn nothing_is_cut_at_960_and_640() {
             }
             let popup = element(&d, &format!("customize-tile-{half}-popup")).rect;
             assert!(popup[0] >= 0.0 && popup[0] + popup[2] <= width + 0.5, "at {width} pt the picker {popup:?} is inside");
+            super::popup_holds_its_parts(&d, &format!("customize-tile-{half}-popup"), width);
             for part in ["original", "follow"] {
                 let r = element(&d, &format!("customize-tile-{half}-{part}")).rect;
                 let inside = r[0] >= popup[0] - 0.5 && r[0] + r[2] <= popup[0] + popup[2] + 0.5;
@@ -268,4 +269,68 @@ fn nothing_is_cut_at_960_and_640() {
             }
         }
     }
+}
+
+/// The Customize sheet's steps are Original and Follow the look on the Light Tile.
+fn the_customize_sheet() -> super::SheetKind {
+    super::SheetKind {
+        before: |d| {
+            press(d, "preset-1-edit");
+            press(d, "edit-tone-join");
+            press(d, "edit-done");
+        },
+        before_value: |d| format!("{:?}", super::night_tone(d)),
+        open: |d| press(d, "app-icon-customize"),
+        step: |d, i| {
+            if !picker_open(d) {
+                press(d, "customize-tile-light-swatch");
+            }
+            press(d, if i % 2 == 0 { "customize-tile-light-follow" } else { "customize-tile-light-original" });
+        },
+        done: |d| press(d, "customize-done"),
+        value: |d| format!("{:?}", d.settings.state.app_icon.tints),
+        key: "customize-done",
+    }
+}
+
+/// Customize follows a sheet's undo rules (#87): ⌘Z takes only its own steps and it stays open;
+/// Done makes the visit one step, which one ⌘Z in the main window takes back.
+#[test]
+fn the_customize_sheets_undo_follows_a_sheets_rules() {
+    super::a_sheets_undo_follows_the_rules(the_customize_sheet());
+}
+
+/// A drag in the square is one step, Cancel leaves none, and Edit ▸ Undo names the visit.
+#[test]
+fn a_drag_is_one_step_and_cancel_leaves_none() {
+    let (mut d, _) = sheet(960.0);
+    press(&mut d, "customize-tile-light-swatch");
+    let (x, y) = d.settings.find("customize-tile-light-square").expect("its square");
+    d.settings.pointer_down(x, y);
+    d.settings.pointer_move(x + 8.0, y + 8.0);
+    d.settings.pointer_move(x + 16.0, y + 4.0);
+    d.settings.pointer_up(x + 16.0, y + 4.0);
+    d.settle();
+    assert!(matches!(tint(&d, Appearance::Light), Tint::Color(_)));
+    d.settings.key(super::cmd('z'));
+    d.settle();
+    assert_eq!(tint(&d, Appearance::Light), Tint::Original, "one ⌘Z takes the whole drag");
+    assert!(d.settings.state.sheet.as_ref().is_some_and(|s| s.customize.is_some()), "the sheet stays open");
+    // Cancel: put back, none of its steps left.
+    press(&mut d, "customize-tile-dark-swatch");
+    press(&mut d, "customize-tile-dark-follow");
+    press(&mut d, "customize-cancel");
+    d.settle();
+    assert_eq!(tint(&d, Appearance::Dark), Tint::Original);
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo", "no step");
+    // Done after a change: named.
+    press(&mut d, "app-icon-customize");
+    press(&mut d, "customize-tile-dark-swatch");
+    press(&mut d, "customize-tile-dark-follow");
+    press(&mut d, "customize-done");
+    d.settle();
+    assert_eq!(crate::changes::menu_title(&d.main.state), "Undo App Icon Colors Change");
+    d.settings.key(super::cmd('z'));
+    d.settle();
+    assert_eq!(tint(&d, Appearance::Dark), Tint::Original, "one ⌘Z takes the visit");
 }

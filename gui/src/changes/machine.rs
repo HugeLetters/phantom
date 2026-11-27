@@ -72,9 +72,14 @@ pub const KEPT: usize = SettingChange::KEPT;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppSetting {
     Icon,
-    Theme { key: &'static str, label: &'static str },
+    Theme {
+        key: &'static str,
+        label: &'static str,
+    },
     Presets,
     Edit,
+    /// The App icon's colors (Customize), a step of its sheet, or its Done folded into one.
+    Tints,
 }
 
 /// Whether ⌘Z took a change, and, for a service setting's, where its undo is.

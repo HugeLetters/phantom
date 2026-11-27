@@ -63,6 +63,8 @@ pub enum Was {
     Presets(Presets, PresetChange),
     /// The Look Presets as they were when the editor of `Target` opened: what its Done kept.
     Edit(Presets, Target),
+    /// The App icon's colors as they were: before a pick in Customize, or when it opened.
+    Tints(crate::theme::icon::IconSettings),
 }
 
 /// The Active Look Preset and the saved ones: what an undo of a change of them puts back whole.
@@ -366,11 +368,11 @@ pub fn menu_title(s: &Phantom) -> String {
         _ if editing => None,
         Some(Of::App(AppSetting::Presets)) => match top.and_then(|c| s.changes.was_of(c)) {
             Some(Was::Presets(_, change)) => Some(display::undo_named(&change.words())),
-            Some(Was::Icon(..) | Was::Theme(..) | Was::Edit(..)) | None => None,
+            Some(Was::Icon(..) | Was::Theme(..) | Was::Edit(..) | Was::Tints(..)) | None => None,
         },
         Some(Of::App(AppSetting::Edit)) => match top.and_then(|c| s.changes.was_of(c)) {
             Some(Was::Edit(_, target)) => Some(display::undo_named(&edit_words(target))),
-            Some(Was::Icon(..) | Was::Theme(..) | Was::Presets(..)) | None => None,
+            Some(Was::Icon(..) | Was::Theme(..) | Was::Presets(..) | Was::Tints(..)) | None => None,
         },
         // A saved preset's: named with it, "Undo Tone of Evening".
         Some(Of::App(AppSetting::Theme { label, .. }))
@@ -382,11 +384,12 @@ pub fn menu_title(s: &Phantom) -> String {
         Some(Of::Service(name)) => Some(display::undo_change(display::setting_short(name.key()))),
         Some(Of::App(AppSetting::Icon)) => match top.and_then(|c| s.changes.was_of(c)) {
             Some(Was::Icon(_, words)) => Some(display::undo_named(words)),
-            Some(Was::Theme(..) | Was::Presets(..) | Was::Edit(..)) | None => {
+            Some(Was::Theme(..) | Was::Presets(..) | Was::Edit(..) | Was::Tints(..)) | None => {
                 Some(display::undo_change(display::setting_short("app_icon")))
             }
         },
         Some(Of::App(AppSetting::Theme { label, .. })) => Some(display::undo_change(label)),
+        Some(Of::App(AppSetting::Tints)) => Some(display::undo_change(display::setting_short("app_icon_settings"))),
         // Sent, not listed yet: for a moment.
         Some(Of::Pending) | None => None,
     };
