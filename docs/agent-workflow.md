@@ -102,6 +102,14 @@
    talk) gets a short design note on the desk before it's built, so a design the user would drop
    is dropped at the note.
 
+   **A feature that keeps breeding bugs goes back to the user.** When fixes in one area keep
+   turning up new edge cases (each fix reveals another ordering, another state, another
+   special case), stop patching and put the feature itself on the desk: the cases seen so far,
+   what they have in common, and options to simplify the feature or change the model under it.
+   The user judges features by their UX and may well trade a nicety for a simpler, sturdier
+   model, as with dropping the automatic recovery of files for "surprises stop, Check decides"
+   (ADR 0014). The coordinator watches for this across issues, not only within one PR.
+
    **Show, don't tell** (PR *Shape* and desk questions alike; after humanlayer's `show-me`): pick
    the smallest view that makes the point, put it beside the one line it supports, and cut the
    preamble. Keep only the calls, types, files and states the reader needs to judge this change
