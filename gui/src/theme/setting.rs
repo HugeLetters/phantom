@@ -73,7 +73,7 @@ pub enum Kind {
         show: Show,
     },
     /// A color, `None` until set by hand: then the theme's own, worked out from the setting keyed
-    /// `follows` (a base color), or, with none, its default (which may differ by its Tone).
+    /// `follows` (a base color, or the derived one its rule takes), or, with none, its default (which may differ by its Tone).
     Color {
         follows: Option<&'static str>,
     },

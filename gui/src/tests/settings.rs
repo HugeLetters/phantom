@@ -4668,8 +4668,32 @@ fn a_swatch_says_what_it_follows() {
     assert_eq!(description(&d, "edit-faint_text-light-swatch").as_deref(), Some("#b0b0b0 · set by hand"));
 }
 
+/// Each derived color's swatch and its picker's Follow button name the color its rule works it
+/// out from (`follows`, which the palette's tests check against the rule): Faint text's, Muted
+/// text (#445).
+#[test]
+fn a_derived_colors_swatch_and_follow_button_name_what_it_follows() {
+    use crate::theme::phantom::palette::DERIVED;
+    let mut d = colors_sheet(960.0);
+    let of = |key: &str| crate::theme::phantom::palette::settings().find(|s| s.key == key).unwrap().label;
+    for c in &DERIVED {
+        let swatch = format!("edit-{}-light-swatch", c.key);
+        scroll_to(&mut d.settings, &swatch);
+        let help = d.settings.elements().into_iter().find(|e| !e.exiting && e.key.as_deref() == Some(&swatch)).and_then(|e| e.description);
+        let help = help.unwrap_or_else(|| panic!("{swatch}"));
+        assert!(help.ends_with(&format!(" · follows {}", of(c.follows))), "{}: {help}", c.key);
+        press(&mut d, &swatch);
+        let follow = format!("edit-{}-light-follow", c.key);
+        let text =
+            d.settings.elements().into_iter().find(|e| !e.exiting && e.path.contains(&follow) && e.text.is_some()).and_then(|e| e.text);
+        assert_eq!(text, Some(format!("Follow {}", of(c.follows))), "{}", c.key);
+        press_outside_picker(&mut d);
+    }
+    assert_eq!(of(DERIVED[1].follows), "Muted text");
+}
+
 /// Dragging in the square picks as it goes, set by hand, and is one step of Undo; a faint text
-/// that's hard to read warns under the picker; Follow Text puts it back to the rule.
+/// that's hard to read warns under the picker; Follow Muted text puts it back to the rule.
 #[test]
 fn a_drag_picks_and_follow_puts_it_back() {
     let mut d = colors_sheet(960.0);
@@ -4700,7 +4724,7 @@ fn a_drag_picks_and_follow_puts_it_back() {
     // Light at 30% from the top: hard to read on white.
     assert!(warned > 0);
     press(&mut d, "edit-faint_text-light-follow");
-    assert_eq!(color_of(&d, light, "faint_text"), Some(Value::Color(None)), "Follow Text");
+    assert_eq!(color_of(&d, light, "faint_text"), Some(Value::Color(None)), "Follow Muted text");
     d.settings.update(|_, tx| tx.blur());
     d.key(KeyEvent { key: Key::Command('z'), mods: Mods { cmd: true, ..Default::default() } });
     d.settle();
