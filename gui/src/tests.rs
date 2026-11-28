@@ -12,6 +12,7 @@ mod palette_settings;
 mod renaming;
 mod settings;
 mod space;
+mod surfaces;
 mod tooltips;
 mod undo;
 mod undo_place;

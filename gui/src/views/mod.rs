@@ -8,7 +8,7 @@ pub(crate) mod details;
 mod empty;
 pub(crate) mod file_menu;
 pub(crate) mod palette;
-mod row_menu;
+pub(crate) mod row_menu;
 pub mod settings;
 mod space;
 pub mod status_bar;
