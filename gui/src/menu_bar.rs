@@ -12,7 +12,7 @@
 use proto::TorrentId;
 use rune::Tx;
 
-use crate::commands::{self, InApp, OnTorrents, Selected, Spec, TOGGLE_KEY};
+use crate::commands::{self, Command, Context, Focus, InApp, Offer, OnTorrents, Spec, TOGGLE_KEY};
 use crate::model::layout::Column;
 use crate::model::{Phantom, selected_torrents};
 use crate::overlay::{self, Overlay};
@@ -94,9 +94,9 @@ pub enum Pick {
 /// The menu bar for the app as it is.
 pub fn build(s: &Phantom, around: Around) -> Vec<Menu> {
     let main = around.front == Some(Which::Main) && !around.panel;
-    let overlay = overlay::up(s);
+    let ctx = context(s, around);
     // The window's own commands: not behind a dialog, a menu or the palette.
-    let live = main && matches!(overlay, None | Some(Overlay::Notices));
+    let live = ctx.live();
     let settings = around.front == Some(Which::Settings) && !around.panel;
     let field = around.panel || if settings { s.settings_field } else { main && main_field(s) };
     vec![
@@ -115,14 +115,14 @@ pub fn build(s: &Phantom, around: Around) -> Vec<Menu> {
             name: "File",
             items: vec![
                 // Also with Settings in front, or with no window: the main one comes back for it.
-                app(InApp::AddFile, !around.panel && (live || !main)),
+                app(InApp::AddFile, &ctx),
                 Item::Separator,
                 own("close-window", "Close Window", Keys::Matched(letter('w')), around.front.is_some() || around.panel, Pick::CloseWindow),
             ],
         },
         edit(s, field, live, settings),
-        torrent(s, live, field, main && s.files_focused && s.mounted.offers(commands::OnFiles::MoveToTrash)),
-        view(s, live),
+        torrent(s, &ctx, main && s.files_focused && s.mounted.offers(commands::OnFiles::MoveToTrash)),
+        view(s, live, around),
         Menu {
             name: "Window",
             items: vec![
@@ -134,6 +134,26 @@ pub fn build(s: &Phantom, around: Around) -> Vec<Menu> {
         },
         Menu { name: "Help", items: Vec::new() },
     ]
+}
+
+/// The main window's context as the menu bar sees it: what has the keyboard, the disk looked at when
+/// an item is picked, not while the menu is built.
+fn context(s: &Phantom, around: Around) -> Context<'_> {
+    let focus = if around.panel {
+        Focus::Panel
+    } else if around.front != Some(Which::Main) {
+        Focus::Away
+    } else if !matches!(overlay::up(s), None | Some(Overlay::Notices)) {
+        Focus::Modal
+    } else if main_field(s) {
+        Focus::Field
+    } else {
+        Focus::List
+    };
+    let mut ctx = Context::main(s, focus);
+    ctx.selected.there = true;
+    ctx.palette = crate::model::palette::opens(s);
+    ctx
 }
 
 /// A text field of the main window has the focus.
@@ -165,17 +185,15 @@ fn edit(s: &Phantom, field: bool, live: bool, settings: bool) -> Menu {
     }
 }
 
-fn torrent(s: &Phantom, live: bool, field: bool, files: bool) -> Menu {
+/// `files`: the file list has the focus.
+fn torrent(s: &Phantom, ctx: &Context, files: bool) -> Menu {
     use OnTorrents::{CancelCheck, CancelMove, Check, Delete, MoveTo, Open, Pause, Remove, Rename, Reveal};
     let ids = selected_torrents(&s.table);
-    // The disk is looked at when the item is picked, not while the menu is built.
-    let selected = Selected::of(&s.table, &s.torrents, true);
     let item = |c: OnTorrents, keys: Option<Chord>| {
-        // ⌫ and ⌘⌫ are a focused field's, so the items showing them are greyed then; the file list's
-        // too, so they show no key then (and AppKit matches none), but still work picked.
-        let fields = field && matches!(c, Remove | Delete);
+        // ⌫ and ⌘⌫ are the file list's while it has the focus, so the items showing them show no
+        // key then (and AppKit matches none), but still work picked.
         let keys = if files && matches!(c, Remove | Delete) { None } else { keys };
-        let enabled = live && !fields && s.mounted.offers(c) && c.available(&selected);
+        let enabled = Command::from(c).offer(ctx) == Offer::Enabled;
         let Spec { id, name, .. } = c.spec();
         own(id, &title_case(name), keys.map_or(Keys::None, Keys::Shown), enabled, Pick::Torrents(c, ids.clone()))
     };
@@ -200,7 +218,9 @@ fn torrent(s: &Phantom, live: bool, field: bool, files: bool) -> Menu {
     }
 }
 
-fn view(s: &Phantom, live: bool) -> Menu {
+/// The palette's item is the front window's: Settings' opens there ([`run`]), as its palette offers
+/// something, which it tells the main window (`settings_palette`).
+fn view(s: &Phantom, live: bool, around: Around) -> Menu {
     let shown = s.drawn_columns.borrow();
     let columns = crate::views::columns_menu::wanted(s, &shown);
     let tick = |prefix: &str, c: Column, enabled, checked, pick| Own {
@@ -219,8 +239,20 @@ fn view(s: &Phantom, live: bool) -> Menu {
         items: vec![
             Item::Submenu { title: "Columns", enabled: live, items: columns },
             Item::Submenu { title: "Sort By", enabled: live, items: sorts },
-            app(InApp::Palette, live),
+            app(InApp::Palette, &palette_context(s, around)),
         ],
+    }
+}
+
+/// Where the palette's item is: the main window's context, or with Settings in front, Settings', as
+/// it last told.
+fn palette_context(s: &Phantom, around: Around) -> Context<'_> {
+    match around.front {
+        Some(Which::Settings) => {
+            let focus = if around.panel { Focus::Panel } else { Focus::List };
+            Context { palette: s.settings_palette, ..Context::empty(Which::Settings, focus) }
+        }
+        Some(Which::Main) | None => context(s, around),
     }
 }
 
@@ -232,6 +264,12 @@ pub fn run(s: &mut Phantom, pick: &Pick, around: Around, tx: &mut Tx) {
     }
     match pick {
         Pick::Settings => s.settings.post(|w, _| crate::model::settings::open(w)),
+        // In front, Settings opens its own palette.
+        Pick::App(InApp::Palette) if around.front == Some(Which::Settings) => s.settings.post(|w, _| {
+            if crate::model::palette::opens(w) {
+                crate::model::palette::open(w);
+            }
+        }),
         Pick::App(command) => {
             if *command == InApp::AddFile && around.front != Some(Which::Main) {
                 s.window.raise();
@@ -270,8 +308,9 @@ fn own(id: &str, title: &str, keys: Keys, enabled: bool, pick: Pick) -> Item {
     Item::Own(Own { id: id.into(), title: title.into(), keys, enabled, checked: false, pick })
 }
 
-fn app(command: InApp, enabled: bool) -> Item {
+fn app(command: InApp, ctx: &Context) -> Item {
     let Spec { id, name, keys, .. } = command.spec();
+    let enabled = Command::from(command).offer(ctx) == Offer::Enabled;
     own(id, &title_case(name), keys.first().map_or(Keys::None, |k| Keys::Matched(*k)), enabled, Pick::App(command))
 }
 

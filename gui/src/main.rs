@@ -11,6 +11,7 @@
 mod bar;
 mod changes;
 mod commands;
+mod listed;
 mod menu;
 mod menu_bar;
 mod model;
@@ -362,13 +363,19 @@ fn settings_poll(s: &mut SettingsWindow, _: f64, tx: &mut Tx) -> bool {
 }
 
 /// Settings' keys: ⌘W closes it (a Look Preset's sheet first), as Escape does (its page's own, see `views::settings`); ⌘, raises
-/// it; ⌘Z, once no field took it as its text's, is the main window's (#221, #255): the newest change,
-/// whichever; ⌘Q quits; nothing else of the main window's shortcuts.
+/// it; ⌘P opens the command palette (where the sheet over it leaves it); ⌘Z, once no field took it as
+/// its text's, is the main window's (#221, #255): the newest change, whichever; ⌘Q quits; nothing else
+/// of the main window's shortcuts.
 fn settings_on_key(s: &mut SettingsWindow, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Command(',') => model::settings::open(s),
         Key::Command('w') => model::settings::close_front(s),
         Key::Command('q') => tx.quit(),
+        _ if shortcuts::command_of(ev) == Some(commands::InApp::Palette.into()) => {
+            if model::palette::opens(s) {
+                model::palette::open(s);
+            }
+        }
         _ if shortcuts::command_of(ev) == Some(commands::InApp::Undo.into()) => s.main.post(|s, _| changes::press(s)),
         _ => return false,
     }
@@ -1220,6 +1227,23 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
                 set_colors(s, &[(preset::Appearance::Light, "accent", "#c2410c"), (preset::Appearance::Dark, "accent", "#c2410c")]);
                 model::settings::presets::edit_active(s);
+            }),
+            // The command palette over Settings (#434): on General, nothing typed; over the Active
+            // look's sheet with its Text changed (Restore Defaults is offered); the same, for a
+            // script to type in.
+            ("settings-palette", |s| {
+                settings_scene(s, Tab::General, demo_settings(false));
+                model::palette::open(s);
+                s.palette.query.focused = true;
+            }),
+            ("settings-palette-sheet", |s| {
+                settings_scene(s, Tab::Appearance, demo_settings(false));
+                // A color that isn't the accent: the accent is the focus ring's, which a still
+                // of the palette's field should show as the window's own.
+                set_colors(s, &[(preset::Appearance::Light, "text", "#2a2a40"), (preset::Appearance::Dark, "text", "#dcdcf0")]);
+                model::settings::presets::edit_active(s);
+                model::palette::open(s);
+                s.palette.query.focused = true;
             }),
             // Everything at its defaults: Restore Defaults greyed.
             ("settings-restore-defaults", |s| {

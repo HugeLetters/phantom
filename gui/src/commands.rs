@@ -1,9 +1,11 @@
-//! Every command the app offers, in one list (#33): each with its name, the icon a theme draws for
-//! it, its keys, and when it's available. The row menu, the file menu, the command palette, the menu
-//! bar (`menu_bar`), the empty list's hint and the keys (`shortcuts`) all read from here, so a name,
-//! an icon or a key can't differ between two places.
+//! Every command the app offers, each declared once (#33, #486): its name, the icon a theme draws
+//! for it, its keys, its synonyms, where it can appear at all ([`Scope`]), when it can be done there
+//! (`when`) and what it does (`run`), in one [`Decl`]. The menu bar (`menu_bar`), the row menu, the
+//! file menu, the command palette, the empty list's hint, the tooltips and the keys (`shortcuts`)
+//! all read it, so a name, an icon, a key or a rule can't differ between two places. A new command
+//! is a variant and its arm in its kind's `decl`, in this file alone.
 //!
-//! There are three kinds, each its own type, so a place offers only its own kind (the row menu holds
+//! There are four kinds, each its own type, so a place offers only its own kind (the row menu holds
 //! [`OnTorrents`], the file menu [`OnFiles`]):
 //!
 //! | Kind           | Acts on                                    | Offered by                      |
@@ -11,24 +13,38 @@
 //! | [`OnTorrents`] | the selected torrents                      | the row menu, the palette, keys |
 //! | [`OnFiles`]    | the selected files of the pane's torrent   | the file menu, keys in the list |
 //! | [`InApp`]      | nothing selected: the app                  | the palette, the toolbar, keys  |
+//! | [`OnSheet`]    | the Look sheet open over Settings          | the palette, in Settings        |
 //!
-//! What's available rests on three things: the part of the screen that offers it being shown
-//! ([`Mounted`]: each view registers its commands as it's built, so a theme's screen that leaves one
-//! out leaves it offered nowhere), the selection, and what the service lists as each torrent's
-//! actions (`proto::Actions`), never on a guess: Open and Reveal also on the disk, looked at once as
-//! the menu or the palette opens (`Phantom::target_there`, #307). What a command does is Phantom's
-//! (`model`, [`run_on_torrents`]), never a view's.
+//! Where a command is offered is graded ([`Command::offer`], an [`Offer`]) from the [`Context`] a
+//! surface is in:
+//!
+//! | `scope` holds | `when` holds | Offer      | Palette | Menu bar | Row and file menus |
+//! |---------------|--------------|------------|---------|----------|--------------------|
+//! | no            |              | `Hidden`   | –       | –        | –                  |
+//! | yes           | no           | `Disabled` | –       | greyed   | –                  |
+//! | yes           | yes, or none | `Enabled`  | listed  | enabled  | listed             |
+//!
+//! `when` rests on three things: the part of the screen that offers it being shown ([`Mounted`]:
+//! each view registers its commands as it's built, so a theme's screen that leaves one out leaves it
+//! offered nowhere), the selection, and what the service lists as each torrent's actions
+//! (`proto::Actions`), never on a guess: Open and Reveal also on the disk, looked at once as the
+//! menu or the palette opens (`Phantom::target_there`, #307). What a command does is Phantom's
+//! (`model`), never a view's.
 
-use proto::{Action, Priority, TorrentInfo};
+use proto::{Action, Priority, TorrentCommand, TorrentInfo};
+use rune::Tx;
 use rune_kit::TableState;
 
+use crate::listed::listed_enum;
+use crate::model::settings::{SettingsWindow, Side, Tab};
 use crate::model::{Phantom, details_torrent, selected_in_pane, selected_torrents};
 use crate::shortcuts::{Chord, Named, chord};
+use crate::theme::preset::{Appearance, LookPreset};
 use crate::ui::Icon;
+use crate::windows::Which;
 
-/// What a command is, wherever it's offered.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Spec {
+/// A command, declared once: `C` is its kind, `H` the window it acts in.
+pub struct Decl<C: 'static, H: 'static> {
     /// What a test, a script or a menu picks it by.
     pub id: &'static str,
     /// Its name: what the palette filters by, and the menus show unless they word it for the
@@ -39,6 +55,30 @@ pub struct Spec {
     pub icon: Option<Icon>,
     /// Its keys, the one shown first; none for most.
     pub keys: &'static [Chord],
+    /// Other names the palette finds it by, never shown.
+    pub synonyms: &'static [&'static str],
+    /// Where it can appear at all.
+    pub scope: Scope,
+    /// Whether it can be done now, where it appears; none: always.
+    pub when: Option<fn(&Context, C) -> bool>,
+    /// What it does.
+    pub run: fn(&mut H, C, &mut Tx),
+}
+
+impl<C, H> Decl<C, H> {
+    pub fn spec(&self) -> Spec {
+        Spec { id: self.id, name: self.name, icon: self.icon, keys: self.keys, synonyms: self.synonyms }
+    }
+}
+
+/// What every surface shows of a command, whatever its kind: the window-free part of its [`Decl`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spec {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub icon: Option<Icon>,
+    pub keys: &'static [Chord],
+    pub synonyms: &'static [&'static str],
 }
 
 impl Spec {
@@ -46,6 +86,199 @@ impl Spec {
     pub fn hint(&self) -> Option<String> {
         self.keys.first().map(|k| k.hint())
     }
+}
+
+listed_enum! {
+    /// What's open over the Settings window, the topmost; the main window has none.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Sheet {
+        Closed,
+        /// A Look Preset's editor sheet.
+        Look,
+        /// The App icon's sheet.
+        AppIcon,
+        /// The App icon's Customize, over its sheet.
+        Customize,
+        /// Save as…, naming the Active look.
+        SaveAs,
+    }
+}
+
+/// Where an entry (a command, a setting, a place) can appear at all: in these windows, with one of
+/// these open over it. Plain data, so a test can list every place an entry can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scope {
+    pub windows: &'static [Which],
+    pub sheets: &'static [Sheet],
+}
+
+impl Scope {
+    /// The main window: the selection's commands and the app's.
+    pub const MAIN: Scope = Scope { windows: &[Which::Main], sheets: &[Sheet::Closed] };
+    /// Both windows, with nothing over Settings: what's behind a sheet isn't offered, the sheet
+    /// being modal.
+    pub const CLOSED: Scope = Scope { windows: &Which::ALL, sheets: &[Sheet::Closed] };
+    /// Both windows, and over the Look sheet, which edits it: a setting of the Look.
+    pub const LOOK: Scope = Scope { windows: &Which::ALL, sheets: &[Sheet::Closed, Sheet::Look] };
+    /// The Look sheet's own.
+    pub const LOOK_SHEET: Scope = Scope { windows: &[Which::Settings], sheets: &[Sheet::Look] };
+    /// Anywhere.
+    pub const EVERYWHERE: Scope = Scope { windows: &Which::ALL, sheets: &Sheet::ALL };
+
+    pub fn holds(&self, window: Which, sheet: Sheet) -> bool {
+        self.windows.contains(&window) && self.sheets.contains(&sheet)
+    }
+}
+
+/// How a surface offers a command in a context ([`Command::offer`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    /// Out of its scope: shown nowhere.
+    Hidden,
+    /// In its scope, but it can't be done now: the menu bar greys it, the rest leave it out.
+    Disabled,
+    Enabled,
+}
+
+/// What has the keyboard, as the menu bar sees it; the palette and the menus, which are what has
+/// it while they're open, are in [`Focus::List`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    /// The window is in front, nothing over it but the notices.
+    List,
+    /// As `List`, a text field of the window having the focus: ⌫ and ⌘⌫ are its own.
+    Field,
+    /// A dialog, a menu or the palette is over the window.
+    Modal,
+    /// A panel of macOS's (a file picker, About) has the keyboard.
+    Panel,
+    /// Another window is in front, or none.
+    Away,
+}
+
+/// Where a surface is, and what's there: what every `when` reads.
+pub struct Context<'a> {
+    pub window: Which,
+    /// Settings' tab.
+    pub tab: Tab,
+    pub sheet: Sheet,
+    pub focus: Focus,
+    /// The main window's selected torrents.
+    pub selected: Selected<'a>,
+    /// The selected files of the torrent the details pane shows, and whether the one Open and
+    /// Reveal show was on disk at the last look.
+    pub files: Option<(&'a TorrentInfo, Vec<&'a proto::File>)>,
+    pub file_there: bool,
+    /// The commands the screen shown offers; none: every one.
+    pub mounted: Option<&'a Mounted>,
+    /// There's a change to take back.
+    pub undo: bool,
+    /// The window's palette has an entry to offer.
+    pub palette: bool,
+    /// The Look sheet's preset and rows, while it's open.
+    pub look: Option<LookSheet>,
+}
+
+/// What the Look sheet over Settings shows: its preset, and with one theme in both halves each row
+/// by its key and name, joined or not (the Theme row first).
+pub struct LookSheet {
+    pub preset: LookPreset,
+    pub rows: Option<Vec<(&'static str, &'static str, bool)>>,
+}
+
+impl<'a> Context<'a> {
+    /// Nowhere in particular: nothing selected, nothing open, nothing to undo.
+    pub fn empty(window: Which, focus: Focus) -> Context<'a> {
+        Context {
+            window,
+            tab: Tab::default(),
+            sheet: Sheet::Closed,
+            focus,
+            selected: Selected { torrents: Vec::new(), there: false },
+            files: None,
+            file_there: false,
+            mounted: None,
+            undo: false,
+            palette: false,
+            look: None,
+        }
+    }
+
+    /// The main window's, with `focus`: the selection, the pane's files, what's mounted.
+    pub fn main(s: &'a Phantom, focus: Focus) -> Context<'a> {
+        Context {
+            selected: Selected::of(&s.table, &s.torrents, s.target_there),
+            files: selected_in_pane(&s.table, &s.torrents, &s.pane),
+            file_there: s.file_there,
+            mounted: Some(&s.mounted),
+            undo: s.changes.state.top().is_some(),
+            ..Context::empty(Which::Main, focus)
+        }
+    }
+
+    /// The window has the keyboard and nothing's over it.
+    pub fn live(&self) -> bool {
+        matches!(self.focus, Focus::List | Focus::Field)
+    }
+
+    /// The screen shown offers `command`: a view registered it.
+    pub fn offers(&self, command: impl Into<Command>) -> bool {
+        self.mounted.is_none_or(|m| m.offers(command))
+    }
+
+    /// A torrent command, live and mounted, that some selected torrent does.
+    pub fn any(&self, c: OnTorrents) -> bool {
+        self.live() && self.offers(c) && self.selected.torrents.iter().any(|t| does(t, c))
+    }
+
+    /// One that the one torrent selected does.
+    pub fn one(&self, c: OnTorrents) -> bool {
+        self.selected.torrents.len() == 1 && self.all(c)
+    }
+
+    /// One that every selected torrent does, some being selected.
+    pub fn all(&self, c: OnTorrents) -> bool {
+        let torrents = &self.selected.torrents;
+        self.live() && self.offers(c) && !torrents.is_empty() && torrents.iter().all(|t| does(t, c))
+    }
+
+    /// A file command, live and mounted, that the pane's torrent does with files selected.
+    pub fn pane(&self, c: OnFiles) -> bool {
+        self.live() && self.offers(c) && self.files.as_ref().is_some_and(|(t, _)| t.actions.does(c.action()))
+    }
+
+    /// Exactly one file selected, on disk (#276: what's at its path, not what it downloaded).
+    pub fn one_file_on_disk(&self) -> bool {
+        self.files.as_ref().is_some_and(|(_, files)| matches!(files.as_slice(), [f] if on_disk(f)))
+    }
+
+    pub fn some_file_on_disk(&self) -> bool {
+        self.files.as_ref().is_some_and(|(_, files)| files.iter().any(|f| on_disk(f)))
+    }
+
+    /// The Look sheet's preset has something to restore in `side`.
+    pub fn restorable(&self, side: Side) -> bool {
+        self.look.as_ref().is_some_and(|l| crate::model::settings::restorable(&l.preset, side))
+    }
+
+    /// The Look sheet shows a theme in each half.
+    pub fn two_themes(&self) -> bool {
+        self.look.as_ref().is_some_and(|l| l.preset.light.theme.id() != l.preset.dark.theme.id())
+    }
+
+    /// Whether the Look sheet's row `key` is joined; none while it shows no such row.
+    pub fn joined(&self, key: &str) -> Option<bool> {
+        let rows = self.look.as_ref()?.rows.as_ref()?;
+        rows.iter().find(|(k, ..)| *k == key).map(|(.., joined)| *joined)
+    }
+}
+
+fn does(t: &TorrentInfo, c: OnTorrents) -> bool {
+    c.action().is_none_or(|a| t.actions.does(a))
+}
+
+fn on_disk(f: &proto::File) -> bool {
+    f.on_disk && !f.missing
 }
 
 const OPEN_KEYS: &[Chord] = &[chord(Named::Letter('o'), true, false), chord(Named::Return, false, false)];
@@ -59,58 +292,174 @@ const ADD_FILE_KEYS: &[Chord] = &[chord(Named::Letter('a'), true, true)];
 const UNDO_KEYS: &[Chord] = &[chord(Named::Letter('z'), true, false)];
 const PALETTE_KEYS: &[Chord] = &[chord(Named::Letter('p'), true, false)];
 
-/// What can be done to the selected torrents, in the order the row menu and the palette list them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnTorrents {
-    Resume,
-    Pause,
-    Check,
-    CancelCheck,
-    CancelMove,
-    Open,
-    Reveal,
-    MoveTo,
-    Rename,
-    /// Not the service's to decide: the link is made from what the listing has.
-    CopyMagnet,
-    /// Remove (keeping files), at once.
-    Remove,
-    Delete,
+listed_enum! {
+    /// What can be done to the selected torrents, in the order the row menu and the palette list them.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OnTorrents {
+        Resume,
+        Pause,
+        Check,
+        CancelCheck,
+        CancelMove,
+        Open,
+        Reveal,
+        MoveTo,
+        Rename,
+        /// Not the service's to decide: the link is made from what the listing has.
+        CopyMagnet,
+        /// Remove (keeping files), at once.
+        Remove,
+        Delete,
+    }
+}
+
+/// Sends `what` for the selected torrents `action` applies to.
+fn send(s: &mut Phantom, action: Action, what: TorrentCommand) {
+    use crate::model::{command, selected_for};
+    command(&mut *s.service, &selected_for(&s.table, &s.torrents, action), what)
+}
+
+/// The one torrent selected, for Open, Reveal and Rename….
+fn single(s: &Phantom) -> Option<proto::TorrentId> {
+    details_torrent(&s.table, &s.torrents).map(|t| t.id)
 }
 
 impl OnTorrents {
-    pub const ALL: [OnTorrents; 12] = [
-        OnTorrents::Resume,
-        OnTorrents::Pause,
-        OnTorrents::Check,
-        OnTorrents::CancelCheck,
-        OnTorrents::CancelMove,
-        OnTorrents::Open,
-        OnTorrents::Reveal,
-        OnTorrents::MoveTo,
-        OnTorrents::Rename,
-        OnTorrents::CopyMagnet,
-        OnTorrents::Remove,
-        OnTorrents::Delete,
-    ];
+    /// Pause, Resume, Check, Cancel check, Cancel move and Move to… (#270: those that can't move
+    /// are skipped) are offered for the selected torrents they apply to; Remove and Delete only
+    /// where they apply to every one, as they act on all (and not while a field has ⌫ and ⌘⌫);
+    /// Open, Reveal, Rename… and Copy magnet link for exactly one, Open and Reveal only while its
+    /// location is on disk.
+    pub fn decl(self) -> Decl<OnTorrents, Phantom> {
+        use crate::platform::{Show, show_torrent};
+        use client::display;
+        let (scope, synonyms) = (Scope::MAIN, &[] as &[&str]);
+        match self {
+            OnTorrents::Resume => Decl {
+                id: "resume",
+                name: "Resume",
+                icon: Some(Icon::Resume),
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.any(c)),
+                run: |s, _, _| send(s, Action::Resume, TorrentCommand::Resume),
+            },
+            OnTorrents::Pause => Decl {
+                id: "pause",
+                name: "Pause",
+                icon: Some(Icon::Pause),
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.any(c)),
+                run: |s, _, _| send(s, Action::Pause, TorrentCommand::Pause),
+            },
+            OnTorrents::Check => Decl {
+                id: "check",
+                name: "Check",
+                icon: Some(Icon::Verify),
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.any(c)),
+                run: |s, _, _| send(s, Action::Check, TorrentCommand::Check),
+            },
+            OnTorrents::CancelCheck => Decl {
+                id: "cancel-check",
+                name: display::cancel_check(),
+                icon: Some(Icon::CancelCheck),
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.any(c)),
+                run: |s, _, _| send(s, Action::CancelCheck, TorrentCommand::CancelCheck),
+            },
+            OnTorrents::CancelMove => Decl {
+                id: "cancel-move",
+                name: display::cancel_move(),
+                icon: Some(Icon::CancelMove),
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.any(c)),
+                run: |s, _, _| send(s, Action::CancelMove, TorrentCommand::CancelMove),
+            },
+            OnTorrents::Open => Decl {
+                id: "open",
+                name: "Open",
+                icon: Some(Icon::Open),
+                keys: OPEN_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.selected.there && ctx.one(c)),
+                run: |s, _, _| single(s).into_iter().for_each(|id| show_torrent(s, id, Show::Open)),
+            },
+            OnTorrents::Reveal => Decl {
+                id: "reveal",
+                name: display::reveal_in_finder(),
+                icon: Some(Icon::Reveal),
+                keys: REVEAL_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.selected.there && ctx.one(c)),
+                run: |s, _, _| single(s).into_iter().for_each(|id| show_torrent(s, id, Show::Reveal)),
+            },
+            OnTorrents::MoveTo => Decl {
+                id: "move",
+                name: display::move_to(),
+                icon: Some(Icon::MoveTo),
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.any(c)),
+                run: |s, _, tx| crate::model::moving::move_to(s, tx),
+            },
+            OnTorrents::Rename => Decl {
+                id: "rename",
+                name: display::rename(),
+                icon: Some(Icon::Rename),
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.one(c)),
+                run: |s, _, _| single(s).into_iter().for_each(|id| crate::model::renaming::open(s, id)),
+            },
+            OnTorrents::CopyMagnet => Decl {
+                id: "copy-magnet",
+                name: "Copy magnet link",
+                icon: Some(Icon::Copy),
+                keys: COPY_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.one(c)),
+                run: |s, _, tx| crate::model::copy_magnet(s, tx),
+            },
+            OnTorrents::Remove => Decl {
+                id: "remove",
+                name: "Remove",
+                icon: Some(Icon::Remove),
+                keys: REMOVE_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.focus != Focus::Field && ctx.all(c)),
+                run: |s, _, _| crate::model::remove_selected(s, false),
+            },
+            OnTorrents::Delete => Decl {
+                id: "delete",
+                name: "Delete",
+                icon: Some(Icon::Trash),
+                keys: DELETE_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.focus != Focus::Field && ctx.all(c)),
+                run: |s, _, _| crate::model::remove_selected(s, true),
+            },
+        }
+    }
 
     pub fn spec(self) -> Spec {
-        use client::display;
-        let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
-            OnTorrents::Resume => ("resume", "Resume", Some(Icon::Resume), &[]),
-            OnTorrents::Pause => ("pause", "Pause", Some(Icon::Pause), &[]),
-            OnTorrents::Check => ("check", "Check", Some(Icon::Verify), &[]),
-            OnTorrents::CancelCheck => ("cancel-check", display::cancel_check(), Some(Icon::CancelCheck), &[]),
-            OnTorrents::CancelMove => ("cancel-move", display::cancel_move(), Some(Icon::CancelMove), &[]),
-            OnTorrents::Open => ("open", "Open", Some(Icon::Open), OPEN_KEYS),
-            OnTorrents::Reveal => ("reveal", display::reveal_in_finder(), Some(Icon::Reveal), REVEAL_KEYS),
-            OnTorrents::MoveTo => ("move", display::move_to(), Some(Icon::MoveTo), &[]),
-            OnTorrents::Rename => ("rename", display::rename(), Some(Icon::Rename), &[]),
-            OnTorrents::CopyMagnet => ("copy-magnet", "Copy magnet link", Some(Icon::Copy), COPY_KEYS),
-            OnTorrents::Remove => ("remove", "Remove", Some(Icon::Remove), REMOVE_KEYS),
-            OnTorrents::Delete => ("delete", "Delete", Some(Icon::Trash), DELETE_KEYS),
-        };
-        Spec { id, name, icon, keys }
+        self.decl().spec()
     }
 
     /// The service's action it rests on: the torrents it's offered for are those whose actions do it.
@@ -129,25 +478,6 @@ impl OnTorrents {
             OnTorrents::Remove => Action::Remove,
             OnTorrents::Delete => Action::Delete,
         })
-    }
-
-    /// Whether it's offered for `selected`: Pause, Resume, Check, Cancel check and Cancel move for
-    /// those they apply to, Move to… too (#270: those that can't move are skipped); Remove and
-    /// Delete only where they apply to every one, as they act on all; Open, Reveal, Rename… and Copy
-    /// magnet link for exactly one, Open and Reveal only while its location is on disk.
-    pub fn available(self, selected: &Selected) -> bool {
-        let torrents = &selected.torrents;
-        let does = |t: &&TorrentInfo| self.action().is_none_or(|a| t.actions.does(a));
-        let single = torrents.len() == 1;
-        match self {
-            OnTorrents::Resume | OnTorrents::Pause | OnTorrents::Check | OnTorrents::CancelCheck | OnTorrents::CancelMove => {
-                torrents.iter().any(does)
-            }
-            OnTorrents::MoveTo => torrents.iter().any(does),
-            OnTorrents::Open | OnTorrents::Reveal => single && selected.there && torrents.iter().all(does),
-            OnTorrents::Rename | OnTorrents::CopyMagnet => single && torrents.iter().all(does),
-            OnTorrents::Remove | OnTorrents::Delete => !torrents.is_empty() && torrents.iter().all(does),
-        }
     }
 
     /// As the menus and the palette word it for `n` torrents: Remove and Delete with the count, and
@@ -186,11 +516,11 @@ impl<'a> Selected<'a> {
     }
 }
 
-/// The torrent commands available for the selection, in the list's order: those the screen shown
-/// offers.
+/// The torrent commands available for the selection, in the list's order: those Enabled in the
+/// window's list.
 pub fn on_torrents(s: &Phantom) -> Vec<OnTorrents> {
-    let selected = Selected::of(&s.table, &s.torrents, s.target_there);
-    OnTorrents::ALL.into_iter().filter(|c| s.mounted.offers(*c) && c.available(&selected)).collect()
+    let ctx = Context::main(s, Focus::List);
+    OnTorrents::ALL.into_iter().filter(|c| Command::from(*c).offer(&ctx) == Offer::Enabled).collect()
 }
 
 /// What Space and Torrent ▸ Resume or Pause do to the selection, by its focused torrent (the
@@ -232,48 +562,95 @@ impl Mounted {
     }
 }
 
-/// What can be done to the selected files of the torrent the details pane shows (#151).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnFiles {
-    Open,
-    Reveal,
-    /// Sets every selected file to this priority; checked while they all have it.
-    Priority(Priority),
-    /// Sets them Off, then moves those on disk to the Trash.
-    MoveToTrash,
+listed_enum! {
+    /// What can be done to the selected files of the torrent the details pane shows (#151).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OnFiles {
+        Open,
+        Reveal,
+        /// Sets every selected file to this priority; checked while they all have it.
+        Priority(Priority) => [Priority::Normal, Priority::Off],
+        /// Sets them Off, then moves those on disk to the Trash.
+        MoveToTrash,
+    }
 }
 
 impl OnFiles {
-    pub const ALL: [OnFiles; 5] =
-        [OnFiles::Open, OnFiles::Reveal, OnFiles::Priority(Priority::Normal), OnFiles::Priority(Priority::Off), OnFiles::MoveToTrash];
-
     /// The same keys as the torrent commands that do the same to a torrent: the file list keeps them
-    /// for files while it has the focus.
-    pub fn spec(self) -> Spec {
+    /// for files while it has the focus. Offered only for what the service lists for the torrent
+    /// (Set priority, and Move to Trash, which does what Set priority does, while a selected file is
+    /// on disk: it moves only those), Open and Reveal for exactly one file that's on disk, as the
+    /// service says and as the disk looked at when the menu opened says (#307).
+    pub fn decl(self) -> Decl<OnFiles, Phantom> {
+        use crate::model::{set_selected_files, trash_selected_files};
+        use crate::platform::{Show, show_file};
         use client::display;
-        let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
-            OnFiles::Open => ("open", "Open", Some(Icon::Open), OPEN_KEYS),
-            OnFiles::Reveal => ("reveal", display::reveal_in_finder(), Some(Icon::Reveal), REVEAL_KEYS),
-            OnFiles::Priority(Priority::Normal) => ("priority-normal", display::priority(Priority::Normal), None, &[]),
-            OnFiles::Priority(Priority::Off) => ("priority-off", display::priority(Priority::Off), None, &[]),
-            OnFiles::MoveToTrash => ("trash", display::move_to_trash(), Some(Icon::Trash), DELETE_KEYS),
-        };
-        Spec { id, name, icon, keys }
+        let (scope, synonyms) = (Scope::MAIN, &[] as &[&str]);
+        match self {
+            OnFiles::Open => Decl {
+                id: "open",
+                name: "Open",
+                icon: Some(Icon::Open),
+                keys: OPEN_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.file_there && ctx.one_file_on_disk() && ctx.pane(c)),
+                run: |s, _, _| show_file(s, Show::Open),
+            },
+            OnFiles::Reveal => Decl {
+                id: "reveal",
+                name: display::reveal_in_finder(),
+                icon: Some(Icon::Reveal),
+                keys: REVEAL_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.file_there && ctx.one_file_on_disk() && ctx.pane(c)),
+                run: |s, _, _| show_file(s, Show::Reveal),
+            },
+            OnFiles::Priority(Priority::Normal) => Decl {
+                id: "priority-normal",
+                name: display::priority(Priority::Normal),
+                icon: None,
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.pane(c)),
+                run: |s, _, _| set_selected_files(s, Priority::Normal),
+            },
+            OnFiles::Priority(Priority::Off) => Decl {
+                id: "priority-off",
+                name: display::priority(Priority::Off),
+                icon: None,
+                keys: &[],
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.pane(c)),
+                run: |s, _, _| set_selected_files(s, Priority::Off),
+            },
+            OnFiles::MoveToTrash => Decl {
+                id: "trash",
+                name: display::move_to_trash(),
+                icon: Some(Icon::Trash),
+                keys: DELETE_KEYS,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| ctx.some_file_on_disk() && ctx.pane(c)),
+                run: |s, _, _| trash_selected_files(s),
+            },
+        }
     }
 
-    /// Whether it's offered for the selected files of `torrent`: only what the service lists for
-    /// the torrent (Set priority, and Move to Trash, which does what Set priority does, while a
-    /// selected file is on disk: it moves only those), and Open and Reveal for exactly one file
-    /// that's on disk, as the service says and as `there` says: the disk looked at when the menu
-    /// opened (#307). On disk is the service's word for it (#276): what's at the file's path, not
-    /// what it downloaded.
-    pub fn available(self, torrent: &TorrentInfo, files: &[&proto::File], there: bool) -> bool {
-        let on_disk = |f: &&proto::File| f.on_disk && !f.missing;
+    pub fn spec(self) -> Spec {
+        self.decl().spec()
+    }
+
+    /// The service's action it rests on.
+    pub fn action(self) -> Action {
         match self {
-            OnFiles::Open => there && matches!(files, [f] if on_disk(f)) && torrent.actions.does(Action::Open),
-            OnFiles::Reveal => there && matches!(files, [f] if on_disk(f)) && torrent.actions.does(Action::Reveal),
-            OnFiles::Priority(_) => torrent.actions.does(Action::SetPriority),
-            OnFiles::MoveToTrash => files.iter().any(on_disk) && torrent.actions.does(Action::TrashFiles),
+            OnFiles::Open => Action::Open,
+            OnFiles::Reveal => Action::Reveal,
+            OnFiles::Priority(_) => Action::SetPriority,
+            OnFiles::MoveToTrash => Action::TrashFiles,
         }
     }
 
@@ -290,40 +667,63 @@ impl OnFiles {
 /// The file commands available for the selected files of the torrent the pane shows, in the list's
 /// order; none with no file selected.
 pub fn on_files(s: &Phantom) -> Vec<OnFiles> {
-    let Some((torrent, files)) = selected_in_pane(&s.table, &s.torrents, &s.pane) else { return Vec::new() };
-    OnFiles::ALL.into_iter().filter(|c| s.mounted.offers(*c) && c.available(torrent, &files, s.file_there)).collect()
+    let ctx = Context::main(s, Focus::List);
+    OnFiles::ALL.into_iter().filter(|c| Command::from(*c).offer(&ctx) == Offer::Enabled).collect()
 }
 
-/// What isn't about a selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InApp {
-    AddFile,
-    /// The newest change, a torrent action's or a setting's (#255); the menu bar's Edit ▸ Undo too.
-    Undo,
-    /// Opens the command palette.
-    Palette,
+listed_enum! {
+    /// What isn't about a selection.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum InApp {
+        AddFile,
+        /// The newest change, a torrent action's or a setting's (#255); the menu bar's Edit ▸ Undo too.
+        Undo,
+        /// Opens the command palette.
+        Palette,
+    }
 }
 
 impl InApp {
-    pub const ALL: [InApp; 3] = [InApp::AddFile, InApp::Undo, InApp::Palette];
-
-    pub fn spec(self) -> Spec {
-        let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
-            InApp::AddFile => ("add-file", "Add file…", Some(Icon::AddFile), ADD_FILE_KEYS),
-            InApp::Undo => ("undo", client::display::undo(), Some(Icon::Undo), UNDO_KEYS),
-            InApp::Palette => ("palette", "Command palette…", Some(Icon::Search), PALETTE_KEYS),
-        };
-        Spec { id, name, icon, keys }
+    pub fn decl(self) -> Decl<InApp, Phantom> {
+        let synonyms = &[] as &[&str];
+        match self {
+            InApp::AddFile => Decl {
+                id: "add-file",
+                name: "Add file…",
+                icon: Some(Icon::AddFile),
+                keys: ADD_FILE_KEYS,
+                synonyms,
+                scope: Scope::MAIN,
+                // Also with Settings in front, or no window: the main one comes back for it.
+                when: Some(|ctx, _| !matches!(ctx.focus, Focus::Modal | Focus::Panel)),
+                run: |s, _, tx| crate::views::toolbar::add_torrent_file(s, tx),
+            },
+            InApp::Undo => Decl {
+                id: "undo",
+                name: client::display::undo(),
+                icon: Some(Icon::Undo),
+                keys: UNDO_KEYS,
+                synonyms,
+                scope: Scope::MAIN,
+                when: Some(|ctx, _| ctx.undo),
+                run: |s, _, _| crate::changes::press(s),
+            },
+            // It opens wherever its window's palette has something to offer: never listed itself.
+            InApp::Palette => Decl {
+                id: "palette",
+                name: "Command palette…",
+                icon: Some(Icon::Search),
+                keys: PALETTE_KEYS,
+                synonyms,
+                scope: Scope::EVERYWHERE,
+                when: Some(|ctx, _| ctx.live() && ctx.palette),
+                run: |s, _, _| crate::model::palette::open(s),
+            },
+        }
     }
 
-    /// Whether the palette offers it now: Undo while there's a change to take back; the palette
-    /// never offers itself.
-    pub fn available(self, s: &Phantom) -> bool {
-        match self {
-            InApp::AddFile => true,
-            InApp::Undo => s.changes.state.top().is_some(),
-            InApp::Palette => false,
-        }
+    pub fn spec(self) -> Spec {
+        self.decl().spec()
     }
 
     /// As the palette words it: Undo names what it takes back, as Edit ▸ Undo does ("Undo Remove of
@@ -336,12 +736,142 @@ impl InApp {
     }
 }
 
+listed_enum! {
+    /// What the Look sheet over Settings offers (#434): leaving it, resetting it, and each row's Split
+    /// or Join. Each acts in the Settings window, on what the sheet edits.
+    ///
+    /// `ALL` has one of each, for what is the same in every use (the name, the icon, the keys): the
+    /// Split and Join of a row are made for each row the sheet shows, the key here being none.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OnSheet {
+        /// Done: keeps what was edited.
+        Done,
+        /// Cancel: puts the Look Presets back as they were when the sheet opened.
+        Cancel,
+        /// Restore Defaults in this half (or both).
+        Restore(Side) => [Side::Only(Appearance::Light), Side::Only(Appearance::Dark), Side::Both],
+        /// A row's Split, by the row's key ([`THEME`](crate::model::settings::THEME) for the Theme row).
+        Split(&'static str) => [""],
+        /// A row's Join.
+        Join(&'static str) => [""],
+    }
+}
+
+impl OnSheet {
+    /// Restore Defaults is offered only where there's something to restore, in one half while a
+    /// theme is in each; Split and Join for each row the sheet shows, with one theme in both halves.
+    pub fn decl(self) -> Decl<OnSheet, SettingsWindow> {
+        use crate::model::settings::{self as st, presets};
+        let (scope, synonyms, keys, icon) = (Scope::LOOK_SHEET, &[] as &[&str], &[] as &[Chord], None);
+        match self {
+            OnSheet::Done => Decl {
+                id: "done",
+                name: "Done",
+                icon,
+                keys,
+                synonyms,
+                scope,
+                when: Some(|ctx, _| ctx.look.is_some()),
+                run: |w, _, _| presets::close(w),
+            },
+            OnSheet::Cancel => Decl {
+                id: "cancel",
+                name: "Cancel",
+                icon,
+                keys,
+                synonyms,
+                scope,
+                when: Some(|ctx, _| ctx.look.is_some()),
+                run: |w, _, _| presets::cancel(w),
+            },
+            OnSheet::Restore(Side::Both) => Decl {
+                id: "restore-both",
+                name: "Restore Defaults",
+                icon,
+                keys,
+                synonyms,
+                scope,
+                when: Some(|ctx, _| ctx.restorable(Side::Both)),
+                run: |w, _, _| st::restore_defaults(w, Side::Both),
+            },
+            OnSheet::Restore(Side::Only(Appearance::Light)) => Decl {
+                id: "restore-light",
+                name: "Restore Defaults ☀",
+                icon,
+                keys,
+                synonyms,
+                scope,
+                when: Some(|ctx, _| ctx.two_themes() && ctx.restorable(Side::Only(Appearance::Light))),
+                run: |w, _, _| st::restore_defaults(w, Side::Only(Appearance::Light)),
+            },
+            OnSheet::Restore(Side::Only(Appearance::Dark)) => Decl {
+                id: "restore-dark",
+                name: "Restore Defaults ☾",
+                icon,
+                keys,
+                synonyms,
+                scope,
+                when: Some(|ctx, _| ctx.two_themes() && ctx.restorable(Side::Only(Appearance::Dark))),
+                run: |w, _, _| st::restore_defaults(w, Side::Only(Appearance::Dark)),
+            },
+            OnSheet::Split(_) => Decl {
+                id: "split",
+                name: "Split",
+                icon,
+                keys,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| matches!(c, OnSheet::Split(key) if ctx.joined(key) == Some(true))),
+                run: |w, c, _| {
+                    if let OnSheet::Split(key) = c {
+                        st::split_row(w, key)
+                    }
+                },
+            },
+            OnSheet::Join(_) => Decl {
+                id: "join",
+                name: "Join",
+                icon,
+                keys,
+                synonyms,
+                scope,
+                when: Some(|ctx, c| matches!(c, OnSheet::Join(key) if ctx.joined(key) == Some(false))),
+                run: |w, c, _| {
+                    if let OnSheet::Join(key) = c {
+                        st::join_row(w, key)
+                    }
+                },
+            },
+        }
+    }
+
+    pub fn spec(self) -> Spec {
+        self.decl().spec()
+    }
+
+    /// As the palette words it: a row's Split and Join name the row ("Split Corners"); Restore
+    /// Defaults marks a half (the sheet's pull-down says Light, Dark and Both; the palette's marks
+    /// are those a setting's halves have).
+    pub fn wording(self, row: &str) -> String {
+        match self {
+            OnSheet::Split(_) | OnSheet::Join(_) => format!("{} {row}", self.spec().name),
+            other => other.spec().name.to_owned(),
+        }
+    }
+}
+
 /// Any command, of any kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Torrents(OnTorrents),
     Files(OnFiles),
     App(InApp),
+    Sheet(OnSheet),
+}
+
+/// A declaration's scope, and whether its `when` holds in `ctx`.
+fn graded<C: Copy, H>(d: Decl<C, H>, c: C, ctx: &Context) -> (Scope, bool) {
+    (d.scope, d.when.is_none_or(|when| when(ctx, c)))
 }
 
 impl Command {
@@ -350,6 +880,33 @@ impl Command {
             Command::Torrents(c) => c.spec(),
             Command::Files(c) => c.spec(),
             Command::App(c) => c.spec(),
+            Command::Sheet(c) => c.spec(),
+        }
+    }
+
+    /// Where it can appear at all.
+    pub fn scope(self) -> Scope {
+        match self {
+            Command::Torrents(c) => c.decl().scope,
+            Command::Files(c) => c.decl().scope,
+            Command::App(c) => c.decl().scope,
+            Command::Sheet(c) => c.decl().scope,
+        }
+    }
+
+    /// How it's offered in `ctx`: Hidden out of its scope, Disabled where its `when` doesn't hold,
+    /// else Enabled.
+    pub fn offer(self, ctx: &Context) -> Offer {
+        let (scope, when) = match self {
+            Command::Torrents(c) => graded(c.decl(), c, ctx),
+            Command::Files(c) => graded(c.decl(), c, ctx),
+            Command::App(c) => graded(c.decl(), c, ctx),
+            Command::Sheet(c) => graded(c.decl(), c, ctx),
+        };
+        match (scope.holds(ctx.window, ctx.sheet), when) {
+            (false, _) => Offer::Hidden,
+            (true, false) => Offer::Disabled,
+            (true, true) => Offer::Enabled,
         }
     }
 
@@ -357,7 +914,14 @@ impl Command {
     pub fn all() -> impl Iterator<Item = Command> {
         let torrents = OnTorrents::ALL.into_iter().map(Command::Torrents);
         let files = OnFiles::ALL.into_iter().map(Command::Files);
-        torrents.chain(files).chain(InApp::ALL.into_iter().map(Command::App))
+        let app = InApp::ALL.into_iter().map(Command::App);
+        torrents.chain(files).chain(app).chain(OnSheet::ALL.into_iter().map(Command::Sheet))
+    }
+}
+
+impl From<OnSheet> for Command {
+    fn from(c: OnSheet) -> Command {
+        Command::Sheet(c)
     }
 }
 
@@ -379,39 +943,14 @@ impl From<InApp> for Command {
     }
 }
 
-/// Does what `command` says to the selected torrents, as the row menu and the palette run it: Open,
-/// Reveal and Rename… on the one selected, the others on every one selected they do something to.
-pub fn run_on_torrents(s: &mut Phantom, command: OnTorrents, tx: &mut rune::Tx) {
-    use crate::model::{command as send_command, copy_magnet, remove_selected, selected_for};
-    use crate::platform::{Show, show_torrent};
-    use proto::TorrentCommand;
-    let send = |s: &mut Phantom, action: Action, what: TorrentCommand| {
-        send_command(&mut *s.service, &selected_for(&s.table, &s.torrents, action), what)
-    };
-    let single = details_torrent(&s.table, &s.torrents).map(|t| t.id);
-    match command {
-        OnTorrents::Resume => send(s, Action::Resume, TorrentCommand::Resume),
-        OnTorrents::Pause => send(s, Action::Pause, TorrentCommand::Pause),
-        OnTorrents::Check => send(s, Action::Check, TorrentCommand::Check),
-        OnTorrents::CancelCheck => send(s, Action::CancelCheck, TorrentCommand::CancelCheck),
-        OnTorrents::CancelMove => send(s, Action::CancelMove, TorrentCommand::CancelMove),
-        OnTorrents::Remove => remove_selected(s, false),
-        OnTorrents::Delete => remove_selected(s, true),
-        OnTorrents::MoveTo => crate::model::moving::move_to(s, tx),
-        OnTorrents::Rename => single.into_iter().for_each(|id| crate::model::renaming::open(s, id)),
-        OnTorrents::Open => single.into_iter().for_each(|id| show_torrent(s, id, Show::Open)),
-        OnTorrents::Reveal => single.into_iter().for_each(|id| show_torrent(s, id, Show::Reveal)),
-        OnTorrents::CopyMagnet => copy_magnet(s, tx),
-    }
+/// Does what `command` says to the selected torrents, as the row menu and the palette run it.
+pub fn run_on_torrents(s: &mut Phantom, command: OnTorrents, tx: &mut Tx) {
+    (command.decl().run)(s, command, tx)
 }
 
 /// Does what `command` says.
-pub fn run_in_app(s: &mut Phantom, command: InApp, tx: &mut rune::Tx) {
-    match command {
-        InApp::AddFile => crate::views::toolbar::add_torrent_file(s, tx),
-        InApp::Undo => crate::changes::press(s),
-        InApp::Palette => crate::model::palette::open(s),
-    }
+pub fn run_in_app(s: &mut Phantom, command: InApp, tx: &mut Tx) {
+    (command.decl().run)(s, command, tx)
 }
 
 #[cfg(test)]
@@ -464,6 +1003,7 @@ mod tests {
                     (0..n).map(|i| torrent(i as u64, sets[pick / sets.len().pow(i as u32) % sets.len()])).collect();
                 for there in [false, true] {
                     let selected = Selected { torrents: torrents.iter().collect(), there };
+                    let ctx = Context { selected, ..Context::empty(Which::Main, Focus::List) };
                     for c in OnTorrents::ALL {
                         let does = |t: &TorrentInfo| c.action().is_none_or(|a| t.actions.does(a));
                         let (any, all) = (torrents.iter().any(does), n > 0 && torrents.iter().all(does));
@@ -473,7 +1013,8 @@ mod tests {
                             OnTorrents::Rename | OnTorrents::CopyMagnet => n == 1 && all,
                             _ => any,
                         };
-                        assert_eq!(c.available(&selected), want, "{c:?} for {n} torrents ({pick}), there: {there}");
+                        let enabled = Command::from(c).offer(&ctx) == Offer::Enabled;
+                        assert_eq!(enabled, want, "{c:?} for {n} torrents ({pick}), there: {there}");
                     }
                 }
             }
@@ -483,24 +1024,29 @@ mod tests {
     /// With nothing selected no torrent command is offered.
     #[test]
     fn nothing_selected_offers_no_torrent_command() {
-        let selected = Selected { torrents: Vec::new(), there: true };
-        assert!(OnTorrents::ALL.iter().all(|c| !c.available(&selected)));
+        let ctx = Context { selected: Selected { torrents: Vec::new(), there: true }, ..Context::empty(Which::Main, Focus::List) };
+        assert!(OnTorrents::ALL.iter().all(|c| Command::from(*c).offer(&ctx) == Offer::Disabled));
     }
 
-    /// Every command has its own id within its kind, a name, and keys no other command of the places
-    /// they're pressed in has: the torrent list's (torrent and app commands) and the file list's
-    /// (file and app commands).
+    /// Every command has a name, and no two that can be offered in the same window with the same
+    /// sheet open (their scopes) share an id or a key; but a torrent's and a file's, whose keys are
+    /// pressed in two lists: the file list keeps its own for files while it has the focus
+    /// (`shortcuts::on_file_key`).
     #[test]
-    fn ids_and_keys_are_each_commands_own() {
-        let torrent_list: Vec<Command> = Command::all().filter(|c| !matches!(c, Command::Files(_))).collect();
-        let file_list: Vec<Command> = Command::all().filter(|c| !matches!(c, Command::Torrents(_))).collect();
-        for place in [torrent_list, file_list] {
-            for (i, a) in place.iter().enumerate() {
-                assert!(!a.spec().name.is_empty());
-                for b in &place[i + 1..] {
-                    assert_ne!(a.spec().id, b.spec().id, "{a:?} and {b:?}");
-                    for key in a.spec().keys {
-                        assert!(!b.spec().keys.contains(key), "{key:?} is both {a:?}'s and {b:?}'s");
+    fn no_two_commands_in_one_scope_share_an_id_or_a_key() {
+        for window in Which::ALL {
+            for sheet in Sheet::ALL {
+                let here: Vec<Command> = Command::all().filter(|c| c.scope().holds(window, sheet)).collect();
+                for (i, a) in here.iter().enumerate() {
+                    assert!(!a.spec().name.is_empty());
+                    for b in &here[i + 1..] {
+                        if matches!((a, b), (Command::Torrents(_), Command::Files(_)) | (Command::Files(_), Command::Torrents(_))) {
+                            continue;
+                        }
+                        assert_ne!(a.spec().id, b.spec().id, "{a:?} and {b:?} in {window:?}, {sheet:?}");
+                        for key in a.spec().keys {
+                            assert!(!b.spec().keys.contains(key), "{key:?} is both {a:?}'s and {b:?}'s in {window:?}, {sheet:?}");
+                        }
                     }
                 }
             }

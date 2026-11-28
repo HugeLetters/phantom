@@ -108,6 +108,9 @@ pub fn view(s: &SettingsWindow, cx: &mut Cx<SettingsWindow>) -> El {
     if let Some(open) = &sheet.customize {
         overlays.extend(customize::sheet(s, open, ui));
     }
+    // Last, over the sheets: the command palette (#434), the main window's panel.
+    let window = cx.layout(&format!("{key}-sheet")).map(|at| (at[2], at[3]));
+    super::palette::overlay(s, ui, window, &mut overlays);
     ui.root(page, overlays)
 }
 

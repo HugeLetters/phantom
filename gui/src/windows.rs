@@ -20,15 +20,19 @@ use std::rc::Rc;
 
 use rune::Tx;
 
+use crate::listed::listed_enum;
+
 /// What both windows read and either may change: the looks.
 pub type Shared<T> = Rc<RefCell<T>>;
 
-/// Which window.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Which {
-    #[default]
-    Main,
-    Settings,
+listed_enum! {
+    /// Which window.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum Which {
+        #[default]
+        Main,
+        Settings,
+    }
 }
 
 type Task<S> = Box<dyn FnOnce(&mut S, &mut Tx)>;

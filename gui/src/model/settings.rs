@@ -16,6 +16,7 @@
 //! Escape in a field being edited ([`escape`]) puts the stored value back and nothing else.
 
 pub mod customize;
+pub mod palette;
 pub mod presets;
 
 use std::collections::BTreeSet;
@@ -28,6 +29,8 @@ use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::Phantom;
 use crate::changes::{Presets, Target};
+use crate::commands::Scope;
+use crate::listed::listed_enum;
 use crate::notice::{Notice, NoticeAction};
 use crate::platform::app_icon::loader::Loader;
 use crate::platform::app_icon::{FILE, FOLLOW, Icons, Manifest};
@@ -57,12 +60,17 @@ pub struct SettingsWindow {
     pub default_unavailable: Option<proto::Unavailable>,
     pub main: Link<Phantom>,
     pub inbox: Inbox<SettingsWindow>,
+    /// The command palette (⌘P, #434), listing what applies in this window.
+    pub palette: super::palette::Palette,
     /// This window, to bring to the front or close.
     pub window: Window,
     /// Whether a field was being edited, as last told to the main window, for Edit ▸ Undo.
     told_editing: bool,
     /// Whether a field had the focus, as last told to the main window, for the Edit menu.
     told_field: bool,
+    /// Whether the palette has something to offer, as last told to the main window, for View ▸
+    /// Command Palette….
+    told_palette: bool,
 }
 
 impl SettingsWindow {
@@ -74,7 +82,20 @@ impl SettingsWindow {
         inbox: Inbox<SettingsWindow>,
         window: Window,
     ) -> Self {
-        Self { sheet: None, app_icon, looks, saved, default_unavailable: None, main, inbox, window, told_editing: false, told_field: false }
+        Self {
+            sheet: None,
+            app_icon,
+            looks,
+            saved,
+            default_unavailable: None,
+            main,
+            inbox,
+            palette: Default::default(),
+            window,
+            told_editing: false,
+            told_field: false,
+            told_palette: false,
+        }
     }
 
     /// Settings alone, linked to no main window, as in a scene of it or a test of one window.
@@ -255,22 +276,22 @@ impl Switch {
     }
 }
 
-/// The sheet's tabs, in order; each setting is on one of them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Tab {
-    /// The default destination, keeping the Mac awake, and when seeding stops.
-    #[default]
-    General,
-    /// The listening port, UPnP and the speed limits.
-    Network,
-    /// The Look Presets (the Active look and the saved ones, whose editor sheet sets a theme in each
-    /// Appearance and its settings), then the App icon section.
-    Appearance,
+listed_enum! {
+    /// The sheet's tabs, in order; each setting is on one of them.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum Tab {
+        /// The default destination, keeping the Mac awake, and when seeding stops.
+        #[default]
+        General,
+        /// The listening port, UPnP and the speed limits.
+        Network,
+        /// The Look Presets (the Active look and the saved ones, whose editor sheet sets a theme in each
+        /// Appearance and its settings), then the App icon section.
+        Appearance,
+    }
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::General, Tab::Network, Tab::Appearance];
-
     pub fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
@@ -305,6 +326,8 @@ pub struct ServiceSetting {
     pub control: Control,
     /// Other names the palette finds it by, never shown.
     pub synonyms: &'static [&'static str],
+    /// Where the palette can list it: both windows, with nothing over Settings.
+    pub scope: Scope,
 }
 
 impl ServiceSetting {
@@ -321,38 +344,50 @@ pub const SERVICE: [ServiceSetting; 8] = [
         tab: Tab::General,
         control: Control::Folder,
         synonyms: &["downloads", "destination", "save to", "location"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "keep_awake",
         tab: Tab::General,
         control: Control::Switch(Switch::KeepAwake),
         synonyms: &["sleep", "caffeinate", "wake"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "seed_ratio",
         tab: Tab::General,
         control: Control::Seeding(SeedingLimit::Ratio),
         synonyms: &["seeding", "share ratio"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "seed_time",
         tab: Tab::General,
         control: Control::Seeding(SeedingLimit::Time),
         synonyms: &["seeding", "seed time"],
+        scope: Scope::CLOSED,
     },
-    ServiceSetting { key: "listen_port", tab: Tab::Network, control: Control::Port, synonyms: &["port"] },
-    ServiceSetting { key: "upnp", tab: Tab::Network, control: Control::Switch(Switch::Upnp), synonyms: &["port forwarding", "nat"] },
+    ServiceSetting { key: "listen_port", tab: Tab::Network, control: Control::Port, synonyms: &["port"], scope: Scope::CLOSED },
+    ServiceSetting {
+        key: "upnp",
+        tab: Tab::Network,
+        control: Control::Switch(Switch::Upnp),
+        synonyms: &["port forwarding", "nat"],
+        scope: Scope::CLOSED,
+    },
     ServiceSetting {
         key: "download_limit",
         tab: Tab::Network,
         control: Control::Limit(Direction::Download),
         synonyms: &["speed", "bandwidth", "throttle"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "upload_limit",
         tab: Tab::Network,
         control: Control::Limit(Direction::Upload),
         synonyms: &["speed", "bandwidth", "throttle"],
+        scope: Scope::CLOSED,
     },
 ];
 
@@ -1291,6 +1326,8 @@ pub fn close_front(s: &mut SettingsWindow) {
 
 /// The window closed, also by its close button: the field being edited is applied first.
 pub fn closed(s: &mut SettingsWindow) {
+    // The palette goes with the window, its preview with it.
+    super::palette::close(s);
     // A Look Preset's sheet and the Customize sheet drop what was done in them, as Cancel does;
     // the App icon's sheet keeps its picks.
     presets::cancel(s);
@@ -1309,16 +1346,22 @@ pub fn left_window(s: &mut SettingsWindow) {
 }
 
 /// Called before every frame: tells the main window when a field takes or loses the focus, for the
-/// Edit menu, and when it starts or stops being edited, so Edit ▸ Undo is the field's own then
+/// Edit menu, when the palette comes to have something to offer or stops, for the View menu, and when it starts or stops being edited, so Edit ▸ Undo is the field's own then
 /// ([`crate::changes::menu_title`]).
 pub fn tell_editing(s: &mut SettingsWindow) {
-    let field = s.sheet.as_ref().is_some_and(|sheet| {
-        let row = sheet.text_rows().into_iter().any(|row| sheet.field(row).is_some_and(|f| f.focused));
-        row || sheet.save_as.as_ref().is_some_and(|save| save.name.focused)
-    });
+    let field = s.palette.is_open()
+        || s.sheet.as_ref().is_some_and(|sheet| {
+            let row = sheet.text_rows().into_iter().any(|row| sheet.field(row).is_some_and(|f| f.focused));
+            row || sheet.save_as.as_ref().is_some_and(|save| save.name.focused)
+        });
     if field != s.told_field {
         s.told_field = field;
         s.main.post(move |s, _| s.settings_field = field);
+    }
+    let palette = super::palette::opens(s);
+    if palette != s.told_palette {
+        s.told_palette = palette;
+        s.main.post(move |s, _| s.settings_palette = palette);
     }
     let editing = s.sheet.as_ref().is_some_and(|sheet| sheet.editing(&s.looks.borrow(), &s.saved));
     if editing != s.told_editing {

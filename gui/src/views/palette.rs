@@ -1,4 +1,4 @@
-//! The command palette (#33, #434), while it's open: its field, and the entries `model::palette`
+//! The command palette (#33, #434) of either window, while it's open: its field, and the entries `model::palette`
 //! lists for its text, each with its icon and key, a setting with its place and value. Its keys: ↑ and
 //! ↓ move the highlight, Return picks it, ⇧Return picks it and stays, ⌘Return shows a setting in
 //! Settings, Escape goes back one
@@ -6,22 +6,22 @@
 
 use rune::{El, Key, KeyEvent, Tx};
 
-use crate::model::Phantom;
-use crate::model::palette::{self, heading, listed, row_key};
+use crate::model::palette::{self, Host, heading, listed, row_key};
 use crate::ui::{PaletteRow, Ui};
 
-/// `window` is the window's size, when known.
-pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec<El>) {
-    if !s.palette.is_open() {
+/// The palette of either window, over its page: the same panel, rows and keys. `window` is the
+/// window's size, when known.
+pub fn overlay<H: Host>(s: &H, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec<El>) {
+    if !s.palette().is_open() {
         return;
     }
     let field = ui
-        .text_field("palette-field", &s.palette.query, "Commands and settings")
-        .placeholder(if s.palette.sub.is_some() { "Choose" } else { "Type a command or a setting" })
-        .on_edit(|s: &mut Phantom| &mut s.palette.query)
-        .on_submit(palette::run)
-        .on_change(|s: &mut Phantom, _: &mut Tx| palette::edited(s))
-        .on_key(on_key)
+        .text_field("palette-field", &s.palette().query, "Commands and settings")
+        .placeholder(if s.palette().sub.is_some() { "Choose" } else { "Type a command or a setting" })
+        .on_edit(|s: &mut H| &mut s.palette_mut().query)
+        .on_submit(palette::run::<H>)
+        .on_change(|s: &mut H, _: &mut Tx| palette::edited(s))
+        .on_key(on_key::<H>)
         .build();
     let mut group = None;
     let rows = listed(s)
@@ -42,7 +42,7 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
             }
         })
         .collect();
-    let choices = s.palette.sub.as_ref().map(|sub| {
+    let choices = s.palette().sub.as_ref().map(|sub| {
         let n = palette::choices_count(s, sub);
         client::display::choices_of(&sub.name, n)
     });
@@ -55,15 +55,15 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         "No command matches",
         window.map(|(w, _)| w),
         row_key,
-        palette::pick,
-        palette::hover,
-        palette::dismiss,
+        palette::pick::<H>,
+        palette::hover::<H>,
+        palette::dismiss::<H>,
         layer,
     );
 }
 
 /// The palette's own keys, before the field's.
-fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
+fn on_key<H: Host>(s: &mut H, ev: &KeyEvent, tx: &mut Tx) -> bool {
     match ev.key {
         Key::Up => palette::up(s, tx),
         Key::Down => palette::down(s, tx),
@@ -71,7 +71,7 @@ fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         Key::Enter if ev.mods.cmd => palette::show_highlighted(s, tx),
         Key::Enter if ev.mods.shift => palette::run_and_stay(s, tx),
         // With nothing typed, ⌘Z is the app's, not the field's own: it takes back what ⇧Return ran.
-        Key::Command('z') if ev.mods.cmd && !ev.mods.shift && s.palette.query.text.is_empty() => crate::changes::press(s),
+        Key::Command('z') if ev.mods.cmd && !ev.mods.shift && s.palette().query.text.is_empty() => s.undo(),
         _ => return false,
     }
     true

@@ -154,7 +154,7 @@ impl Ui {
                     .child(text(hint).key("hint").font(k.ty.small_medium).color(c.text_faint).a11y_hidden());
             }
             if i == at {
-                item = item.fill(c.hover);
+                item = item.fill(self.colors.palette_selected);
             }
             list = list.child(item);
         }
