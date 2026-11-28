@@ -214,6 +214,10 @@ Settings**; ⌘Return shows any setting in Settings, with its control focused; �
 closing the palette. A command that asks for more starts its usual flow (Rename… the header's name
 field, Move to… the folder picker). With nothing typed, **Recent**, the last 3 settings or places
 picked (kept in memory only), comes first.
+⌘P also opens it in the Settings window, as the same palette: it lists the entries that apply there
+(the tab shown, under its name; the Look sheet's own commands while it's open; no torrent commands),
+and a jump focuses the control in place. Every entry says once where it applies; no window has a
+list of its own.
 _Avoid_: launcher, quick open, command bar
 
 **Menu bar**:

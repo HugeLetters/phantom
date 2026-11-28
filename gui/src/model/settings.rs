@@ -16,6 +16,7 @@
 //! Escape in a field being edited ([`escape`]) puts the stored value back and nothing else.
 
 pub mod customize;
+pub mod palette;
 pub mod presets;
 
 use std::collections::BTreeSet;
@@ -57,6 +58,8 @@ pub struct SettingsWindow {
     pub default_unavailable: Option<proto::Unavailable>,
     pub main: Link<Phantom>,
     pub inbox: Inbox<SettingsWindow>,
+    /// The command palette (⌘P, #434), listing what applies in this window.
+    pub palette: super::palette::Palette,
     /// This window, to bring to the front or close.
     pub window: Window,
     /// Whether a field was being edited, as last told to the main window, for Edit ▸ Undo.
@@ -74,7 +77,19 @@ impl SettingsWindow {
         inbox: Inbox<SettingsWindow>,
         window: Window,
     ) -> Self {
-        Self { sheet: None, app_icon, looks, saved, default_unavailable: None, main, inbox, window, told_editing: false, told_field: false }
+        Self {
+            sheet: None,
+            app_icon,
+            looks,
+            saved,
+            default_unavailable: None,
+            main,
+            inbox,
+            palette: Default::default(),
+            window,
+            told_editing: false,
+            told_field: false,
+        }
     }
 
     /// Settings alone, linked to no main window, as in a scene of it or a test of one window.
@@ -1291,6 +1306,8 @@ pub fn close_front(s: &mut SettingsWindow) {
 
 /// The window closed, also by its close button: the field being edited is applied first.
 pub fn closed(s: &mut SettingsWindow) {
+    // The palette goes with the window, its preview with it.
+    super::palette::close(s);
     // A Look Preset's sheet and the Customize sheet drop what was done in them, as Cancel does;
     // the App icon's sheet keeps its picks.
     presets::cancel(s);
@@ -1312,10 +1329,11 @@ pub fn left_window(s: &mut SettingsWindow) {
 /// Edit menu, and when it starts or stops being edited, so Edit ▸ Undo is the field's own then
 /// ([`crate::changes::menu_title`]).
 pub fn tell_editing(s: &mut SettingsWindow) {
-    let field = s.sheet.as_ref().is_some_and(|sheet| {
-        let row = sheet.text_rows().into_iter().any(|row| sheet.field(row).is_some_and(|f| f.focused));
-        row || sheet.save_as.as_ref().is_some_and(|save| save.name.focused)
-    });
+    let field = s.palette.is_open()
+        || s.sheet.as_ref().is_some_and(|sheet| {
+            let row = sheet.text_rows().into_iter().any(|row| sheet.field(row).is_some_and(|f| f.focused));
+            row || sheet.save_as.as_ref().is_some_and(|save| save.name.focused)
+        });
     if field != s.told_field {
         s.told_field = field;
         s.main.post(move |s, _| s.settings_field = field);

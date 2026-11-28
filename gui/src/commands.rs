@@ -3,7 +3,7 @@
 //! bar (`menu_bar`), the empty list's hint and the keys (`shortcuts`) all read from here, so a name,
 //! an icon or a key can't differ between two places.
 //!
-//! There are three kinds, each its own type, so a place offers only its own kind (the row menu holds
+//! There are four kinds, each its own type, so a place offers only its own kind (the row menu holds
 //! [`OnTorrents`], the file menu [`OnFiles`]):
 //!
 //! | Kind           | Acts on                                    | Offered by                      |
@@ -11,6 +11,10 @@
 //! | [`OnTorrents`] | the selected torrents                      | the row menu, the palette, keys |
 //! | [`OnFiles`]    | the selected files of the pane's torrent   | the file menu, keys in the list |
 //! | [`InApp`]      | nothing selected: the app                  | the palette, the toolbar, keys  |
+//! | [`OnSheet`]    | the Look sheet open over Settings          | the palette, in Settings        |
+//!
+//! Where each is offered is declared here too ([`Command::applies`]): the palette lists a command
+//! only in the windows and contexts it says, so a command is declared once, not once per window.
 //!
 //! What's available rests on three things: the part of the screen that offers it being shown
 //! ([`Mounted`]: each view registers its commands as it's built, so a theme's screen that leaves one
@@ -22,8 +26,10 @@
 use proto::{Action, Priority, TorrentInfo};
 use rune_kit::TableState;
 
+use crate::model::settings::{Side, Tab};
 use crate::model::{Phantom, details_torrent, selected_in_pane, selected_torrents};
 use crate::shortcuts::{Chord, Named, chord};
+use crate::theme::preset::Appearance;
 use crate::ui::Icon;
 
 /// What a command is, wherever it's offered.
@@ -336,12 +342,129 @@ impl InApp {
     }
 }
 
+/// What the Look sheet over Settings offers (#434): leaving it, resetting it, and each row's Split
+/// or Join. Each acts in the Settings window, on what the sheet edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnSheet {
+    /// Done: keeps what was edited.
+    Done,
+    /// Cancel: puts the Look Presets back as they were when the sheet opened.
+    Cancel,
+    /// Restore Defaults in this half (or both).
+    Restore(Side),
+    /// A row's Split, by the row's key ([`THEME`](crate::model::settings::THEME) for the Theme row).
+    Split(&'static str),
+    /// A row's Join.
+    Join(&'static str),
+}
+
+impl OnSheet {
+    /// One of each, for what is the same in every use (the name, the icon, the keys): the Split and
+    /// Join of a row are made for each row the sheet shows, the key here being none.
+    pub const ALL: [OnSheet; 7] = [
+        OnSheet::Done,
+        OnSheet::Cancel,
+        OnSheet::Restore(Side::Both),
+        OnSheet::Restore(Side::Only(Appearance::Light)),
+        OnSheet::Restore(Side::Only(Appearance::Dark)),
+        OnSheet::Split(""),
+        OnSheet::Join(""),
+    ];
+
+    pub fn spec(self) -> Spec {
+        let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
+            OnSheet::Done => ("done", "Done", None, &[]),
+            OnSheet::Cancel => ("cancel", "Cancel", None, &[]),
+            OnSheet::Restore(Side::Both) => ("restore-both", "Restore Defaults", None, &[]),
+            OnSheet::Restore(Side::Only(Appearance::Light)) => ("restore-light", "Restore Defaults ☀", None, &[]),
+            OnSheet::Restore(Side::Only(Appearance::Dark)) => ("restore-dark", "Restore Defaults ☾", None, &[]),
+            OnSheet::Split(_) => ("split", "Split", None, &[]),
+            OnSheet::Join(_) => ("join", "Join", None, &[]),
+        };
+        Spec { id, name, icon, keys }
+    }
+
+    /// As the palette words it: a row's Split and Join name the row ("Split Corners"); Restore
+    /// Defaults marks a half (the sheet's pull-down says Light, Dark and Both; the palette's marks
+    /// are those a setting's halves have).
+    pub fn wording(self, row: &str) -> String {
+        match self {
+            OnSheet::Split(_) | OnSheet::Join(_) => format!("{} {row}", self.spec().name),
+            other => other.spec().name.to_owned(),
+        }
+    }
+}
+
 /// Any command, of any kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Torrents(OnTorrents),
     Files(OnFiles),
     App(InApp),
+    Sheet(OnSheet),
+}
+
+/// Where a command is offered: the windows, and what's open over Settings. The palette lists an entry
+/// only where [`Applies::holds`] says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Applies {
+    pub windows: Windows,
+    pub when: When,
+}
+
+/// The windows an entry is offered in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Windows {
+    Main,
+    Settings,
+    Both,
+}
+
+/// What must be open over Settings for an entry to be offered there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum When {
+    /// Whatever is open: a setting of the Look, which the sheet itself edits.
+    Always,
+    /// No sheet is open: what's behind a sheet isn't offered, the sheet being modal.
+    Closed,
+    /// The Look sheet is open.
+    Look,
+}
+
+/// What's open over the Settings window; the main window has no sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sheet {
+    Closed,
+    Look,
+}
+
+/// Where the palette is opened: the window, Settings' tab and what's open over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Context {
+    pub window: crate::windows::Which,
+    pub tab: Tab,
+    pub sheet: Sheet,
+}
+
+impl Applies {
+    pub const MAIN: Applies = Applies { windows: Windows::Main, when: When::Always };
+    pub const EVERYWHERE: Applies = Applies { windows: Windows::Both, when: When::Always };
+    /// Both windows, but not over a sheet.
+    pub const CLOSED: Applies = Applies { windows: Windows::Both, when: When::Closed };
+    pub const LOOK_SHEET: Applies = Applies { windows: Windows::Settings, when: When::Look };
+
+    pub fn holds(self, ctx: &Context) -> bool {
+        use crate::windows::Which;
+        let window = match (self.windows, ctx.window) {
+            (Windows::Both, _) | (Windows::Main, Which::Main) | (Windows::Settings, Which::Settings) => true,
+            (Windows::Main, Which::Settings) | (Windows::Settings, Which::Main) => false,
+        };
+        let sheet = match (self.when, ctx.sheet) {
+            (When::Always, _) | (When::Closed, Sheet::Closed) | (When::Look, Sheet::Look) => true,
+            (When::Closed, Sheet::Look) | (When::Look, Sheet::Closed) => false,
+        };
+        window && sheet
+    }
 }
 
 impl Command {
@@ -350,6 +473,16 @@ impl Command {
             Command::Torrents(c) => c.spec(),
             Command::Files(c) => c.spec(),
             Command::App(c) => c.spec(),
+            Command::Sheet(c) => c.spec(),
+        }
+    }
+
+    /// Where the palette offers it: the torrent, file and app commands in the main window (what they
+    /// act on is its selection and undo list); the sheet's in Settings, while its sheet is open.
+    pub fn applies(self) -> Applies {
+        match self {
+            Command::Torrents(_) | Command::Files(_) | Command::App(_) => Applies::MAIN,
+            Command::Sheet(_) => Applies::LOOK_SHEET,
         }
     }
 
@@ -357,7 +490,14 @@ impl Command {
     pub fn all() -> impl Iterator<Item = Command> {
         let torrents = OnTorrents::ALL.into_iter().map(Command::Torrents);
         let files = OnFiles::ALL.into_iter().map(Command::Files);
-        torrents.chain(files).chain(InApp::ALL.into_iter().map(Command::App))
+        let app = InApp::ALL.into_iter().map(Command::App);
+        torrents.chain(files).chain(app).chain(OnSheet::ALL.into_iter().map(Command::Sheet))
+    }
+}
+
+impl From<OnSheet> for Command {
+    fn from(c: OnSheet) -> Command {
+        Command::Sheet(c)
     }
 }
 

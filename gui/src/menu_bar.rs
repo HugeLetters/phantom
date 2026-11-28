@@ -122,7 +122,7 @@ pub fn build(s: &Phantom, around: Around) -> Vec<Menu> {
         },
         edit(s, field, live, settings),
         torrent(s, live, field, main && s.files_focused && s.mounted.offers(commands::OnFiles::MoveToTrash)),
-        view(s, live),
+        view(s, live, settings),
         Menu {
             name: "Window",
             items: vec![
@@ -200,7 +200,8 @@ fn torrent(s: &Phantom, live: bool, field: bool, files: bool) -> Menu {
     }
 }
 
-fn view(s: &Phantom, live: bool) -> Menu {
+/// `settings`: Settings is in front, where the palette opens too ([`run`]).
+fn view(s: &Phantom, live: bool, settings: bool) -> Menu {
     let shown = s.drawn_columns.borrow();
     let columns = crate::views::columns_menu::wanted(s, &shown);
     let tick = |prefix: &str, c: Column, enabled, checked, pick| Own {
@@ -219,7 +220,7 @@ fn view(s: &Phantom, live: bool) -> Menu {
         items: vec![
             Item::Submenu { title: "Columns", enabled: live, items: columns },
             Item::Submenu { title: "Sort By", enabled: live, items: sorts },
-            app(InApp::Palette, live),
+            app(InApp::Palette, live || settings),
         ],
     }
 }
@@ -232,6 +233,12 @@ pub fn run(s: &mut Phantom, pick: &Pick, around: Around, tx: &mut Tx) {
     }
     match pick {
         Pick::Settings => s.settings.post(|w, _| crate::model::settings::open(w)),
+        // In front, Settings opens its own palette.
+        Pick::App(InApp::Palette) if around.front == Some(Which::Settings) => s.settings.post(|w, _| {
+            if w.can_open_palette() {
+                crate::model::palette::open(w);
+            }
+        }),
         Pick::App(command) => {
             if *command == InApp::AddFile && around.front != Some(Which::Main) {
                 s.window.raise();

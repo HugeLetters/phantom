@@ -116,13 +116,13 @@ pub fn hint(command: impl Into<Command>) -> String {
 /// The command `ev` is in the torrent list (a torrent's or the app's), if any.
 pub fn command_of(ev: &KeyEvent) -> Option<Command> {
     let pressed = |c: &Command| c.spec().keys.iter().any(|k| k.matches(ev));
-    Command::all().filter(|c| !matches!(c, Command::Files(_))).find(pressed)
+    Command::all().filter(|c| !matches!(c, Command::Files(_) | Command::Sheet(_))).find(pressed)
 }
 
 /// The command in the torrent list whose shown hint is `hint`, if any.
 #[cfg(test)]
 pub fn by_hint(shown: &str) -> Option<Command> {
-    Command::all().filter(|c| !matches!(c, Command::Files(_))).find(|c| c.spec().hint().as_deref() == Some(shown))
+    Command::all().filter(|c| !matches!(c, Command::Files(_) | Command::Sheet(_))).find(|c| c.spec().hint().as_deref() == Some(shown))
 }
 
 /// Runs the shortcut `ev` is, while nothing modal is open (a menu, the palette, a dialog); whether
@@ -139,7 +139,7 @@ pub fn on_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
         }
         (Command::Torrents(c), _) => run(s, c, tx),
         (Command::App(c), _) => crate::commands::run_in_app(s, c, tx),
-        (Command::Files(_), _) => unreachable!("the torrent list's keys are no file command's"),
+        (Command::Files(_) | Command::Sheet(_), _) => unreachable!("the torrent list's keys are no file or sheet command's"),
     }
     true
 }
@@ -206,7 +206,7 @@ mod tests {
     /// hint names its own.
     #[test]
     fn each_key_and_hint_is_its_commands_alone() {
-        for command in Command::all().filter(|c| !matches!(c, Command::Files(_))) {
+        for command in Command::all().filter(|c| !matches!(c, Command::Files(_) | Command::Sheet(_))) {
             for key in command.spec().keys {
                 assert_eq!(command_of(&key.event()), Some(command), "{key:?}");
             }
