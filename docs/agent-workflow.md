@@ -31,7 +31,7 @@
    **UI wording (Apple's rule):** "…" ends a command's label only when it needs more input before
    acting (Edit…, Save as…, Add…, Move to…), never on one that acts at once (Apply, Delete).
 4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and the default suite
-   green: `cargo nextest run --workspace`, then `cargo test -p gui --test appkit` (its own
+   green: `cargo nextest run --workspace`, then `cargo test -p gui --test appkit --test open_events` (their own
    harness, which nextest can't list; seconds).
    **How the tests run.** nextest runs every test binary from its own folder,
    `target/debug/run/<binary>/` (a hard link, relinked after each rebuild: `scripts/own-folder.sh`,

@@ -12,7 +12,6 @@ fn main() {}
 #[cfg(target_os = "macos")]
 fn main() {
     macos::run();
-    println!("test result: ok. open events reach Rune's hooks at launch and after it");
 }
 
 #[cfg(target_os = "macos")]
@@ -29,8 +28,6 @@ mod macos {
 
     #[derive(Default)]
     struct Seen {
-        files: Vec<Vec<PathBuf>>,
-        urls: Vec<String>,
         /// The after-launch events are sent once the launch ones have arrived.
         sent_later: bool,
     }
@@ -110,8 +107,8 @@ mod macos {
         el()
     }
 
-    /// Every frame: once the launch events have come, send the later ones; once those too, quit.
-    fn poll(s: &mut Seen, _: f64, tx: &mut Tx) -> bool {
+    /// Every frame: once the launch events have come, send the later ones; once those too, judge and end.
+    fn poll(s: &mut Seen, _: f64, _: &mut Tx) -> bool {
         let (files, urls) = {
             let log = LOG.lock().unwrap();
             (log.0.len(), log.1.len())
@@ -121,7 +118,15 @@ mod macos {
             open_documents(&["/tmp/later.torrent"]);
             open_link(MAGNET_LATER);
         } else if s.sent_later && files >= 2 && urls >= 2 {
-            tx.quit();
+            let log = LOG.lock().unwrap();
+            assert_eq!(
+                log.0,
+                [vec![PathBuf::from("/tmp/launch.torrent")], vec![PathBuf::from("/tmp/later.torrent")]],
+                "files, the launch batch first"
+            );
+            assert_eq!(log.1, [MAGNET_LAUNCH, MAGNET_LATER], "magnet links, the launch one first");
+            println!("test result: ok. open events reach Rune's hooks at launch and after it");
+            std::process::exit(0);
         }
         false
     }
@@ -140,9 +145,8 @@ mod macos {
             .accessory()
             .on_open_files(|_: &mut Seen, paths, _| LOG.lock().unwrap().0.push(paths.to_vec()))
             .on_open_url(|_: &mut Seen, url, _| LOG.lock().unwrap().1.push(url.to_owned()));
+        // The loop ends the process when it quits: `poll` judges before that.
         app.try_run().expect("the loop ran");
-        let log = LOG.lock().unwrap();
-        assert_eq!(log.0, [vec![PathBuf::from("/tmp/launch.torrent")], vec![PathBuf::from("/tmp/later.torrent")]], "files, in order");
-        assert_eq!(log.1, [MAGNET_LAUNCH, MAGNET_LATER], "magnet links, in order");
+        unreachable!("the loop returned without exiting");
     }
 }

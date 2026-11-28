@@ -1,6 +1,6 @@
 # Run with: cargo nextest run --workspace
-# gui's `appkit` test has its own harness, which nextest can't list: `default-filter` leaves it out,
-# for `cargo test -p gui --test appkit`. nextest doesn't run doc-tests: `cargo test --doc` does.
+# gui's `appkit` and `open_events` tests have their own harness, which nextest can't list:
+# `default-filter` leaves them out, for `cargo test -p gui --test appkit --test open_events`. nextest doesn't run doc-tests: `cargo test --doc` does.
 #
 # The budget: a test is flagged SLOW past 20 s on an idle machine. `--profile budget` fails it there,
 # unless the budget profile lists it below, with why. The default profile only kills one at 300 s:
@@ -8,7 +8,7 @@
 experimental = ["wrapper-scripts"]
 
 [profile.default]
-default-filter = 'not binary(appkit)'
+default-filter = 'not binary(appkit) and not binary(open_events)'
 retries = 1
 # Most tests wait more than they compute (every engine's stop alone waits librqbit's 1 s): more
 # run at once than there are cores. The GUI's compute, so `cpu` holds them to the cores.

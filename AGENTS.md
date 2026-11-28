@@ -4,7 +4,7 @@ A macOS BitTorrent client: a background service plus GUI and CLI clients, in Rus
 [ARCHITECTURE.md](ARCHITECTURE.md); use the words in [GLOSSARY.md](GLOSSARY.md)
 and in the `GLOSSARY.md` of the domain you touch ([gui](gui/GLOSSARY.md), [service](service/GLOSSARY.md)).
 
-- `cargo nextest run --workspace` plus `cargo test -p gui --test appkit` runs everything
+- `cargo nextest run --workspace` plus `cargo test -p gui --test appkit --test open_events` runs everything
   ([docs/agent-workflow.md](docs/agent-workflow.md) step 4). GUI tests run headless against an
   in-memory service. Tests wait on events, never a fixed time, in 20 s at most: step 4's *Keep
   tests fast*.
