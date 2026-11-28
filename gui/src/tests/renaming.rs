@@ -162,7 +162,7 @@ fn return_renames_it_and_undo_renames_it_back() {
     assert!(texts(&rt, "rows/2/name").contains(&"Film.mkv".to_owned()), "the row");
     assert!(texts(&rt, "details-name").contains(&"Film.mkv".to_owned()), "the header");
     tap(&mut rt, "rows/2");
-    assert_eq!(name_hover(&rt).as_deref(), Some("Film.mkv\nMovie.mkv"), "the details pane's name, on hover (#33)");
+    assert_eq!(name_hover(&rt).as_deref(), Some("Movie.mkv"), "the details pane's name, on hover: the original alone (#33)");
     assert_eq!(notice(&rt), Some("Renamed"));
     sort(&mut rt.state.torrents, "name", SortDir::Ascending);
     let names: Vec<&str> = rt.state.torrents.iter().map(|t| t.display_name()).collect();

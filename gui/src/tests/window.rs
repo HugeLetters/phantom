@@ -613,16 +613,16 @@ fn a_long_name_and_path_stop_at_60_percent_of_the_header() {
     }
 }
 
-/// A renamed torrent's name, short enough to show whole, has its hover: the full new name and the
-/// original name; a torrent never renamed has none.
+/// A renamed torrent's name, short enough to show whole, has a hover of the original name alone (the
+/// heading already says the new one); a torrent never renamed has none.
 #[test]
-fn a_renamed_name_s_hover_has_the_new_name_and_the_original() {
+fn a_renamed_name_s_hover_is_the_original_name_only() {
     let renamed = TorrentInfo { original_name: Some("Big Buck Bunny (2008)".into()), ..torrent(1, "Bunny") };
     let mut rt = app(MemoryService::new().with_torrents(vec![torrent(0, "a"), renamed]));
     tap(&mut rt, "rows/1");
     settle(&mut rt);
     assert_eq!(texts(&rt, "details-name"), ["Bunny"]);
-    assert_eq!(element(&rt, "details-name").help.as_deref(), Some("Bunny\nBig Buck Bunny (2008)"));
+    assert_eq!(element(&rt, "details-name").help.as_deref(), Some("Big Buck Bunny (2008)"));
     tap(&mut rt, "rows/0");
     settle(&mut rt);
     assert_eq!(element(&rt, "details-name").help, None);
