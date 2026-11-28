@@ -356,7 +356,12 @@ impl TorrentStateLive {
         name: impl Into<Cow<'static, str>>,
         fut: impl std::future::Future<Output = crate::Result<()>> + Send + 'static,
     ) {
-        spawn_with_cancel(span, name, self.cancellation_token.clone(), fut);
+        spawn_with_cancel(
+            span,
+            name,
+            self.cancellation_token.clone(),
+            self.shared.tasks.track_future(fut),
+        );
     }
 
     pub fn down_speed_estimator(&self) -> &SpeedEstimator {
@@ -1200,9 +1205,11 @@ impl PeerConnectionHandler for &'_ PeerHandler {
                     self.state.shared.id, self.addr
                 ),
                 self.cancel_token.clone(),
-                self.state
-                    .clone()
-                    .task_send_pex_to_peer(self.addr, self.tx.clone()),
+                self.state.shared.tasks.track_future(
+                    self.state
+                        .clone()
+                        .task_send_pex_to_peer(self.addr, self.tx.clone()),
+                ),
             );
         }
         // Lets update outgoing Socket address for incoming connection

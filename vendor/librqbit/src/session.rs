@@ -68,7 +68,10 @@ use parking_lot::RwLock;
 use peer_binary_protocol::Handshake;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::{
+    sync::{CancellationToken, DropGuard},
+    task::TaskTracker,
+};
 use tracing::{Instrument, debug, debug_span, error, info, trace, warn};
 use tracker_comms::{TrackerComms, UdpTrackerClient};
 
@@ -124,6 +127,9 @@ pub struct Session {
     // Lifecycle management
     cancellation_token: CancellationToken,
     _cancellation_token_drop_guard: DropGuard,
+    // The tasks spawned with `cancellation_token` (or a child of it), so that `stop` can wait for
+    // them to wind down.
+    pub(crate) tasks: TaskTracker,
 
     // Runtime settings
     output_folder: PathBuf,
@@ -796,6 +802,7 @@ impl Session {
                 db: RwLock::new(Default::default()),
                 _cancellation_token_drop_guard: token.clone().drop_guard(),
                 cancellation_token: token,
+                tasks: TaskTracker::new(),
                 announce_port: listen_result.as_ref().and_then(|l| l.announce_port),
                 listen_addr: listen_result.as_ref().map(|l| l.addr),
                 default_storage_factory: opts.default_storage_factory,
@@ -1059,7 +1066,12 @@ impl Session {
         name: impl Into<Cow<'static, str>>,
         fut: impl std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
     ) {
-        spawn_with_cancel(span, name, self.cancellation_token.clone(), fut);
+        spawn_with_cancel(
+            span,
+            name,
+            self.cancellation_token.clone(),
+            self.tasks.track_future(fut),
+        );
     }
 
     pub(crate) fn rs(&self) -> Option<tracing::Id> {
@@ -1081,8 +1093,18 @@ impl Session {
             }
         }
         self.cancellation_token.cancel();
-        // this sucks, but hopefully will be enough
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Cancelled tasks drop their futures the next time they are polled. Wait for that, but
+        // don't hang on one that is stuck in blocking code.
+        self.tasks.close();
+        if tokio::time::timeout(Duration::from_secs(5), self.tasks.wait())
+            .await
+            .is_err()
+        {
+            warn!(
+                remaining = self.tasks.len(),
+                "timed out waiting for session tasks to finish"
+            );
+        }
     }
 
     /// Run a callback given the currently managed torrents.
@@ -1374,6 +1396,7 @@ impl Session {
                 },
                 connector: self.connector.clone(),
                 session: Arc::downgrade(self),
+                tasks: self.tasks.clone(),
                 magnet_name: name,
                 client_name_and_version: self.client_name_and_version.clone(),
             });
