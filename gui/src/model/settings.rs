@@ -29,6 +29,7 @@ use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::Phantom;
 use crate::changes::{Presets, Target};
+use crate::commands::Scope;
 use crate::listed::listed_enum;
 use crate::notice::{Notice, NoticeAction};
 use crate::platform::app_icon::loader::Loader;
@@ -67,6 +68,9 @@ pub struct SettingsWindow {
     told_editing: bool,
     /// Whether a field had the focus, as last told to the main window, for the Edit menu.
     told_field: bool,
+    /// Whether the palette has something to offer, as last told to the main window, for View ▸
+    /// Command Palette….
+    told_palette: bool,
 }
 
 impl SettingsWindow {
@@ -90,6 +94,7 @@ impl SettingsWindow {
             window,
             told_editing: false,
             told_field: false,
+            told_palette: false,
         }
     }
 
@@ -321,6 +326,8 @@ pub struct ServiceSetting {
     pub control: Control,
     /// Other names the palette finds it by, never shown.
     pub synonyms: &'static [&'static str],
+    /// Where the palette can list it: both windows, with nothing over Settings.
+    pub scope: Scope,
 }
 
 impl ServiceSetting {
@@ -337,38 +344,50 @@ pub const SERVICE: [ServiceSetting; 8] = [
         tab: Tab::General,
         control: Control::Folder,
         synonyms: &["downloads", "destination", "save to", "location"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "keep_awake",
         tab: Tab::General,
         control: Control::Switch(Switch::KeepAwake),
         synonyms: &["sleep", "caffeinate", "wake"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "seed_ratio",
         tab: Tab::General,
         control: Control::Seeding(SeedingLimit::Ratio),
         synonyms: &["seeding", "share ratio"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "seed_time",
         tab: Tab::General,
         control: Control::Seeding(SeedingLimit::Time),
         synonyms: &["seeding", "seed time"],
+        scope: Scope::CLOSED,
     },
-    ServiceSetting { key: "listen_port", tab: Tab::Network, control: Control::Port, synonyms: &["port"] },
-    ServiceSetting { key: "upnp", tab: Tab::Network, control: Control::Switch(Switch::Upnp), synonyms: &["port forwarding", "nat"] },
+    ServiceSetting { key: "listen_port", tab: Tab::Network, control: Control::Port, synonyms: &["port"], scope: Scope::CLOSED },
+    ServiceSetting {
+        key: "upnp",
+        tab: Tab::Network,
+        control: Control::Switch(Switch::Upnp),
+        synonyms: &["port forwarding", "nat"],
+        scope: Scope::CLOSED,
+    },
     ServiceSetting {
         key: "download_limit",
         tab: Tab::Network,
         control: Control::Limit(Direction::Download),
         synonyms: &["speed", "bandwidth", "throttle"],
+        scope: Scope::CLOSED,
     },
     ServiceSetting {
         key: "upload_limit",
         tab: Tab::Network,
         control: Control::Limit(Direction::Upload),
         synonyms: &["speed", "bandwidth", "throttle"],
+        scope: Scope::CLOSED,
     },
 ];
 
@@ -1327,7 +1346,7 @@ pub fn left_window(s: &mut SettingsWindow) {
 }
 
 /// Called before every frame: tells the main window when a field takes or loses the focus, for the
-/// Edit menu, and when it starts or stops being edited, so Edit ▸ Undo is the field's own then
+/// Edit menu, when the palette comes to have something to offer or stops, for the View menu, and when it starts or stops being edited, so Edit ▸ Undo is the field's own then
 /// ([`crate::changes::menu_title`]).
 pub fn tell_editing(s: &mut SettingsWindow) {
     let field = s.palette.is_open()
@@ -1338,6 +1357,11 @@ pub fn tell_editing(s: &mut SettingsWindow) {
     if field != s.told_field {
         s.told_field = field;
         s.main.post(move |s, _| s.settings_field = field);
+    }
+    let palette = super::palette::opens(s);
+    if palette != s.told_palette {
+        s.told_palette = palette;
+        s.main.post(move |s, _| s.settings_palette = palette);
     }
     let editing = s.sheet.as_ref().is_some_and(|sheet| sheet.editing(&s.looks.borrow(), &s.saved));
     if editing != s.told_editing {

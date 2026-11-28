@@ -8,8 +8,7 @@ use rune::{El, PointerPress, Tx};
 
 use crate::commands::{OnFiles, on_files};
 use crate::menu::{Event, Menu, Open};
-use crate::model::{Phantom, common_priority, look_at_file, select_file_for_menu, set_selected_files, trash_selected_files};
-use crate::platform::{Show, show_file};
+use crate::model::{Phantom, common_priority, look_at_file, select_file_for_menu};
 use crate::ui::{Entry, Icon, Ui};
 
 /// Opens the menu at `press` for a right-click on file `index`'s row.
@@ -29,10 +28,10 @@ pub fn overlay(s: &Phantom, ui: &Ui, window: Option<(f32, f32)>, layer: &mut Vec
         Some(at),
         window,
         entries(&on_files(s), checked),
-        move |s: &mut Phantom, picked, _| {
+        move |s: &mut Phantom, picked, tx| {
             s.menu = s.menu.then(Event::Close);
             if let Some(item) = on_files(s).into_iter().find(|i| i.spec().id == picked) {
-                run(s, item);
+                run(s, item, tx);
             }
         },
         |s: &mut Phantom| s.menu = s.menu.then(Event::Close),
@@ -79,11 +78,6 @@ pub fn entries(items: &[OnFiles], checked: Option<Priority>) -> Vec<Entry> {
 }
 
 /// Does what `item` says to the selected files.
-pub fn run(s: &mut Phantom, item: OnFiles) {
-    match item {
-        OnFiles::Open => show_file(s, Show::Open),
-        OnFiles::Reveal => show_file(s, Show::Reveal),
-        OnFiles::Priority(priority) => set_selected_files(s, priority),
-        OnFiles::MoveToTrash => trash_selected_files(s),
-    }
+pub fn run(s: &mut Phantom, item: OnFiles, tx: &mut Tx) {
+    (item.decl().run)(s, item, tx)
 }

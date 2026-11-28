@@ -4426,7 +4426,7 @@
         Up  (greyed)  #sort-up
         Peers  (greyed)  #sort-peers
         ETA  (greyed)  #sort-eta
-    Command Palette…  [⌘P]  #palette
+    Command Palette…  [⌘P]  (greyed)  #palette
   Window:
     Minimize  ⌘M  @performMiniaturize:
     Zoom
@@ -4794,7 +4794,7 @@
         Up  (greyed)  #sort-up
         Peers  (greyed)  #sort-peers
         ETA  (greyed)  #sort-eta
-    Command Palette…  [⌘P]  #palette
+    Command Palette…  [⌘P]  (greyed)  #palette
   Window:
     Minimize  ⌘M  @performMiniaturize:
     Zoom
@@ -6411,7 +6411,7 @@
         Up  (greyed)  #sort-up
         Peers  (greyed)  #sort-peers
         ETA  (greyed)  #sort-eta
-    Command Palette…  [⌘P]  #palette
+    Command Palette…  [⌘P]  (greyed)  #palette
   Window:
     Minimize  ⌘M  @performMiniaturize:
     Zoom

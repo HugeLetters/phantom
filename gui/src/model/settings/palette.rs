@@ -19,7 +19,7 @@ use rune::Tx;
 
 use super::{SettingsWindow, Side, Switch, Tab, ThemeRows};
 use crate::changes::{Presets, Target};
-use crate::commands::{Command, Context, OnSheet, Sheet};
+use crate::commands::{Command, Context, Focus, LookSheet, Offer, OnSheet, Sheet};
 use crate::model::palette::{Entry, Group, Host, Kind, Palette, Place, SettingRef};
 use crate::theme::preset::{Appearance, LookPreset};
 use crate::theme::saved::{Name, SavedPreset};
@@ -27,10 +27,29 @@ use crate::theme::setting::Value;
 use crate::windows::Which;
 
 impl SettingsWindow {
-    /// Whether ⌘P opens the palette: Settings is open, with no sheet over it but the Look's (the
-    /// App icon's, its Customize and Save as… are small flows of their own).
-    pub fn can_open_palette(&self) -> bool {
-        self.sheet.as_ref().is_some_and(|sheet| sheet.icons.is_none() && sheet.customize.is_none() && sheet.save_as.is_none())
+    /// What's open over the window, the topmost.
+    fn over(&self) -> Sheet {
+        match self.sheet.as_ref() {
+            Some(sheet) if sheet.save_as.is_some() => Sheet::SaveAs,
+            Some(sheet) if sheet.customize.is_some() => Sheet::Customize,
+            Some(sheet) if sheet.icons.is_some() => Sheet::AppIcon,
+            Some(sheet) if sheet.edit.is_some() => Sheet::Look,
+            Some(_) | None => Sheet::Closed,
+        }
+    }
+
+    /// The Look sheet's preset and its rows, while it's open: what its commands' `when` reads.
+    fn look_sheet(&self) -> Option<LookSheet> {
+        let (_, preset) = self.sheet_preset()?;
+        let editor = self.sheet.as_ref()?.editor()?;
+        let rows = match super::theme_rows(&preset, editor) {
+            ThemeRows::Same { theme_joined, rows } => {
+                let theme = (super::THEME, super::THEME_LABEL, theme_joined);
+                Some(std::iter::once(theme).chain(rows.iter().map(|r| (r.setting.key, r.setting.label, r.joined))).collect())
+            }
+            ThemeRows::Apart { .. } => None,
+        };
+        Some(LookSheet { preset, rows })
     }
 
     /// The preset the Look sheet edits, while it's open, with what it edits.
@@ -60,26 +79,28 @@ impl Host for SettingsWindow {
         &mut self.palette
     }
 
-    fn context(&self) -> Context {
-        let sheet = self.sheet.as_ref();
+    fn shown(&self) -> bool {
+        self.sheet.is_some()
+    }
+
+    fn context(&self) -> Context<'_> {
         Context {
-            window: Which::Settings,
-            tab: sheet.map_or(Tab::default(), |sheet| sheet.tab),
-            sheet: if sheet.is_some_and(|sheet| sheet.edit.is_some()) { Sheet::Look } else { Sheet::Closed },
+            tab: self.sheet.as_ref().map_or(Tab::default(), |sheet| sheet.tab),
+            sheet: self.over(),
+            look: self.look_sheet(),
+            ..Context::empty(Which::Settings, Focus::List)
         }
     }
 
-    /// The Look sheet's commands, while it's open: Done, Cancel, Restore Defaults where there's
-    /// something to restore, and each row's Split or Join (with one theme in both halves).
+    /// The Look sheet's commands Enabled now: Done, Cancel, Restore Defaults, and a Split and a
+    /// Join for each row it shows, the one that applies.
     fn commands(&self) -> Vec<Entry> {
-        let (Some((_, preset)), Some(editor)) = (self.sheet_preset(), self.sheet.as_ref().and_then(|sheet| sheet.editor())) else {
-            return Vec::new();
-        };
+        let ctx = self.context();
         let entry = |command: OnSheet, row: &str| Entry {
             kind: Kind::Action(Command::Sheet(command)),
             group: Group::Sheet,
             label: command.wording(row),
-            synonyms: &[],
+            synonyms: command.spec().synonyms,
             hint: None,
             icon: command.spec().icon,
             to: None,
@@ -87,20 +108,13 @@ impl Host for SettingsWindow {
             value: None,
             has_choices: false,
             selected: false,
-            applies: Command::Sheet(command).applies(),
+            scope: Command::Sheet(command).scope(),
             tab: None,
         };
-        let mut out = vec![entry(OnSheet::Done, ""), entry(OnSheet::Cancel, "")];
-        let (light, dark) = (Side::Only(Appearance::Light), Side::Only(Appearance::Dark));
-        let one_theme = preset.light.theme.id() == preset.dark.theme.id();
-        let sides: &[Side] = if one_theme { &[Side::Both] } else { &[light, dark, Side::Both] };
-        out.extend(sides.iter().filter(|side| super::restorable(&preset, **side)).map(|side| entry(OnSheet::Restore(*side), "")));
-        if let ThemeRows::Same { theme_joined, rows } = super::theme_rows(&preset, editor) {
-            let row = |joined: bool, key: &'static str| if joined { OnSheet::Split(key) } else { OnSheet::Join(key) };
-            out.push(entry(row(theme_joined, super::THEME), super::THEME_LABEL));
-            out.extend(rows.iter().map(|r| entry(row(r.joined, r.setting.key), r.setting.label)));
-        }
-        out
+        let rows = ctx.look.as_ref().and_then(|look| look.rows.clone()).unwrap_or_default();
+        let sheet = OnSheet::ALL.into_iter().filter(|c| !matches!(c, OnSheet::Split(_) | OnSheet::Join(_))).map(|c| (c, ""));
+        let rows = rows.into_iter().flat_map(|(key, label, _)| [(OnSheet::Split(key), label), (OnSheet::Join(key), label)]);
+        sheet.chain(rows).filter(|(c, _)| Command::Sheet(*c).offer(&ctx) == Offer::Enabled).map(|(c, row)| entry(c, row)).collect()
     }
 
     fn service_settings(&self) -> Option<&Settings> {
@@ -153,15 +167,9 @@ impl Host for SettingsWindow {
 
     fn opened(&mut self) {}
 
-    fn run_command(&mut self, command: Command, _: Option<proto::AbsolutePath>, _: &mut Tx) {
+    fn run_command(&mut self, command: Command, _: Option<proto::AbsolutePath>, tx: &mut Tx) {
         let Command::Sheet(command) = command else { unreachable!("Settings offers only the sheet's commands") };
-        match command {
-            OnSheet::Done => super::presets::close(self),
-            OnSheet::Cancel => super::presets::cancel(self),
-            OnSheet::Restore(side) => super::restore_defaults(self, side),
-            OnSheet::Split(key) => super::split_row(self, key),
-            OnSheet::Join(key) => super::join_row(self, key),
-        }
+        (command.decl().run)(self, command, tx)
     }
 
     fn open_place(&mut self, place: Place, tx: &mut Tx) {

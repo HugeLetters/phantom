@@ -197,10 +197,13 @@ fn what_is_behind_something_is_greyed() {
     select(&mut rt, 1);
     assert!(enabled(&rt.state, MAIN, "remove") && enabled(&rt.state, MAIN, "palette"));
     for (around, why) in [(SETTINGS, "Settings"), (NO_WINDOW, "no window"), (PANEL, "a panel")] {
-        // The palette opens in Settings too (#434): its item stays enabled there, as a pick opens
-        // Settings' own.
+        // The palette opens in Settings too (#434): its item is enabled there while Settings'
+        // palette has something to offer, as Settings tells (#486), and a pick opens Settings' own.
         if around == SETTINGS {
+            assert!(!enabled(&rt.state, around, "palette"), "Settings' palette offers nothing yet");
+            rt.state.settings_palette = true;
             assert!(enabled(&rt.state, around, "palette"), "the palette's item is on in Settings");
+            rt.state.settings_palette = false;
             assert!(torrent.iter().chain(&["sort-name", "column-size"]).all(|id| !enabled(&rt.state, around, id)), "{why}");
         } else {
             none(&rt, around, why);

@@ -1,8 +1,9 @@
 //! Every surface that offers commands, in every context, as one table (#486): the menu bar's menus
 //! (each front window), the row menu, the file menu, the keys, the main window's palette, and
-//! whether ⌘P opens Settings' palette and what it lists there. It's compared with `surfaces.txt`, written
-//! from the build before commands were declared once, so the declarations change nothing a person
-//! sees. `PHANTOM_WRITE_SURFACES=1` writes the file anew instead, for a change that means to.
+//! whether ⌘P opens Settings' palette and what it lists there. It's compared with `surfaces.txt`,
+//! first written from the build before commands were declared once, so the declarations changed
+//! nothing a person sees but what they meant to: View ▸ Command Palette… is greyed where ⌘P opens
+//! nothing. `PHANTOM_WRITE_SURFACES=1` writes the file anew instead, for a change that means to.
 
 use rune::{Key, KeyEvent, Mods};
 
@@ -173,11 +174,9 @@ fn settings_surfaces(d: &mut Desk, out: &mut Vec<String>) {
     }
 }
 
-fn step(d: &mut Desk, name: &str, out: &mut Vec<String>) {
+fn step(d: &mut Desk, name: &str, at: &mut impl FnMut(&mut Desk, &str)) {
     d.settle();
-    out.push(format!("== {name}"));
-    main_surfaces(d, out);
-    settings_surfaces(d, out);
+    at(d, name);
 }
 
 fn key(d: &mut Desk, key: Key, cmd: bool) {
@@ -185,8 +184,8 @@ fn key(d: &mut Desk, key: Key, cmd: bool) {
     d.settle();
 }
 
-/// The table, built by walking through the contexts as a person would.
-fn table() -> String {
+/// Walks through the contexts as a person would, calling `at` in each, by its name.
+fn walk(mut at: impl FnMut(&mut Desk, &str)) {
     let mut cut = torrent(2, "Cut");
     cut.status = Status::Paused;
     // Album's first file is on disk, so its Open, Reveal and Move to Trash are offered.
@@ -206,25 +205,24 @@ fn table() -> String {
     d.main.set_viewport((960.0, 900.0), 2.0);
     d.settings.set_viewport((600.0, 900.0), 2.0);
     d.settle();
-    let mut out = Vec::new();
-    step(&mut d, "nothing selected", &mut out);
+    step(&mut d, "nothing selected", &mut at);
     tap(&mut d.main, "rows/1");
-    step(&mut d, "Album selected", &mut out);
+    step(&mut d, "Album selected", &mut at);
     tap(&mut d.main, "files/viewport/rows/0");
-    step(&mut d, "Album's first file selected, the file list focused", &mut out);
+    step(&mut d, "Album's first file selected, the file list focused", &mut at);
     tap(&mut d.main, "rows/2");
-    step(&mut d, "Cut (paused) selected", &mut out);
+    step(&mut d, "Cut (paused) selected", &mut at);
     key(&mut d, Key::Command('a'), true);
-    step(&mut d, "every torrent selected", &mut out);
+    step(&mut d, "every torrent selected", &mut at);
     tap(&mut d.main, "rows/0");
     key(&mut d, Key::Backspace, false);
-    step(&mut d, "a removed: something to undo", &mut out);
+    step(&mut d, "a removed: something to undo", &mut at);
     tap(&mut d.main, "rows/1");
     right_click_row(&mut d.main, 1);
-    step(&mut d, "the row menu open", &mut out);
+    step(&mut d, "the row menu open", &mut at);
     key(&mut d, Key::Escape, false);
     d.main.update(|s, _| palette::open(s));
-    step(&mut d, "the main palette open", &mut out);
+    step(&mut d, "the main palette open", &mut at);
     d.main.update(|s, tx| palette::dismiss(s, tx));
     d.main.state.clash = Some(crate::model::moving::Clash {
         id: 1,
@@ -239,29 +237,29 @@ fn table() -> String {
         renaming: None,
         explained: None,
     });
-    step(&mut d, "a clash dialog", &mut out);
+    step(&mut d, "a clash dialog", &mut at);
     d.main.state.clash = None;
     tap(&mut d.main, "magnet-field");
-    step(&mut d, "the link field focused", &mut out);
+    step(&mut d, "the link field focused", &mut at);
     d.main.update(|_, tx| tx.blur());
     // Settings.
     d.key(KeyEvent { key: Key::Command(','), mods: Mods { cmd: true, ..Mods::default() } });
     d.wait(0.5);
     for tab in Tab::ALL {
         crate::model::settings::show_tab(&mut d.settings.state, tab);
-        step(&mut d, &format!("Settings on {}", tab.label()), &mut out);
+        step(&mut d, &format!("Settings on {}", tab.label()), &mut at);
     }
     d.settings.update(crate::model::settings::show_icons);
-    step(&mut d, "the App icon sheet", &mut out);
+    step(&mut d, "the App icon sheet", &mut at);
     d.settings.update(|s, _| {
         let opened = s.app_icon.tints.clone();
         let sheet = s.sheet.as_mut().expect("Settings shows");
         sheet.customize = Some(crate::model::settings::customize::Customize { icon: "phantom", opened, picker: None });
     });
-    step(&mut d, "Customize, over the App icon sheet", &mut out);
+    step(&mut d, "Customize, over the App icon sheet", &mut at);
     d.settings.update(|s, _| crate::model::settings::close_over(s));
     d.settings.update(|s, _| crate::model::settings::presets::edit_active(s));
-    step(&mut d, "the Look sheet, of the Active look", &mut out);
+    step(&mut d, "the Look sheet, of the Active look", &mut at);
     let set = |d: &mut Desk, half, key: &'static str, value| {
         let mut look = d.main.state.looks.borrow().preset().get(half).clone();
         let _ = look.settings.set(key, value);
@@ -270,25 +268,35 @@ fn table() -> String {
     };
     set(&mut d, Appearance::Light, "corners", Value::Choice("round"));
     set(&mut d, Appearance::Dark, "tone", Value::Choice("light"));
-    step(&mut d, "the Look sheet, the halves differing", &mut out);
+    step(&mut d, "the Look sheet, the halves differing", &mut at);
     d.main.state.looks.borrow_mut().set(Appearance::Dark, crate::theme::ThemeLook::defaults(&crate::theme::tests::SAMPLE));
-    step(&mut d, "the Look sheet, a theme in each half", &mut out);
+    step(&mut d, "the Look sheet, a theme in each half", &mut at);
     d.settings.update(|s, _| crate::model::settings::close_over(s));
     d.settings.update(|s, _| crate::model::settings::presets::save_as(s));
-    step(&mut d, "Save as…", &mut out);
+    step(&mut d, "Save as…", &mut at);
     d.settings.update(|s, tx| {
         if let Some(save_as) = s.sheet.as_mut().and_then(|sheet| sheet.save_as.as_mut()) {
             save_as.name = rune::TextEdit::new("Night");
         }
         crate::model::settings::presets::save(s, tx);
     });
-    step(&mut d, "Settings with a saved Look Preset", &mut out);
+    step(&mut d, "Settings with a saved Look Preset", &mut at);
     d.settings.update(|s, _| crate::model::settings::presets::edit(s, 0));
-    step(&mut d, "the Look sheet, of the saved Look Preset", &mut out);
+    step(&mut d, "the Look sheet, of the saved Look Preset", &mut at);
     d.settings.update(|s, _| crate::model::settings::close_over(s));
-    step(&mut d, "Settings again, nothing over it", &mut out);
+    step(&mut d, "Settings again, nothing over it", &mut at);
     d.close_button(Which::Settings);
-    step(&mut d, "Settings closed", &mut out);
+    step(&mut d, "Settings closed", &mut at);
+}
+
+/// The table: every surface in every context walked.
+fn table() -> String {
+    let mut out = Vec::new();
+    walk(|d, name| {
+        out.push(format!("== {name}"));
+        main_surfaces(d, &mut out);
+        settings_surfaces(d, &mut out);
+    });
     out.join("\n") + "\n"
 }
 
@@ -317,5 +325,69 @@ fn every_surface_in_every_context_is_as_it_was() {
         }
         let lines = (was.lines().count(), now.lines().count());
         panic!("the surfaces changed ({} lines, now {}):\n{}", lines.0, lines.1, diff.join("\n"));
+    }
+}
+
+/// Every command a surface offers (listed, or greyed in the menu bar), in every context walked, has
+/// that context in its scope; and every command is offered in some context walked.
+#[test]
+fn every_command_is_offered_only_within_its_scope() {
+    use crate::commands::{InApp, Sheet};
+    // A row's Split and Join stand for every row's.
+    let one = |c: Command| match c {
+        Command::Sheet(crate::commands::OnSheet::Split(_)) => Command::Sheet(crate::commands::OnSheet::Split("")),
+        Command::Sheet(crate::commands::OnSheet::Join(_)) => Command::Sheet(crate::commands::OnSheet::Join("")),
+        other => other,
+    };
+    let mut seen: Vec<Command> = Vec::new();
+    walk(|d, step| {
+        if step.starts_with("Album's first file") {
+            // The disk looked at, as the file menu does when it opens: Open and Reveal for the file.
+            crate::model::look_at_file(&mut d.main.state);
+        }
+        if step == "the Look sheet, a theme in each half" {
+            // Something to restore in Dark too.
+            let mut look = d.main.state.looks.borrow().preset().get(Appearance::Dark).clone();
+            let _ = look.settings.set("pulse", Value::Toggle(false));
+            d.main.state.looks.borrow_mut().set(Appearance::Dark, look);
+            d.settle();
+        }
+        let s = &d.main.state;
+        let main = (Which::Main, Sheet::Closed);
+        let mut offered: Vec<((Which, Sheet), Command, &str)> = Vec::new();
+        offered.extend(on_torrents(s).into_iter().map(|c| (main, c.into(), "the row menu")));
+        offered.extend(on_files(s).into_iter().map(|c| (main, c.into(), "the file menu")));
+        let actions = |entries: Vec<Entry>| -> Vec<Command> {
+            entries.into_iter().filter_map(|e| if let palette::Kind::Action(c) = e.kind { Some(c) } else { None }).collect()
+        };
+        offered.extend(actions(palette::entries(s)).into_iter().map(|c| (main, c, "the main palette")));
+        let settings = d.shown().settings.then(|| {
+            let ctx = palette::Host::context(&d.settings.state);
+            (ctx.window, ctx.sheet)
+        });
+        for (_, around) in AROUNDS {
+            for own in build(s, around).iter().flat_map(Menu::own) {
+                let (at, command) = match own.pick {
+                    Pick::App(InApp::Palette) if around.front == Some(Which::Settings) => match settings {
+                        Some(at) => (at, InApp::Palette.into()),
+                        None => continue,
+                    },
+                    Pick::App(c) => (main, c.into()),
+                    Pick::Torrents(c, _) => (main, c.into()),
+                    _ => continue,
+                };
+                offered.push((at, command, "the menu bar"));
+            }
+        }
+        if let Some(at) = settings {
+            offered.extend(actions(palette::entries(&d.settings.state)).into_iter().map(|c| (at, c, "Settings' palette")));
+        }
+        for ((window, sheet), c, surface) in offered {
+            assert!(c.scope().holds(window, sheet), "{c:?} in {surface}, {window:?} with {sheet:?} open ({step})");
+            seen.push(one(c));
+        }
+    });
+    for c in Command::all() {
+        assert!(seen.contains(&c), "{c:?} is offered nowhere");
     }
 }

@@ -85,7 +85,7 @@ Nothing is a hand-kept list in the palette. Each source declares its entries onc
 palette and its screen read the same declaration:
 
 ```
-gui/src/commands.rs        # Actions: today's command list; each declares where it applies
+gui/src/commands.rs        # Actions: each declared once (Decl), with its scope and when
 gui/src/theme/setting.rs   # Theme settings: Setting { key, label, kind, section } + synonyms
 gui/src/model/settings.rs  # Service settings: one table { key, label, tab, control } replacing
                            #   the Switch / Row / tab_of matches; the Settings view draws from it
@@ -103,9 +103,11 @@ picking does. The prototype reads the Phantom theme's declarations this way.
 ranking, keys and picking are one body of code.
 
 ```rust
-struct Context { window: Which /* Main | Settings */, tab: Tab, sheet: Sheet /* Closed | Look */ }
-struct Applies { windows: Main | Settings | Both, when: Always | Closed | Look }   // on every entry
-fn entries(host) -> Vec<Entry>   // registry(host) filtered by entry.applies.holds(host.context())
+struct Scope { windows: &[Which], sheets: &[Sheet] }   // on every entry: where it can appear, as data
+enum Sheet { Closed, Look, AppIcon, Customize, SaveAs }  // what's open over Settings
+// a command's Decl also has when: Option<fn(&Context, C) -> bool>; offer() grades Hidden | Disabled | Enabled
+fn entries(host) -> Vec<Entry>   // registry(host) in its scope here, commands Enabled (#486)
+fn opens(host) -> bool           // ⌘P: entries(host) isn't empty
 ```
 
 | Entry | Main window | Settings, no sheet | Settings, Look sheet open |

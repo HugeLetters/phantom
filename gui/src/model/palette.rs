@@ -1,7 +1,9 @@
 //! The command palette (#33, #434): ⌘P opens a panel over the window listing the **entries** that
 //! can be picked now, in the main window and in Settings alike. There is one registry
-//! ([`registry`]): every entry says where it applies ([`Applies`]: the window, and what's open over
-//! Settings), and [`entries`] filters it by the [`Context`] it's opened in. A window gives the
+//! ([`registry`]): every entry says where it can appear ([`Scope`]: the windows, and what's open
+//! over Settings), a command also when it can be done there (its `when`, in `commands`), and
+//! [`entries`] lists those Enabled in the [`Context`] it's opened in. ⌘P opens it wherever it has
+//! an entry ([`opens`]). A window gives the
 //! palette only a [`Host`]: its context, its commands, how acting is done there. An entry is one of
 //! three kinds ([`Kind`]):
 //!
@@ -63,7 +65,7 @@ use proto::Settings;
 use super::settings::{self as st, Control, SERVICE, Side, Switch, Tab};
 use super::{Phantom, details_torrent, look_at_disk, look_at_file, reveal_target, selected_in_pane};
 use crate::changes::Target;
-use crate::commands::{Applies, Command, Context, InApp, OnFiles, OnTorrents, Selected, Sheet, on_files, on_torrents};
+use crate::commands::{Command, Context, Focus, InApp, Offer, OnFiles, OnTorrents, Scope, Selected, Sheet, on_files, on_torrents};
 use crate::theme::preset::{Appearance, LookPreset};
 use crate::theme::saved::{Name, SavedPreset};
 use crate::theme::setting::{Kind as ThemeKind, Value};
@@ -296,8 +298,8 @@ pub struct Entry {
     pub has_choices: bool,
     /// The current one of a setting's choices.
     pub selected: bool,
-    /// Where it's offered: the windows, and what's open over Settings ([`entries`] filters by it).
-    pub applies: Applies,
+    /// Where it can appear: the windows, and what's open over Settings ([`entries`] filters by it).
+    pub scope: Scope,
     /// The tab of Settings it belongs to, for the settings of the tab shown to come first there.
     pub tab: Option<Tab>,
 }
@@ -332,8 +334,10 @@ impl Entry {
 pub trait Host: Sized + 'static {
     fn palette(&self) -> &Palette;
     fn palette_mut(&mut self) -> &mut Palette;
-    /// The window, Settings' tab and what's open over it: what the entries are filtered by.
-    fn context(&self) -> Context;
+    /// Whether the window shows: a closed one offers nothing.
+    fn shown(&self) -> bool;
+    /// The window, Settings' tab and what's open over it, and what the commands' `when` reads.
+    fn context(&self) -> Context<'_>;
     /// The commands (`commands`) this window offers now, worded for what they act on.
     fn commands(&self) -> Vec<Entry>;
     /// The service's settings, as this window last had them.
@@ -383,7 +387,7 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
         kind: Kind::Action(command),
         group,
         label,
-        synonyms: &[],
+        synonyms: command.spec().synonyms,
         hint: command.spec().hint(),
         icon: command.spec().icon,
         to: None,
@@ -391,7 +395,7 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
         value: None,
         has_choices: false,
         selected: false,
-        applies: command.applies(),
+        scope: command.scope(),
         tab: None,
     };
     let mut entries = Vec::new();
@@ -410,7 +414,10 @@ pub fn offered(s: &Phantom) -> Vec<Entry> {
     }
     // Worded as the file menu words them, but for the priorities ([`label_of`]).
     entries.extend(on_files(s).into_iter().map(|c| entry(Command::Files(c), Group::Files, label_of(c))));
-    entries.extend(InApp::ALL.into_iter().filter(|c| c.available(s)).map(|c| entry(Command::App(c), Group::App, c.wording(s))));
+    // The palette never lists the command that opens it.
+    let ctx = Context::main(s, Focus::List);
+    let app = InApp::ALL.into_iter().filter(|c| *c != InApp::Palette && Command::App(*c).offer(&ctx) == Offer::Enabled);
+    entries.extend(app.map(|c| entry(Command::App(c), Group::App, c.wording(s))));
     entries
 }
 
@@ -438,7 +445,7 @@ fn setting_entry(label: String, kind: Kind, place: String, value: Option<String>
         value,
         has_choices: false,
         selected: false,
-        applies: Applies::CLOSED,
+        scope: Scope::CLOSED,
         tab: None,
     }
 }
@@ -470,7 +477,7 @@ fn service_value(key: &str, settings: &proto::Settings) -> String {
 }
 
 /// A place, or the Look Presets, which have no registry of their own: each is declared here once,
-/// with where it applies.
+/// with where it can appear.
 struct Fixed {
     kind: Kind,
     label: &'static str,
@@ -479,15 +486,14 @@ struct Fixed {
     hint: Option<&'static str>,
     synonyms: &'static [&'static str],
     choices: bool,
-    applies: Applies,
+    scope: Scope,
     tab: Option<Tab>,
 }
 
 /// The places, the tabs (one for each of [`Tab::ALL`]) and the Look Presets, in the order the palette
 /// lists them.
 fn fixed() -> Vec<Fixed> {
-    let place =
-        |kind, label, under, hint, synonyms, applies, tab| Fixed { kind, label, under, hint, synonyms, choices: false, applies, tab };
+    let place = |kind, label, under, hint, synonyms, scope, tab| Fixed { kind, label, under, hint, synonyms, choices: false, scope, tab };
     let mut out = vec![place(
         Kind::Place(Place::Settings),
         "Settings…",
@@ -495,13 +501,11 @@ fn fixed() -> Vec<Fixed> {
         Some("⌘,"),
         &["preferences", "options"] as &'static [&'static str],
         // The window it opens is the one you're in.
-        Applies::MAIN,
+        Scope::MAIN,
         None,
     )];
     out.extend(
-        Tab::ALL
-            .into_iter()
-            .map(|tab| place(Kind::Place(Place::Tab(tab)), tab.label(), Some("Settings"), None, &[], Applies::CLOSED, None)),
+        Tab::ALL.into_iter().map(|tab| place(Kind::Place(Place::Tab(tab)), tab.label(), Some("Settings"), None, &[], Scope::CLOSED, None)),
     );
     out.push(place(
         Kind::Place(Place::AppIcon),
@@ -509,7 +513,7 @@ fn fixed() -> Vec<Fixed> {
         Some("Appearance"),
         None,
         &["icon", "dock icon"],
-        Applies::CLOSED,
+        Scope::CLOSED,
         Some(Tab::Appearance),
     ));
     out.push(Fixed {
@@ -520,7 +524,7 @@ fn fixed() -> Vec<Fixed> {
             Some("Appearance"),
             None,
             &["saved looks", "preset", "apply look"],
-            Applies::CLOSED,
+            Scope::CLOSED,
             Some(Tab::Appearance),
         )
     });
@@ -530,7 +534,7 @@ fn fixed() -> Vec<Fixed> {
         Some("Appearance ▸ Active look"),
         None,
         &["active look", "look preset", "customize"],
-        Applies::CLOSED,
+        Scope::CLOSED,
         Some(Tab::Appearance),
     ));
     out
@@ -545,7 +549,7 @@ fn registry<H: Host>(s: &H) -> Vec<Entry> {
         place: f.under.map(str::to_owned),
         hint: f.hint.map(str::to_owned),
         has_choices: f.choices,
-        applies: f.applies,
+        scope: f.scope,
         tab: f.tab,
         ..setting_entry(f.label.to_owned(), f.kind, String::new(), None, f.synonyms)
     }));
@@ -553,6 +557,7 @@ fn registry<H: Host>(s: &H) -> Vec<Entry> {
         let value = s.service_settings().map(|settings| service_value(setting.key, settings));
         out.push(Entry {
             tab: Some(setting.tab),
+            scope: setting.scope,
             ..setting_entry(
                 setting.label().to_owned(),
                 Kind::Setting(SettingRef::Service(setting.key)),
@@ -566,14 +571,18 @@ fn registry<H: Host>(s: &H) -> Vec<Entry> {
     out
 }
 
-/// What the palette lists in this context: the [`registry`], by what each entry says of where it
-/// applies. The same function for every window, tab and sheet.
+/// What the palette lists in this context: the entries of the [`registry`] in their scope here, the
+/// commands among them Enabled ([`Host::commands`]). The same function for every window, tab and
+/// sheet.
 pub fn entries<H: Host>(s: &H) -> Vec<Entry> {
+    if !s.shown() {
+        return Vec::new();
+    }
     let ctx = s.context();
     let at_tab = ctx.window == Which::Settings && ctx.sheet == Sheet::Closed;
     registry(s)
         .into_iter()
-        .filter(|e| e.applies.holds(&ctx))
+        .filter(|e| e.scope.holds(ctx.window, ctx.sheet))
         .map(|e| match e.group == Group::Settings && at_tab && e.tab == Some(ctx.tab) {
             // In Settings, the settings of the tab shown come before the rest, under its name: the
             // place a row names is then said once.
@@ -581,6 +590,12 @@ pub fn entries<H: Host>(s: &H) -> Vec<Entry> {
             false => e,
         })
         .collect()
+}
+
+/// Whether ⌘P opens the palette: it has an entry here. Where nothing is (the App icon's sheet, its
+/// Customize, Save as…, a closed window), it stays shut.
+pub fn opens<H: Host>(s: &H) -> bool {
+    !entries(s).is_empty()
 }
 
 /// The settings and places of this context: [`entries`], but the commands.
@@ -597,7 +612,7 @@ fn theme_entries<H: Host>(s: &H) -> Vec<Entry> {
     let (light, dark) = (&preset.light, &preset.dark);
     let (lr, dr) = (light.resolved(), dark.resolved());
     let mut out = Vec::new();
-    let in_look = |entry: Entry| Entry { applies: Applies::EVERYWHERE, tab: Some(Tab::Appearance), ..entry };
+    let in_look = |entry: Entry| Entry { scope: THEME_SCOPE, tab: Some(Tab::Appearance), ..entry };
     // The Theme itself: one entry while both halves show the same, else one for each.
     let place = "Appearance ▸ Edit…".to_owned();
     let theme_entry = |side: Side, name: &str, theme: &str| {
@@ -658,6 +673,9 @@ fn theme_entries<H: Host>(s: &H) -> Vec<Entry> {
     out
 }
 
+/// Where every theme setting can appear: both windows, and over the Look sheet, which edits it.
+const THEME_SCOPE: Scope = Scope::LOOK;
+
 /// ☀ or ☾, as the editor sheet names a half.
 fn half_mark(a: Appearance) -> &'static str {
     match a {
@@ -713,7 +731,7 @@ fn choices<H: Host>(s: &H, sub: &Sub) -> Vec<Entry> {
         value: None,
         has_choices: false,
         selected,
-        applies: Applies::EVERYWHERE,
+        scope: Scope::EVERYWHERE,
         tab: None,
     };
     let mut out: Vec<Entry> = match sub.of {
@@ -761,9 +779,13 @@ pub fn listed<H: Host>(s: &H) -> Vec<Entry> {
         return scored.into_iter().map(|(_, _, e)| e).collect();
     }
     let all = entries(s);
-    // A command matches by its letters in order, a setting or place more strictly.
+    // A command matches by its letters in order (its name, or a synonym a little under it), a
+    // setting or place more strictly.
     let matches = |e: &Entry| match e.kind {
-        Kind::Action(_) => score(query, &e.label),
+        Kind::Action(_) => {
+            let synonym = e.synonyms.iter().filter_map(|syn| score(query, syn)).max().map(|sc| sc - SYNONYM_PENALTY);
+            score(query, &e.label).max(synonym)
+        }
         _ => setting_score(query, e),
     };
     if query.is_empty() {
@@ -1202,8 +1224,12 @@ impl Host for Phantom {
         &mut self.palette
     }
 
-    fn context(&self) -> Context {
-        Context { window: Which::Main, tab: Tab::default(), sheet: Sheet::Closed }
+    fn shown(&self) -> bool {
+        true
+    }
+
+    fn context(&self) -> Context<'_> {
+        Context::main(self, Focus::List)
     }
 
     fn commands(&self) -> Vec<Entry> {
@@ -1265,7 +1291,7 @@ impl Host for Phantom {
         match command {
             Command::Torrents(c) => crate::commands::run_on_torrents(self, c, tx),
             Command::App(c) => crate::commands::run_in_app(self, c, tx),
-            Command::Files(c) => crate::views::file_menu::run(self, c),
+            Command::Files(c) => crate::views::file_menu::run(self, c, tx),
             Command::Sheet(_) => unreachable!("the main window has no sheet"),
         }
     }

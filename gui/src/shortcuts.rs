@@ -159,7 +159,7 @@ pub fn on_list_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
 /// The shortcuts while the file list has focus: Open, Reveal and ⌘⌫ act on the selected files, where
 /// the file menu offers them, and are the list's even where it doesn't (nothing is selected, or the
 /// file is off disk), so a key meant for a file never reaches the torrent. Whether it was one.
-pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
+pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent, tx: &mut Tx) -> bool {
     if s.menu.is_open() || s.palette.is_open() || s.clash.is_some() {
         return false;
     }
@@ -167,7 +167,7 @@ pub fn on_file_key(s: &mut Phantom, ev: &KeyEvent) -> bool {
     let Some(command) = pressed.filter(|c| s.mounted.offers(*c)) else { return false };
     look_at_file(s);
     if on_files(s).contains(&command) {
-        crate::views::file_menu::run(s, command);
+        crate::views::file_menu::run(s, command, tx);
     }
     true
 }

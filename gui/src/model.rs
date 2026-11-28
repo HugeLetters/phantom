@@ -84,6 +84,9 @@ pub struct Phantom {
     pub settings_editing: bool,
     /// A field of Settings has the focus, as Settings last said: Edit is the field's own there.
     pub settings_field: bool,
+    /// Whether Settings' palette has something to offer, as Settings last told: View ▸ Command
+    /// Palette… is enabled by it while Settings is in front.
+    pub settings_palette: bool,
     /// The file list of the details pane has the focus, as it last said: ⌫ and ⌘⌫ are the files' then.
     pub files_focused: bool,
     /// The columns the list last drew, for View ▸ Columns.
@@ -369,6 +372,7 @@ impl Phantom {
             front: Which::Main,
             settings_editing: false,
             settings_field: false,
+            settings_palette: false,
             files_focused: false,
             drawn_columns: Default::default(),
             looks: Shared::default(),

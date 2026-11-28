@@ -6,7 +6,7 @@ use rune::{Key, KeyEvent, Mods, Runtime};
 
 use super::*;
 use crate::changes::Target;
-use crate::commands::{Command, Context, OnSheet, Sheet};
+use crate::commands::{Command, OnSheet, Sheet};
 use crate::model::palette::{self, Group, Host, Kind, Place, SettingRef};
 use crate::model::settings::{SERVICE, Side, Tab};
 use crate::theme::ThemeLook;
@@ -557,13 +557,10 @@ fn every_setting_is_in_both_palettes() {
 /// Settings with the Look sheet open.
 #[test]
 fn every_command_appears_in_each_context_it_declares() {
-    let main = Context { window: Which::Main, tab: Tab::default(), sheet: Sheet::Closed };
-    let settings: Vec<Context> = Tab::ALL
-        .into_iter()
-        .flat_map(|tab| [Sheet::Closed, Sheet::Look].map(|sheet| Context { window: Which::Settings, tab, sheet }))
-        .collect();
+    let main = (Which::Main, Sheet::Closed);
+    let settings = [(Which::Settings, Sheet::Closed), (Which::Settings, Sheet::Look)];
     for c in Command::all() {
-        let contexts = std::iter::once(main).chain(settings.iter().copied()).filter(|ctx| c.applies().holds(ctx)).count();
+        let contexts = std::iter::once(main).chain(settings).filter(|(window, sheet)| c.scope().holds(*window, *sheet)).count();
         assert!(contexts > 0, "{c:?} applies nowhere");
     }
     // The main window: with an album and two of its files selected, every command it lists is one it declares.
@@ -575,7 +572,7 @@ fn every_command_appears_in_each_context_it_declares() {
     let listed = palette::entries(&d.main.state);
     let actions: Vec<Command> = listed.iter().filter_map(|e| if let Kind::Action(c) = e.kind { Some(c) } else { None }).collect();
     assert!(actions.len() > 5, "the selection's commands are listed: {actions:?}");
-    assert!(actions.iter().all(|c| c.applies().holds(&main)), "every command in the main window declares it");
+    assert!(actions.iter().all(|c| c.scope().holds(main.0, main.1)), "every command in the main window declares it");
     // Settings: no main-window command, wherever.
     for sheet in [false, true] {
         if sheet {
@@ -584,7 +581,8 @@ fn every_command_appears_in_each_context_it_declares() {
         let in_settings = palette::entries(&d.settings.state);
         for e in &in_settings {
             if let Kind::Action(c) = e.kind {
-                assert!(c.applies().holds(&d.settings.state.context()), "{c:?} in Settings (sheet: {sheet})");
+                let ctx = d.settings.state.context();
+                assert!(c.scope().holds(ctx.window, ctx.sheet), "{c:?} in Settings (sheet: {sheet})");
                 assert!(matches!(c, Command::Sheet(_)));
             }
         }
