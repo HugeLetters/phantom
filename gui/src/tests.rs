@@ -1549,6 +1549,23 @@ fn files_deleted_while_the_destination_is_away_change_nothing_visible() {
 }
 
 #[test]
+fn a_file_gone_while_the_destination_was_away_makes_the_torrent_missing_files_once_it_is_back_until_resume() {
+    // #385: a file Phantom noted isn't made again and downloaded unasked.
+    let service = with_an_album();
+    let disk = service.disk();
+    let mut rt = app(service);
+    disk.change(DiskChange::DestinationGone { id: 1, reason: drive_gone() });
+    settle(&mut rt);
+    disk.change(DiskChange::FilesDeleted { id: 1, files: vec![0] });
+    disk.change(DiskChange::DestinationBack { id: 1 });
+    wait(&mut rt, 2.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::MissingFiles);
+    row_pick(&mut rt, 1, "Resume");
+    wait(&mut rt, 2.5);
+    assert_eq!(find_torrent(&rt, 1).status, Status::Downloading, "Resume downloads it");
+}
+
+#[test]
 fn a_paused_torrent_whose_files_went_while_the_destination_was_away_stays_stopped_once_it_is_back() {
     // Seen on #81 and master (#85): "started stopped torrent" after DestinationGone + FilesDeleted.
     let mut paused = torrent(2, "c");

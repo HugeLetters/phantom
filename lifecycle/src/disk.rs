@@ -48,6 +48,18 @@ pub struct Stamp {
     pub modified: Option<SystemTime>,
 }
 
+/// What Phantom's note of a torrent's file (which file is the torrent's, #374) says of what's at its
+/// path now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Noted {
+    /// No note: Phantom never made the file, nor did a check read one there.
+    None,
+    /// The noted file is at its path.
+    Same,
+    /// Another file is at its path than the one noted, or none.
+    Differs,
+}
+
 /// What a size check found: each file the torrent is getting (those Normal), by index, and what's
 /// at its path. Facts only: what they mean for the torrent is the machine's to decide.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -64,8 +76,8 @@ pub struct Found {
     pub links: u64,
     /// Something other than a file is at its path (a folder, a symbolic link).
     pub taken: bool,
-    /// Phantom has a file of it open for writing (it was let run): one that isn't at its path then went.
-    pub open: bool,
+    /// What Phantom's note of the file says of what's at its path (#374).
+    pub noted: Noted,
     /// Its bytes in pieces it shares with other files: librqbit can't have those without them.
     pub shared: u64,
 }
@@ -73,14 +85,14 @@ pub struct Found {
 impl Found {
     /// What's at `file`'s path: a file with one name, or nothing.
     pub fn of(file: Expected, at: Option<Stamp>) -> Self {
-        Self { file, at, links: 1, taken: false, open: false, shared: 0 }
+        Self { file, at, links: 1, taken: false, noted: Noted::None, shared: 0 }
     }
 
-    /// It isn't on disk as it must be: nothing is at its path though some of it was had or it was
-    /// open (one never got nor made is made as the torrent starts, #374), something other than a file
-    /// is, or a file it can't be.
+    /// It isn't on disk as it must be: nothing is at its path though some of it was had or Phantom
+    /// noted a file there (one never had nor noted is made as the torrent starts, #374, #385),
+    /// something other than a file is, or a file it can't be.
     pub fn is_missing(&self) -> bool {
-        self.taken || (self.at.is_none() && (self.file.progress_bytes > 0 || self.open)) || self.is_impossible()
+        self.taken || (self.at.is_none() && (self.file.progress_bytes > 0 || self.noted != Noted::None)) || self.is_impossible()
     }
 
     /// A file is there that can't be the torrent's: longer than the torrent's, shorter than what was
@@ -163,7 +175,7 @@ mod tests {
     fn a_hard_link_is_impossible_until_complete() {
         let linked = |progress, shared| Found {
             links: 2,
-            open: true,
+            noted: Noted::Same,
             shared,
             file: Expected { progress_bytes: progress, ..found(SIZE).file },
             ..found(SIZE)
@@ -173,21 +185,21 @@ mod tests {
         assert!(!linked(PROGRESS, SIZE - PROGRESS).is_missing(), "but for what it shares, which only the other files complete");
     }
 
-    /// Nothing at its path: missing once some of it was had or it was made, or when something else is
-    /// there.
+    /// Nothing at its path: missing once some of it was had or a file of it was noted, or when
+    /// something else is there.
     #[test]
     fn nothing_at_its_path_is_missing_only_once_some_of_it_was_had() {
-        let none = |progress, taken, open| Found {
+        let none = |progress, taken, noted: bool| Found {
             at: None,
             taken,
-            open,
+            noted: if noted { Noted::Differs } else { Noted::None },
             file: Expected { progress_bytes: progress, ..found(0).file },
             links: 1,
             shared: 0,
         };
         assert!(!none(0, false, false).is_missing(), "never had nor made: made as it starts");
         assert!(none(1, false, false).is_missing());
-        assert!(none(0, false, true).is_missing(), "made, and gone since");
+        assert!(none(0, false, true).is_missing(), "made or checked, and gone since (#385)");
         assert!(none(0, true, false).is_missing(), "a folder or a link there");
     }
 

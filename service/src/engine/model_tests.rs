@@ -377,6 +377,23 @@ struct Pack {
     /// The files Phantom let librqbit write as it let it run (#374), made then if they weren't there:
     /// one gone from its path since went. None until it runs after it was added (again).
     granted: [bool; FILES],
+    /// Phantom's note of each file (#374): which file at its path is the torrent's. One noted that's
+    /// gone is missing, whatever was had of it (#385); one at its path that isn't the one noted makes
+    /// an add back with saved pieces check in full (#393).
+    noted: [Note; FILES],
+    /// Its destination went while it was checked, or not checked: nothing is known of what it had
+    /// while it's away, so only a note tells a file it had once it's back.
+    had_unknown: bool,
+}
+
+/// Phantom's note of a file, as the model has it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Note {
+    None,
+    /// A check just read the file at its path: noted as the one there once the step settles.
+    Read,
+    /// This file (`Model::inodes`).
+    Of(u32),
 }
 
 /// A pack as its first Delete found it, which its Undo brings back.
@@ -406,6 +423,7 @@ impl Pack {
         self.have[f] = false;
         self.open[f] = None;
         self.granted[f] = false;
+        self.noted[f] = Note::None;
     }
 
     fn complete(&self) -> bool {
@@ -448,8 +466,10 @@ impl Pack {
     /// files put back. Nothing is read in the Trash (ADR 0014).
     fn check(&mut self, disk: &mut [OnDisk; FILES], folder: &mut bool, held: bool, returning: BTreeMap<usize, Gone>) {
         let _ = folder;
-        // Added again: every file closed until it's let run.
+        // Added again: every file closed until it's let run, and one it gets that isn't there is got
+        // from nothing (#374).
         self.granted = [false; FILES];
+        self.forget_absent(disk);
         self.reopens = true;
         self.letting_go = false;
         self.unchecked = false;
@@ -469,6 +489,16 @@ impl Pack {
         self.have = read(disk);
         self.missing =
             returning.into_iter().filter(|(f, g)| g.had && !self.have[*f]).map(|(f, g)| (f, Gone { back: false, ..g })).collect();
+        // What it read of the files it gets is noted; one it found none at, or missing again, isn't.
+        for f in (0..FILES).filter(|&f| !self.off[f]) {
+            self.noted[f] = if disk[f] == OnDisk::Absent || self.missing.contains_key(&f) { Note::None } else { Note::Read };
+        }
+    }
+
+    /// Whether a file it gets is at its path that isn't the one noted (`inodes`): added back with the
+    /// pieces librqbit saved, it's checked in full instead (#393).
+    fn differs(&self, disk: &[OnDisk; FILES], inodes: &[u32; FILES]) -> bool {
+        (0..FILES).any(|f| !self.off[f] && disk[f] != OnDisk::Absent && self.noted[f] != Note::Of(inodes[f]))
     }
 
     /// Cancel check: a check under way ends, its work lost. Unchecked, saying Missing files while
@@ -495,6 +525,21 @@ impl Pack {
         made
     }
 
+    /// Added to librqbit: the files it gets that aren't there lose their notes (#374).
+    fn forget_absent(&mut self, disk: &[OnDisk; FILES]) {
+        (0..FILES).filter(|&f| !self.off[f] && disk[f] == OnDisk::Absent).for_each(|f| self.noted[f] = Note::None);
+    }
+
+    /// Whether it's let run: its files are granted.
+    fn runs(&self) -> bool {
+        matches!(self.status(), Status::Seeding | Status::Downloading) && !self.letting_go && !self.deleting && !self.delete_failed
+    }
+
+    /// Whether file `f`, which it gets, is gone: had or noted, and not at its path.
+    fn gone(&self, disk: &[OnDisk; FILES], f: usize) -> bool {
+        !self.off[f] && disk[f] == OnDisk::Absent && (self.have[f] || self.noted[f] != Note::None)
+    }
+
     /// The engine's size check: a file it gets that's gone makes it Missing files; once
     /// every missing file is back it's checked, and those that aren't what they were are missing
     /// again.
@@ -503,9 +548,8 @@ impl Pack {
         if self.checking.is_some() || self.unchecked {
             return;
         }
-        // One never had nor made isn't missing: it's made as it's let run (#374).
-        let gone: Vec<usize> =
-            (0..FILES).filter(|&f| !self.off[f] && disk[f] == OnDisk::Absent && (self.have[f] || self.granted[f])).collect();
+        // One never had nor noted isn't missing: it's made as it's let run (#374, #385).
+        let gone: Vec<usize> = (0..FILES).filter(|&f| self.gone(disk, f)).collect();
         if self.missing.is_empty() {
             if !gone.is_empty() {
                 self.missing = gone.into_iter().map(|f| (f, Gone { had: self.have[f], back: false })).collect();
@@ -579,6 +623,8 @@ impl Model {
                     reopens: false,
                     letting_go: false,
                     granted: [false; FILES],
+                    noted: [Note::None; FILES],
+                    had_unknown: false,
                 };
                 // Its folder is made with its files, once it's let run (#374).
                 p.check(&mut self.disk[pack], &mut self.folder[pack], self.checks_held, BTreeMap::new());
@@ -687,6 +733,7 @@ impl Model {
                         if p.have[*file] || p.granted[*file] {
                             p.lets_go(*file);
                         }
+                        p.noted[*file] = Note::None;
                     }
                 }
             }
@@ -734,10 +781,16 @@ impl Model {
         let replaced: [bool; FILES] = std::array::from_fn(|f| disk[f] != OnDisk::Absent && p.open[f] != Some(inodes[f]));
         p.open = [None; FILES];
         p.reopens = p.missing.is_empty() && !p.unchecked;
+        // A file replaced by hand isn't the torrent's any more: its note goes (#374).
+        (0..FILES).filter(|&f| replaced[f]).for_each(|f| p.noted[f] = Note::None);
         if !(p.unchecked && !p.missing.is_empty()) {
             let read = read(&disk);
             if (0..FILES).any(|f| p.have[f] && !read[f]) || (p.missing.is_empty() && replaced.contains(&true)) {
                 p.have = read;
+            }
+            // Checked in full for it, which notes what it reads.
+            if p.missing.is_empty() && replaced.contains(&true) {
+                (0..FILES).filter(|&f| !off[f] && disk[f] != OnDisk::Absent).for_each(|f| p.noted[f] = Note::Read);
             }
             if !p.missing.is_empty() {
                 (0..FILES).filter(|&f| replaced[f]).for_each(|f| p.have[f] = false);
@@ -1093,6 +1146,10 @@ impl Model {
                 // Added again, it has no file open: one it had made, gone since, is made again as it
                 // starts, not Missing files (#374).
                 p.granted = [false; FILES];
+                // Added to librqbit, a file it gets that isn't there is got from nothing: not missing.
+                if !p.delete_failed {
+                    p.forget_absent(disk);
+                }
                 // The destination is available now (else the Undo was refused above): one removed
                 // while it was gone is added again with it back, and runs if it was running (#202).
                 let was_unavailable = std::mem::take(&mut p.unavailable);
@@ -1369,6 +1426,7 @@ impl Model {
             for &f in p.missing.keys() {
                 p.have[f] = false;
             }
+            p.had_unknown = p.checking.is_some() || p.unchecked;
             let returning = p.checking.take().unwrap_or_default();
             p.uncounted.extend(returning.keys().copied());
             // The files a check was of, or a cancelled one left: back if they're there, as the engine
@@ -1409,8 +1467,12 @@ impl Model {
         }) {
             p.unavailable = false;
             // Those known missing as it went are judged as a size check judges them (#464).
+            // So is a file it had or noted that isn't there (#385).
+            if std::mem::take(&mut p.had_unknown) {
+                (0..FILES).filter(|&f| disk[f] == OnDisk::Absent).for_each(|f| p.have[f] = false);
+            }
             if p.delete_failed {
-            } else if p.missing.is_empty() {
+            } else if p.missing.is_empty() && !(0..FILES).any(|f| p.gone(disk, f)) {
                 p.check(disk, folder, held, BTreeMap::new());
             } else {
                 p.size_check(disk, folder, held);
@@ -1447,9 +1509,17 @@ impl Model {
                 // at their paths, `restorable` lets a restart come only when what it has is what's
                 // there, so this tells only for those missing.
                 let read = read(&self.disk[p.pack]);
-                let checked = (0..FILES).any(|f| p.have[f] && !read[f]);
+                // A file it gets at its path that isn't the one noted: checked in full, which notes
+                // what it reads (#393).
+                let replaced = p.differs(&self.disk[p.pack], &self.inodes[p.pack]);
+                let checked = replaced || (0..FILES).any(|f| p.have[f] && !read[f]);
                 if checked {
                     p.have = read;
+                }
+                if replaced {
+                    for f in (0..FILES).filter(|&f| !p.off[f]) {
+                        p.noted[f] = if self.disk[p.pack][f] == OnDisk::Absent { Note::None } else { Note::Read };
+                    }
                 }
             }
             // What's at a missing file's path at start isn't taken for the file put back.
@@ -2039,7 +2109,9 @@ impl ReferenceStateMachine for EngineModel {
             }
             Step::HoldTrash => !model.held,
             Step::ReleaseTrash => model.held,
-            Step::DeleteFile { pack, .. } | Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
+            // A file can be deleted while its destination is away: it's absent when it's back (#385).
+            Step::DeleteFile { .. } => true,
+            Step::PutBack { pack, .. } | Step::Overwrite { pack, .. } => !model.unavailable[*pack],
             Step::DestinationGone { pack } => !model.unavailable[*pack],
             Step::WriteMine { pack } => !model.unavailable[*pack] && !model.mine[*pack],
             Step::WriteLitter { pack } => !model.unavailable[*pack] && !model.litter[*pack],
@@ -2273,6 +2345,19 @@ impl Model {
         }
         self.reopen();
         self.grant_running();
+        self.note_read();
+    }
+
+    /// The files a check read, noted as the ones at their paths now.
+    fn note_read(&mut self) {
+        for t in self.torrents.values_mut() {
+            let Torrent::Pack(p) = t else { continue };
+            for f in 0..FILES {
+                if p.noted[f] == Note::Read {
+                    p.noted[f] = Note::Of(self.inodes[p.pack][f]);
+                }
+            }
+        }
     }
 
     /// A torrent added again, or added back as it let go of pieces, has its files open as they are
@@ -2286,7 +2371,7 @@ impl Model {
     fn reopen_but(&mut self, busy: &BTreeSet<TorrentId>) {
         for (id, t) in self.torrents.iter_mut() {
             let Torrent::Pack(p) = t else { continue };
-            let disk = &self.disk[p.pack];
+            let k = p.pack;
             let ready = p.missing.is_empty()
                 && !p.unchecked
                 && p.checking.is_none()
@@ -2294,9 +2379,14 @@ impl Model {
                 && !p.delete_failed
                 && !p.deleting
                 && !busy.contains(id);
-            if p.letting_go && ready {
+            // Added back with its saved pieces, but a file it gets isn't the one noted: checked in full
+            // instead (#393).
+            if p.letting_go && ready && p.differs(&self.disk[k], &self.inodes[k]) {
+                p.check(&mut self.disk[k], &mut self.folder[k], self.checks_held, BTreeMap::new());
+            } else if p.letting_go && ready {
                 (p.letting_go, p.reopens) = (false, true);
             }
+            let disk = &self.disk[k];
             if std::mem::take(&mut p.reopens) {
                 p.granted = [false; FILES];
                 p.open = std::array::from_fn(|f| match disk[f] {
@@ -2315,13 +2405,14 @@ impl Model {
     fn grant_running(&mut self) {
         for t in self.torrents.values_mut() {
             let Torrent::Pack(p) = t else { continue };
-            if !matches!(p.status(), Status::Seeding | Status::Downloading) || p.letting_go || p.deleting || p.delete_failed {
+            if !p.runs() {
                 continue;
             }
             for f in p.make_absent(&mut self.disk[p.pack], &mut self.folder[p.pack]) {
                 self.last_inode += 1;
                 self.inodes[p.pack][f] = self.last_inode;
                 p.open[f] = Some(self.last_inode);
+                p.noted[f] = Note::Of(self.last_inode);
             }
         }
     }
@@ -2376,7 +2467,8 @@ fn off_and_gone(model: &Model) -> Vec<(usize, usize)> {
 }
 
 /// Whether a restart may come: what librqbit has of every torrent is what's on disk (see
-/// `preconditions`), but for one whose files are partly in the Trash, which isn't checked, and
+/// `preconditions`), but for one checked in full at the start as a file isn't the one noted
+/// (#393), for one whose files are partly in the Trash, which isn't checked, and
 /// for a file set Off that's gone: librqbit reads a piece of every file it has some of before it
 /// trusts what it saved, and one gone makes it check them all (#158).
 fn restorable(model: &Model) -> bool {
@@ -2392,10 +2484,12 @@ fn restorable(model: &Model) -> bool {
             (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !off_and_gone(f)).all(|f| p.have[f] == (stash.kept[f].0 == OnDisk::Valid))
         }),
         Torrent::Pack(p) if p.delete_failed || p.deleting || p.unchecked => true,
+        // One with a file at its path that isn't the one noted is checked in full at the start (#393).
         Torrent::Pack(p) => {
             let disk = &model.disk[p.pack];
             let off_and_gone = |f: usize| p.off[f] && disk[f] == OnDisk::Absent;
-            (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !off_and_gone(f)).all(|f| p.have[f] == (disk[f] == OnDisk::Valid))
+            (p.missing.is_empty() && p.differs(disk, &model.inodes[p.pack]))
+                || (0..FILES).filter(|&f| !p.missing.contains_key(&f) && !off_and_gone(f)).all(|f| p.have[f] == (disk[f] == OnDisk::Valid))
         }
     })
 }
@@ -3534,9 +3628,26 @@ fn a_file_made_as_a_resume_behind_a_rollback_starts_goes_with_the_next_delete() 
     ]);
 }
 
+/// #385: a file deleted while its destination is away is absent when it's back: Missing files, not
+/// made again by the check and downloaded, as Phantom noted it; nor one let run with nothing had,
+/// whose files Phantom made.
+#[test]
+fn a_file_deleted_while_the_destination_is_away_makes_its_torrent_missing_files_when_it_is_back() {
+    for paused in [false, true] {
+        replay(&[
+            Step::Add { pack: Some(0), paused },
+            Step::DestinationGone { pack: 0 },
+            Step::DeleteFile { pack: 0, file: 1 },
+            Step::DestinationBack { pack: 0 },
+            Step::Resume(0),
+        ]);
+    }
+}
+
 /// #45's long run: a Delete aborted by Undo, its torrent missing a file, put back and checked, a
-/// restart cutting that check short: nothing is recorded of what librqbit had while it checked, so
-/// the file librqbit made again isn't judged missing at the next start.
+/// restart cutting that check short: nothing is recorded of what librqbit had while it checked, and
+/// the check let go of the note of the file it would find none of as it began (#374), so the file
+/// librqbit made again isn't judged missing at the next start.
 #[test]
 fn an_undo_whose_check_a_restart_cuts_short_is_checked_after_it() {
     replay(&[

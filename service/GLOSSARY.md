@@ -51,6 +51,14 @@ check finds (the files it's getting and what's on disk at each, or its destinati
 What it means (files missing, set Off or put back) is the torrent's rules' to decide. It changes
 only the phase and is never refused.
 
+**Note**:
+Phantom's record of which file at a path is a torrent's own, and why: Phantom made it, or a check
+read it. It names the file (its disk, inode and when it was made), not what's in it. A torrent's
+file noted and gone is missing, whatever was had of it; one at its path that isn't the noted file
+makes the torrent checked in full before it resumes from the pieces librqbit saved. A file moved
+to the Trash, or set Off and gone, has none.
+_Avoid_: mark, stamp (a size check's), fingerprint
+
 **Size check**:
 Phantom's cheap, automatic look at a torrent's files: does each file it's getting still exist,
 with a plausible size? Reads no data; the file watcher and a regular sweep run it, and it's how

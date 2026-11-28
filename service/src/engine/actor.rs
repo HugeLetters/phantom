@@ -68,6 +68,7 @@ use super::held::Held;
 use super::machine::add;
 use super::machine::lib::{self, Librqbit};
 use super::machine::{self, Broke, Event, Observation, Phase, Refusal, State, Wants, decide, seeding};
+use super::notes;
 use super::slots::{Granting, Refused};
 use super::snapshot::{Published, Snapshot};
 use super::space;
@@ -1022,6 +1023,10 @@ impl Actor {
             if phase_changed {
                 torrent.keep_known();
             }
+            // A check ended: the files it read are noted, saved with the phase (#374).
+            if matches!(before, Phase::Checking { .. }) && matches!(torrent.lifecycle.phase, Phase::Ready | Phase::MissingFiles { .. }) {
+                note_checked(torrent, self.guard.trashed());
+            }
             let record = &mut torrent.record;
             if wants_changed
                 || phase_changed
@@ -1142,6 +1147,8 @@ impl Actor {
         let refused = tokio::task::spawn_blocking(move || trashed.grant(&hash, &granting, &files))
             .await
             .map_err(|e| anyhow!("granting its files: {e}"))?;
+        // What it made is noted before librqbit is let write.
+        self.note_made(id);
         if !refused.is_empty() {
             warn!(id, ?refused, "its files aren't the ones its check read, or not its own to write");
         }
@@ -1218,9 +1225,28 @@ impl Actor {
         }
         let record = &self.torrents[&id].record;
         let saved = bitv::path(&self.session_folder(), &record.info_hash);
+        // Added back with its saved pieces, but a file it gets at its path isn't the one noted
+        // (replaced by hand, or put where none was): checked in full instead, as librqbit's own look
+        // at a few pieces passes it (#393).
+        let paths = record.paths();
+        let replaced = !checks
+            && saved.exists()
+            && notes::differs(&record.notes, record.normal().into_iter().filter_map(|i| Some((i, paths.get(i)?.clone()))));
+        let checks = checks || replaced;
         if checks {
             bitv::forget(&saved);
         }
+        // A file it gets that isn't there is got from nothing once it's added: librqbit checks it
+        // (it had some), or it's made as the torrent starts. Its note goes now, so an add cut short
+        // leaves it as one that went on would, not missing (#374). One known missing isn't added.
+        let gone: Vec<usize> =
+            record.normal().into_iter().filter(|i| paths.get(*i).is_some_and(|p| std::fs::symlink_metadata(p).is_err())).collect();
+        if gone.iter().any(|i| record.notes.contains_key(i)) {
+            let torrent = self.torrents.get_mut(&id).expect("just found");
+            torrent.record.notes.retain(|i, _| !gone.contains(i));
+            self.save();
+        }
+        let record = &self.torrents[&id].record;
         // A check finds what's on disk: nothing is left to let go of (#234), a file gone for good
         // having none of its pieces once it's checked.
         if checks && matches!(record.letting_go, machine::letgo::State::Gone { .. }) {
@@ -1254,8 +1280,11 @@ impl Actor {
                 torrent.polled = Polled::of(&handle.stats(), &torrent.polled);
                 torrent.lib = lib::Lib::In(handle);
                 // Added again, it checks; with nothing saved, its lifecycle hears librqbit check it at
-                // the next poll.
-                if checks {
+                // the next poll. One checked as a file isn't the one noted hears it now, as librqbit
+                // checking by itself: it isn't let run meanwhile.
+                if replaced {
+                    torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::Checking)).expect("never refused");
+                } else if checks {
                     torrent.lifecycle = decide(&torrent.lifecycle, &Event::Observed(Observation::AddedAgain)).expect("never refused");
                 }
                 Ok(())
@@ -1372,6 +1401,7 @@ impl Actor {
 
     /// Size-checks the torrent, for its machine to decide what that means.
     pub(super) async fn size_check(&mut self, id: TorrentId) {
+        self.note_made(id);
         let seen = self.size_checked(id);
         self.look_at_files(id, seen.as_ref());
         let Some(seen) = seen else { return };
@@ -1408,6 +1438,19 @@ impl Actor {
         torrent.there = there;
     }
 
+    /// Notes Made the files Phantom made of torrent `id` since it last asked ([`notes`]), and saves
+    /// them: as it's granted its files, and before each size check, which a write into a file set
+    /// Off that isn't there may have made one for.
+    fn note_made(&mut self, id: TorrentId) {
+        let Some(torrent) = self.torrents.get_mut(&id) else { return };
+        let made = self.guard.trashed().take_made(&torrent.record.info_hash);
+        if made.is_empty() {
+            return;
+        }
+        notes::made(&mut torrent.record.notes, made);
+        self.save();
+    }
+
     /// What a size check of the torrent finds: its destination out of reach, or the files it's
     /// getting as they are on disk. Not its files while librqbit checks them, which it's writing
     /// then (restoring a torrent makes its missing files again); nothing without info.
@@ -1421,14 +1464,9 @@ impl Actor {
             return None;
         }
         // Gone while its files were looked at, every one seemed missing: it's the destination that is.
-        // Open for writing, one gone from its path went; not one let go of, which is got from nothing.
-        let letting_go: BTreeSet<usize> = match &torrent.record.letting_go {
-            machine::letgo::State::Holding => BTreeSet::new(),
-            machine::letgo::State::Gone { pieces } | machine::letgo::State::Stashed { pieces, .. } => pieces.keys().copied().collect(),
-        };
-        let open: BTreeSet<usize> = self.guard.trashed().writable(&torrent.record.info_hash).difference(&letting_go).copied().collect();
+        // Noted, one gone from its path went (#385); one let go of has no note, and is got from nothing.
         let shared = torrent.record.info.as_ref().map(Info::shared_bytes).unwrap_or_default();
-        Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent), &open, &shared)) {
+        Some(match files::seen(&torrent.record.destination, || files::disk_of(&expected(torrent), &torrent.record.notes, &shared)) {
             Ok(disk) => Observation::Files(disk),
             Err(reason) => Observation::DestinationGone { reason },
         })
@@ -1870,7 +1908,7 @@ impl Actor {
         };
         torrent.record.gets = Gets::Only(normal);
         if !gone.is_empty() {
-            torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
+            torrent.record.let_go(gone);
         }
         if priority == Priority::Normal {
             self.normal_again(id, indices, back);
@@ -1903,6 +1941,10 @@ impl Actor {
         if again.is_empty() {
             return;
         }
+        // Nor is a file noted of it there any more: got from nothing, not missing (#374).
+        self.torrents.get_mut(&id).expect("just found").record.notes.retain(|i, _| !again.contains(i));
+        let Some(torrent) = self.torrents.get(&id) else { return };
+        let Some(info) = &torrent.record.info else { return };
         let hash = torrent.record.info_hash.clone();
         let open = self.guard.trashed().open(&hash);
         let gone: machine::letgo::Pieces = again
@@ -1913,7 +1955,7 @@ impl Actor {
         if !gone.is_empty() {
             let closing = gone.keys().copied().collect();
             let torrent = self.torrents.get_mut(&id).expect("just found");
-            torrent.record.letting_go = machine::letgo::decide(&torrent.record.letting_go, &machine::letgo::Event::Found(gone));
+            torrent.record.let_go(gone);
             self.guard.trashed().let_go(&hash, &closing);
         }
         self.look_at_files(id, None);
@@ -2007,6 +2049,20 @@ impl Torrent {
         };
         (self.record.missing, self.record.had) = (missing, had);
     }
+}
+
+/// Notes the files a check of `torrent` just read, as it ends ([`notes::checked`]), from its storage
+/// in `trashed`: each it gets and didn't find missing is the torrent's; one it found none at, or
+/// found missing, has no note.
+fn note_checked(torrent: &mut Torrent, trashed: &super::trashed::Trashed) {
+    let read = trashed.identities(&torrent.record.info_hash);
+    let missing = missing(&torrent.lifecycle.phase);
+    let normal = torrent.record.normal();
+    let kept: BTreeSet<usize> = normal.iter().copied().filter(|i| !missing.contains(i)).collect();
+    let absent: BTreeSet<usize> = read.iter().filter(|(i, at)| at.is_none() && normal.contains(i)).map(|(i, _)| *i).collect();
+    let read: BTreeMap<usize, notes::Identity> =
+        read.into_iter().filter(|(i, _)| normal.contains(i)).filter_map(|(i, at)| Some((i, at?))).collect();
+    notes::checked(&mut torrent.record.notes, &read, &kept, &absent);
 }
 
 /// What librqbit's saved pieces, in its `session` folder, say it has of each of `record`'s files.
@@ -2372,7 +2428,7 @@ mod uncounted_tests {
     #[test]
     fn an_error_without_a_check_ending_keeps_the_files_uncounted() {
         let expected = files::Expected { index: 0, path: "/gone/b.bin".into(), size_bytes: 10, progress_bytes: 10 };
-        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected], &BTreeSet::new(), &[]).files[&0]))]);
+        let gone = BTreeMap::from([(1, files::Gone::found(&files::disk_of(&[expected], &BTreeMap::new(), &[]).files[&0]))]);
         let error = Phase::Error { failure: Broke::Librqbit { detail: "drive gone".into() } };
         let away = Phase::DestinationUnavailable {
             reason: proto::Unavailable::FolderMissing { path: AbsolutePath::new("/away").unwrap() },

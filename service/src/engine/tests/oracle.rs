@@ -1780,6 +1780,50 @@ async fn open_a_crash_during_a_check_lets_a_shorter_file_grow() {
     often(vec![Step::Settle, Step::Do(Do::Check), put]).await;
 }
 
+/// #493, found by this test: a file taken away and an empty one put there, a crash; Remove and Undo;
+/// the drive gone, a hard link at another file's path, and a person's shorter file put where the
+/// first was, a crash. The next start wrote into the person's file (10 of 12 runs on master). The
+/// notes say it isn't the file noted, but the drive coming back checks it anyway, and the check takes
+/// what it finds for the torrent's own: only refusing a file that holds less than was had (gate PR 6)
+/// closes it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "file-trust A: shorter than had, a crash with the drive away (#493): gate PR 6's default deny"]
+async fn a_persons_shorter_file_put_while_the_drive_is_away_isnt_written_after_a_crash() {
+    let steps = vec![
+        Step::By(By::TakeAway { file: 0 }),
+        Step::Settle,
+        Step::Between { by: By::Put { file: 0, kind: Empty }, crash: true },
+        Step::Do(Do::Remove),
+        Step::Do(Do::Undo),
+        Step::Settle,
+        Step::PeerOpens,
+        Step::Settle,
+        Step::By(By::DriveGone),
+        Step::By(By::Put { file: 1, kind: EqualHardLink }),
+        Step::Between { by: By::Put { file: 0, kind: Shorter }, crash: true },
+        Step::Crash,
+        Step::Settle,
+        Step::PeerOpens,
+        Step::Settle,
+    ];
+    excusing(vec![Case { start: Start::Whole, peer: true, paused: false, before: None, steps }; 6]).await;
+}
+
+/// Runs each of `cases` as the generated ones are, excusing the routes still open, `WIDTH` at a
+/// time. A failing one fails the test, named.
+async fn excusing(cases: impl IntoIterator<Item = Case>) {
+    let peers = Arc::new(Peers::start().await);
+    super::side_by_side(WIDTH, cases, move |case| {
+        let peers = peers.clone();
+        async move {
+            if let Err(why) = fails(&peers, &case, false).await {
+                panic!("{why}\ncase: {case:?}");
+            }
+        }
+    })
+    .await;
+}
+
 /// Found by this test (#464): a file put where one known missing was, the drive gone and back, then a
 /// crash once the other missing file is back. The check of the returning drive took the person's file
 /// for the torrent's own, so the next start downloaded into it.

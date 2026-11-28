@@ -19,12 +19,14 @@
 //! held while a file is read, written, opened or closed, so neither [`Slots::each`] nor a handle's
 //! drop waits for a disk that another thread waits for. No lock is taken under it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 
 use anyhow::{Context, Result, bail};
 
+use super::notes::Identity;
 use super::parts::Parts;
 use super::store::Info;
 
@@ -35,6 +37,8 @@ pub(super) struct Slots {
     now: Mutex<Option<Arc<Opening>>>,
     /// What's kept aside of its files: outlives every storage, as it must a re-add.
     parts: Parts,
+    /// The files Phantom made at their paths, by index, until the actor notes them ([`Slots::take_made`]).
+    made: Mutex<BTreeMap<usize, Identity>>,
 }
 
 /// What a storage's `init` opened.
@@ -64,7 +68,7 @@ pub(super) enum Opened {
 
 impl Slots {
     pub fn new(parts: Parts) -> Self {
-        Self { now: Mutex::default(), parts }
+        Self { now: Mutex::default(), parts, made: Mutex::default() }
     }
 
     /// What's kept aside of its files.
@@ -104,7 +108,10 @@ impl Slots {
         let mut slot = waiting(|| slot.try_write())?;
         let file = match std::mem::replace(&mut *slot, Opened::Closed(None)) {
             Opened::Closed(None) => match made(path, want) {
-                Ok(file) => file,
+                Ok(file) => {
+                    self.was_made(index, &file);
+                    file
+                }
                 Err(e) if matches!(e.raw_os_error(), Some(libc::EEXIST | libc::ELOOP)) => return Err(there(path)),
                 Err(e) => return Err(Refused::Failed(format!("making {path:?}: {e}"))),
             },
@@ -143,6 +150,40 @@ impl Slots {
                 Err(fail(e))
             }
         }
+    }
+
+    /// File `index`, just made at its path by Phantom: to be noted Made.
+    pub fn was_made(&self, index: usize, file: &std::fs::File) {
+        if let Some(made) = Identity::of_file(file) {
+            self.made.lock().unwrap_or_else(PoisonError::into_inner).insert(index, made);
+        }
+    }
+
+    /// The files made since this was last asked, by index.
+    pub fn take_made(&self) -> BTreeMap<usize, Identity> {
+        std::mem::take(&mut *self.made.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Which file each is that's open now, read or written, by index; `None`: none was there as it
+    /// was opened (or it was let go of since). Waits for none: one being written or made now, and
+    /// padding, are left out.
+    pub fn identities(&self) -> BTreeMap<usize, Option<Identity>> {
+        let mut files = BTreeMap::new();
+        self.each(|index, path, file| {
+            let Ok(opened) = file.try_read() else { return };
+            match &*opened {
+                Opened::Open(f) | Opened::Closed(Some(f)) => {
+                    if let Some(id) = Identity::of_file(f) {
+                        files.insert(index, Some(id));
+                    }
+                }
+                Opened::Closed(None) if path.is_some() => {
+                    files.insert(index, None);
+                }
+                Opened::Closed(None) | Opened::HandedOn => {}
+            }
+        });
+        files
     }
 
     /// `f` of each file, by index, with its path: one being read or written now is locked.
