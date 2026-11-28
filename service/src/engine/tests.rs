@@ -3231,7 +3231,10 @@ async fn remove_or_delete_three_then_one_undo_brings_all_three_back() {
         let stack = engine.subscribe().borrow().snapshot.undo.clone();
         assert_eq!(stack.into_iter().map(unnumbered).collect::<Vec<_>>(), [one.clone()], "{action:?}: one press, one entry");
 
-        assert_eq!(unnumbered(engine.undo().await.unwrap()), one, "{action:?}: one ⌘Z, all three");
+        // The answer lists them as each came back, which no order rules: by id.
+        let mut undone = unnumbered(engine.undo().await.unwrap());
+        undone.torrents.sort_by_key(|t| t.id);
+        assert_eq!(undone, one, "{action:?}: one ⌘Z, all three");
         for &id in &ids {
             wait_for(&engine, id, Status::Seeding).await;
         }
