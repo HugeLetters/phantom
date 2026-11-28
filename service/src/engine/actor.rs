@@ -582,23 +582,24 @@ impl Actor {
                     None => return,
                 },
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
-                    let (id, carried, planned) = done.expect("a trashing's panic is caught");
+                    let Some((id, carried, planned)) = came_to(done) else { return };
                     self.trashed(id, carried, planned).await;
                     self.run_steps().await;
                 }
                 Some(done) = self.file_trashing.join_next(), if !self.file_trashing.is_empty() => {
-                    self.files_trashed(done.expect("a trashing's panic is caught")).await;
+                    let Some(ended) = came_to(done) else { return };
+                    self.files_trashed(ended).await;
                     self.run_steps().await;
                 }
                 Some((id, moved)) = self.went.recv() => self.went(id, moved),
                 Some((seq, id, moved)) = self.files_went.recv() => self.files_went(seq, id, moved),
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
-                    let (seq, id, put) = done.expect("a put-back's panic is caught");
+                    let Some((seq, id, put)) = came_to(done) else { return };
                     self.put_back_ended(seq, id, put).await;
                     self.run_steps().await;
                 }
                 Some(done) = self.move_tasks.join_next(), if !self.move_tasks.is_empty() => {
-                    let (id, moved) = done.expect("a move's panic is caught");
+                    let Some((id, moved)) = came_to(done) else { return };
                     self.move_task_ended(id, moved).await;
                     self.run_steps().await;
                 }
@@ -836,22 +837,24 @@ impl Actor {
         self.start_held().await;
         loop {
             tokio::select! {
+                // The runtime ending cancelled a task: nothing more is saved, as at a crash.
                 Some(done) = self.trashing.join_next(), if !self.trashing.is_empty() => {
-                    let (id, carried, planned) = done.expect("a trashing's panic is caught");
+                    let Some((id, carried, planned)) = came_to(done) else { return Default::default() };
                     self.trashed(id, carried, planned).await;
                     self.run_steps().await;
                 }
                 Some(done) = self.file_trashing.join_next(), if !self.file_trashing.is_empty() => {
-                    self.files_trashed(done.expect("a trashing's panic is caught")).await;
+                    let Some(ended) = came_to(done) else { return Default::default() };
+                    self.files_trashed(ended).await;
                     self.run_steps().await;
                 }
                 Some(done) = self.putting_back.join_next(), if !self.putting_back.is_empty() => {
-                    let (seq, id, put) = done.expect("a put-back's panic is caught");
+                    let Some((seq, id, put)) = came_to(done) else { return Default::default() };
                     self.put_back_ended(seq, id, put).await;
                     self.run_steps().await;
                 }
                 Some(done) = self.move_tasks.join_next(), if !self.move_tasks.is_empty() => {
-                    let (id, moved) = done.expect("a move's panic is caught");
+                    let Some((id, moved)) = came_to(done) else { return Default::default() };
                     self.move_task_ended(id, moved).await;
                     self.run_steps().await;
                 }
@@ -2074,6 +2077,18 @@ fn librqbit_seen(stats: &TorrentStats) -> Observation {
     }
 }
 
+/// What a task of the actor's (a trashing, a put-back, a move's) came to, or `None` once its runtime
+/// ends: tokio then cancels a blocking task not started yet, and one spawned after (#442). Each task
+/// catches its own panic, so that's the only error. The actor ends then too, as at a crash, and the
+/// next start finishes what the task was doing: each step is written ahead.
+fn came_to<T>(done: Result<T, tokio::task::JoinError>) -> Option<T> {
+    match done {
+        Ok(came) => Some(came),
+        Err(e) if e.is_cancelled() => None,
+        Err(e) => std::panic::resume_unwind(e.into_panic()),
+    }
+}
+
 /// The files missing, by index: those of a torrent that's Missing files.
 fn missing(phase: &Phase) -> BTreeSet<usize> {
     match phase {
@@ -2416,5 +2431,62 @@ mod keep_known_tests {
         let disk = files::Disk { files: [found(0, 7), found(1, 8)].into() };
         let back = decide(&torrent.lifecycle, &Event::Observed(Observation::Files(disk))).unwrap();
         assert_ne!(back.phase, Phase::CheckDue { returning: BTreeMap::new() }, "checked in full: a.bin is taken for the torrent's");
+    }
+}
+
+#[cfg(test)]
+mod runtime_end_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::super::{Config, Engine, POLL_EVERY, trash};
+    use super::{Actor, Message};
+
+    /// #442: as its runtime ends, tokio cancels what's spawned on its blocking pool from then on:
+    /// here a put-back, spawned by the actor still running then, as when an undo a crash cut short
+    /// resumes at a start and the service's `main` fails and returns. The actor ends with the
+    /// runtime, as at a crash, without a panic.
+    #[test]
+    fn a_put_back_the_ending_runtime_cancels_ends_the_actor_without_a_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let engine = rt
+            .block_on(Engine::start(Config {
+                data_dir: dir.path().join("data"),
+                download_dir: dir.path().join("downloads"),
+                listen_port: 0,
+                upnp: false,
+                offline: true,
+                size_check_every: POLL_EVERY,
+                poll_every: POLL_EVERY,
+                trash: trash::into(dir.path().join("trash"), Default::default(), Default::default()),
+                speed_limits: Default::default(),
+                seeding: Default::default(),
+            }))
+            .unwrap();
+        let (inside, entered) = std::sync::mpsc::channel();
+        let put_back_as_it_ends = move |actor: &mut Actor| {
+            inside.send(()).unwrap();
+            // Till the runtime's blocking pool is shut down: a probe spawned from then on never runs.
+            loop {
+                let ran = Arc::new(AtomicBool::new(false));
+                let probe = tokio::task::spawn_blocking({
+                    let ran = ran.clone();
+                    move || ran.store(true, Ordering::SeqCst)
+                });
+                while !probe.is_finished() {
+                    std::hint::spin_loop();
+                }
+                if !ran.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            actor.putting_back.spawn_blocking(|| unreachable!("cancelled before it starts"));
+        };
+        engine.actor.try_send(Message::Inspect(Box::new(put_back_as_it_ends))).unwrap();
+        entered.recv().unwrap();
+        drop(rt);
+        let ended = tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(engine.ran);
+        assert!(!ended.as_ref().is_err_and(|e| e.is_panic()), "the actor panicked: {ended:?}");
     }
 }

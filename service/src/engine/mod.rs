@@ -117,6 +117,9 @@ pub struct Engine {
     session_folder: PathBuf,
     /// Where the torrents' database was kept aside at this start, if it was ([`store::Loaded::set_aside`]).
     records_set_aside: Option<PathBuf>,
+    /// The actor's task, for a test to see how it ended.
+    #[cfg(test)]
+    ran: tokio::task::JoinHandle<()>,
 }
 
 /// An add, checked and ready to hand to librqbit.
@@ -245,8 +248,18 @@ impl Engine {
         )
         .await;
         let snapshot = actor.subscribe();
-        tokio::spawn(actor.run(inbox));
-        Ok(Self { actor: tx, snapshot, session: Mutex::new(Some(session)), session_folder, records_set_aside: set_aside })
+        let ran = tokio::spawn(actor.run(inbox));
+        #[cfg(not(test))]
+        drop(ran);
+        Ok(Self {
+            actor: tx,
+            snapshot,
+            session: Mutex::new(Some(session)),
+            session_folder,
+            records_set_aside: set_aside,
+            #[cfg(test)]
+            ran,
+        })
     }
 
     /// Every torrent, including those fetching info, by id.
