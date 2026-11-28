@@ -50,6 +50,12 @@
    process group and leaves nothing behind. A home-made wrapper with a background `sleep` as its
    watchdog can orphan that sleep, which keeps a `| grep` hanging long after the tests finished.
 
+   **Heavy runs take a slot:** a whole suite, a long property run or a release build goes through
+   `scripts/heavy.sh <seconds> <command>` instead, which waits for one of the machine's two slots
+   and then runs it under `with-timeout.sh`. Several agents share this 8-core Mac; three suites at
+   once drove the load past 300 and every timing-sensitive test failed. A single test or a
+   filtered handful needs no slot.
+
    **How long a run, when:**
    - *While changing code:* the default suite (16–32 generated cases per property) plus the
      specific test you're working on.
