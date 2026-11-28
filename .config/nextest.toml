@@ -3,8 +3,8 @@
 # for `cargo test -p gui --test appkit`. nextest doesn't run doc-tests: `cargo test --doc` does.
 #
 # The budget: a test is flagged SLOW past 20 s on an idle machine. `--profile budget` fails it there,
-# unless it's in `slow` below. The default profile only kills one at 300 s: agents' runs share a
-# loaded machine, where a 20 s test can take minutes.
+# unless the budget profile lists it below, with why. The default profile only kills one at 300 s:
+# agents' runs share a loaded machine, where a 20 s test can take minutes.
 [profile.default]
 default-filter = 'not binary(appkit)'
 retries = 1
@@ -25,6 +25,12 @@ test-group = 'cpu'
 [profile.budget]
 slow-timeout = { period = "20s", terminate-after = 1 }
 retries = 0
+
+# 48 s idle: six cases one after another, each a real service with restarts (8 s). They can't run
+# side by side while a client finds its service by the process's PHANTOM_DATA_DIR.
+[[profile.budget.overrides]]
+filter = 'binary(settings)'
+slow-timeout = { period = "60s", terminate-after = 1 }
 
 # The long property runs (`PROPTEST_CASES=256` and up): a test is flagged every 60 s and never
 # killed. A test killed in another profile counts as failed (TIMEOUT), never as passed.

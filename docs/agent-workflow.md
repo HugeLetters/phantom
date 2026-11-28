@@ -57,8 +57,8 @@
      fail falsely. Check `pgrep -fl 'cargo|nextest'` for other worktrees first.
 
    **Keep tests fast.** A test's budget is 20 s on an idle machine: nextest flags one past it SLOW,
-   and `cargo nextest run --workspace --profile budget` fails it there (the default profile kills
-   a test only at 300 s, as agents' runs share a loaded machine). Most of a test's time is waiting:
+   and `cargo nextest run --workspace --profile budget` fails it there unless that profile lists it,
+   with why (the default profile kills a test only at 300 s: agents' runs share a loaded machine). Most of a test's time is waiting:
    - Wait on what happens, with a timeout: a status (`until`, `wait_for`), a gate's `waiting()`,
      a command handled (`engine.sent(..)`, then `engine.inspect(|_| ())`). A `sleep` is only the
      poll interval inside such a wait; a fixed one "long enough for it to happen" is slower than
