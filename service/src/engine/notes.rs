@@ -55,8 +55,9 @@ pub enum Why {
 
 impl Identity {
     pub fn of(meta: &std::fs::Metadata) -> Self {
-        // A time before 1970 can't be kept: the file is told by its disk and inode alone.
-        let birth = meta.created().ok().filter(|b| b.duration_since(UNIX_EPOCH).is_ok());
+        // A time at or before 1970 isn't a real birth time (file systems without one report zero):
+        // the file is then told by its disk and inode alone.
+        let birth = meta.created().ok().filter(|b| *b > UNIX_EPOCH);
         Self { dev: meta.dev(), ino: meta.ino(), birth }
     }
 
