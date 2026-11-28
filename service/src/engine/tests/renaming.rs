@@ -403,7 +403,8 @@ async fn a_file_put_back_under_a_rename_is_counted_whichever_order_they_are_undo
                 let let_go = move |a: &mut super::super::actor::Actor| {
                     let t = &a.torrents[&id];
                     t.record.letting_go == super::super::machine::letgo::State::Holding
-                        && t.lib.torrent().is_some_and(|h| h.stats().file_progress[file] == 0)
+                        // No progress listed yet while librqbit is still starting it.
+                        && t.lib.torrent().is_some_and(|h| h.stats().file_progress.get(file) == Some(&0))
                 };
                 for _ in 0..1000 {
                     if engine.inspect(let_go).await {

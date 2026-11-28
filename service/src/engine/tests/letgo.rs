@@ -374,7 +374,8 @@ async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() 
     wait_for(&engine, id, Status::Seeding).await;
     let hash = find(&engine, id).await.info_hash;
     *saved.lock().unwrap() = Some(super::super::bitv::path(&dir.path().join("data/session"), &hash));
-    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    // The other file is cut short before the first is taken: the let-go follows the Move to Trash on
+    // its own, and one that came first would read the other file whole, with nothing to check.
     engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
     std::fs::File::options()
         .write(true)
@@ -383,6 +384,7 @@ async fn a_torrent_added_back_with_pieces_librqbit_cant_trust_shows_its_check() 
         .set_len(0)
         .unwrap();
     gate.hold(true);
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
     std::fs::remove_file(in_trash(dir.path(), &name(&engine, id, 0).await)).unwrap();
     until(&engine, id, |s| *s == Status::Checking).await;
     gate.hold(false);
