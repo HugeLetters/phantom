@@ -32,6 +32,9 @@ pub struct Colors {
     pub tile_fill: Color,
     /// The press overlay that replaces the hover one (see [`pressed_over`]).
     pub pressed_over_hover: Color,
+    /// The palette's highlighted row: the theme's Hover in Light; in Dark Hover is too faint on the
+    /// layer, so Text at about the strength Hover has in Light.
+    pub palette_selected: Color,
     /// A text field's sheen, top and bottom.
     pub field_sheen: (Color, Color),
 }
@@ -63,6 +66,7 @@ impl Colors {
             grip_active: k.alpha(c.text_accent, 0.16),
             tile_fill: k.alpha(c.text_base, 0.04),
             pressed_over_hover: pressed_over(c.hover, c.pressed),
+            palette_selected: if k.dark { k.alpha(c.text_base, 0.09) } else { c.hover },
             field_sheen: (k.light(0.06), k.light(0.02)),
         }
     }
@@ -132,6 +136,9 @@ mod tests {
             assert_eq!(t.tile_fill, k.alpha(c.text_base, 0.04));
             assert_eq!(t.pressed_over_hover, pressed_over(c.hover, c.pressed));
             assert_eq!(t.field_sheen, (k.light(0.06), k.light(0.02)));
+            // The palette's highlighted row: Hover in Light, stronger than it in Dark.
+            assert_eq!(t.palette_selected, if dark { k.alpha(c.text_base, 0.09) } else { c.hover });
+            assert!(dark.then_some(t.palette_selected.a > c.hover.a).unwrap_or(t.palette_selected == c.hover));
         }
     }
 }

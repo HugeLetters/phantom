@@ -1228,7 +1228,7 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
                 model::settings::presets::edit_active(s);
             }),
             // The command palette over Settings (#434): on General, nothing typed; over the Active
-            // look's sheet with its accent changed (Restore Defaults is offered); the same, for a
+            // look's sheet with its Text changed (Restore Defaults is offered); the same, for a
             // script to type in.
             ("settings-palette", |s| {
                 settings_scene(s, Tab::General, demo_settings(false));
@@ -1237,7 +1237,9 @@ fn settings_spec() -> AppSpec<SettingsWindow> {
             }),
             ("settings-palette-sheet", |s| {
                 settings_scene(s, Tab::Appearance, demo_settings(false));
-                set_colors(s, &[(preset::Appearance::Light, "accent", "#c2410c"), (preset::Appearance::Dark, "accent", "#c2410c")]);
+                // A color that isn't the accent: the accent is the focus ring's, which a still
+                // of the palette's field should show as the window's own.
+                set_colors(s, &[(preset::Appearance::Light, "text", "#2a2a40"), (preset::Appearance::Dark, "text", "#dcdcf0")]);
                 model::settings::presets::edit_active(s);
                 model::palette::open(s);
                 s.palette.query.focused = true;

@@ -636,3 +636,21 @@ fn an_entry_is_one_whichever_window_picks_it() {
     assert_eq!(kind(settings, "Corners"), Some(Kind::Setting(SettingRef::Theme { key: "corners", side: Side::Both })));
     assert_eq!(d.settings.state.editing().0, Target::Active);
 }
+
+/// The palette is drawn in the Settings window's own look, over a tab and over the Look sheet
+/// alike: its field's ring is the window's Focus ring (the accent), and a change in the sheet that
+/// isn't the accent leaves it as it was. The highlighted row is the look's highlight.
+#[test]
+fn the_palette_in_settings_takes_the_windows_look_over_a_tab_and_over_the_sheet() {
+    let ring = |d: &Desk| d.main.state.looks.borrow().shown(Appearance::Light).ui.tokens().c.border_focus;
+    let mut d = in_settings();
+    let tab_ring = ring(&d);
+    open(&mut d);
+    press(&mut d, Key::Escape);
+    set_look(&mut d, Appearance::Light, "text", Value::Color(crate::theme::setting::Rgb::parse("#2a2a40")));
+    edit_active(&mut d);
+    open(&mut d);
+    assert_eq!(ring(&d), tab_ring, "over the sheet, the same ring as over a tab");
+    let first = d.settings.elements().iter().find(|e| !e.exiting && e.role == "option").map(|e| e.fill);
+    assert_ne!(first, Some(rune::Color::TRANSPARENT), "the highlighted row is filled");
+}
