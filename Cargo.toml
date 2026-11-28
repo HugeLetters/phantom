@@ -19,14 +19,14 @@ anyhow = "1"
 # Rune builds against its own patched copies of these; Cargo doesn't inherit a dependency's `[patch]`,
 # so they're here, at Rune's rev in gui/Cargo.toml (bump both together).
 [patch.crates-io]
-winit = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
-sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
-parley_engine = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
-wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
-naga = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
-accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
-accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
-accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "5986ab76a09be9199b01d24bda6d0464415a0462" }
+winit = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+wgpu-hal = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+naga = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
 
 # No debug info for dependencies: it was most of `target/`, and we don't step into them. Our own
 # crates keep it. To debug into a dependency, build with

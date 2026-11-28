@@ -46,9 +46,10 @@ pub struct Phantom {
     /// Rows are keyed by torrent id.
     pub table: TableState,
     pub magnet: TextEdit,
-    /// An add sent by a click on Add is on its way. Once it's added the toolbar stops drawing its
-    /// marker (`focus_return`), which gives the link field the focus only if it's still on Add
-    /// or nowhere; wherever the person put it meanwhile, it stays.
+    /// An add sent by a click on Add is on its way. Once it's added the link field takes the focus
+    /// if it's still on Add; wherever the person put it meanwhile, it stays. The answer may come
+    /// in the click's own frame (Rune polls again right after a handler), so this is decided as
+    /// it lands, not by a marker that would have to be drawn first.
     pub refocus_link: bool,
     /// What Add's popover says, until the field's text changes: why the text can't be added, or
     /// why the add failed.
@@ -304,7 +305,11 @@ impl Batch {
                     self.total += 1;
                     if holds {
                         s.magnet.clear();
-                        s.refocus_link = false;
+                        // Add, off now that the field is empty, can't keep the focus a click on
+                        // it left there: the field takes it, unless the person moved it meanwhile.
+                        if std::mem::take(&mut s.refocus_link) && tx.focus_within("add-focus") {
+                            tx.focus("magnet-field", tx.focus_visible());
+                        }
                     }
                     let added = show_added(&mut s.table, &added, tx);
                     s.bar.tell(added);

@@ -2205,6 +2205,23 @@ fn the_fake_sends_one_snapshot_for_each_epoch_version_and_watching() {
     replay(setup, steps);
 }
 
+/// #381, found by the generated test: an add answered at once lands in the frame of the click on
+/// Add that sent it (Rune polls again right after a handler), so Add goes off while the focus is
+/// on it, in the same commit. The link field takes the focus, not the next button.
+#[test]
+fn an_add_answered_in_the_frame_of_the_click_on_add_gives_the_link_field_the_focus() {
+    let setup = Setup {
+        add_frames: 0,
+        torrent_url_frames: 0,
+        default_destination: true,
+        details_frames: 0,
+        stale_frames: 0,
+        paused: false,
+        tight: false,
+    };
+    replay(setup, [Action::Type(Link::Magnet(0)), Action::Send { button: true }]);
+}
+
 /// #362, found by the generated test: a click on Add, then Enter sends the same link again; the
 /// album's file list takes the focus, and both adds land. The second selects the row the first
 /// added, so the pane switches and the focus on the album's files goes (as it does after Enter
