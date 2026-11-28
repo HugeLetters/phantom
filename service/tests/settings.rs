@@ -302,6 +302,8 @@ impl Case {
                 break;
             }
             last = Some(held);
+            // Each look starts `pmset`: poll, don't spin.
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
         prop_assert_ne!(last, Some(true), "still kept awake while the service stops");
         self.client.wait_closed().unwrap();
