@@ -26,6 +26,7 @@
 use proto::{Action, Priority, TorrentInfo};
 use rune_kit::TableState;
 
+use crate::listed::listed_enum;
 use crate::model::settings::{Side, Tab};
 use crate::model::{Phantom, details_torrent, selected_in_pane, selected_torrents};
 use crate::shortcuts::{Chord, Named, chord};
@@ -65,41 +66,28 @@ const ADD_FILE_KEYS: &[Chord] = &[chord(Named::Letter('a'), true, true)];
 const UNDO_KEYS: &[Chord] = &[chord(Named::Letter('z'), true, false)];
 const PALETTE_KEYS: &[Chord] = &[chord(Named::Letter('p'), true, false)];
 
-/// What can be done to the selected torrents, in the order the row menu and the palette list them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnTorrents {
-    Resume,
-    Pause,
-    Check,
-    CancelCheck,
-    CancelMove,
-    Open,
-    Reveal,
-    MoveTo,
-    Rename,
-    /// Not the service's to decide: the link is made from what the listing has.
-    CopyMagnet,
-    /// Remove (keeping files), at once.
-    Remove,
-    Delete,
+listed_enum! {
+    /// What can be done to the selected torrents, in the order the row menu and the palette list them.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OnTorrents {
+        Resume,
+        Pause,
+        Check,
+        CancelCheck,
+        CancelMove,
+        Open,
+        Reveal,
+        MoveTo,
+        Rename,
+        /// Not the service's to decide: the link is made from what the listing has.
+        CopyMagnet,
+        /// Remove (keeping files), at once.
+        Remove,
+        Delete,
+    }
 }
 
 impl OnTorrents {
-    pub const ALL: [OnTorrents; 12] = [
-        OnTorrents::Resume,
-        OnTorrents::Pause,
-        OnTorrents::Check,
-        OnTorrents::CancelCheck,
-        OnTorrents::CancelMove,
-        OnTorrents::Open,
-        OnTorrents::Reveal,
-        OnTorrents::MoveTo,
-        OnTorrents::Rename,
-        OnTorrents::CopyMagnet,
-        OnTorrents::Remove,
-        OnTorrents::Delete,
-    ];
-
     pub fn spec(self) -> Spec {
         use client::display;
         let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
@@ -238,21 +226,20 @@ impl Mounted {
     }
 }
 
-/// What can be done to the selected files of the torrent the details pane shows (#151).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnFiles {
-    Open,
-    Reveal,
-    /// Sets every selected file to this priority; checked while they all have it.
-    Priority(Priority),
-    /// Sets them Off, then moves those on disk to the Trash.
-    MoveToTrash,
+listed_enum! {
+    /// What can be done to the selected files of the torrent the details pane shows (#151).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OnFiles {
+        Open,
+        Reveal,
+        /// Sets every selected file to this priority; checked while they all have it.
+        Priority(Priority) => [Priority::Normal, Priority::Off],
+        /// Sets them Off, then moves those on disk to the Trash.
+        MoveToTrash,
+    }
 }
 
 impl OnFiles {
-    pub const ALL: [OnFiles; 5] =
-        [OnFiles::Open, OnFiles::Reveal, OnFiles::Priority(Priority::Normal), OnFiles::Priority(Priority::Off), OnFiles::MoveToTrash];
-
     /// The same keys as the torrent commands that do the same to a torrent: the file list keeps them
     /// for files while it has the focus.
     pub fn spec(self) -> Spec {
@@ -300,19 +287,19 @@ pub fn on_files(s: &Phantom) -> Vec<OnFiles> {
     OnFiles::ALL.into_iter().filter(|c| s.mounted.offers(*c) && c.available(torrent, &files, s.file_there)).collect()
 }
 
-/// What isn't about a selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InApp {
-    AddFile,
-    /// The newest change, a torrent action's or a setting's (#255); the menu bar's Edit ▸ Undo too.
-    Undo,
-    /// Opens the command palette.
-    Palette,
+listed_enum! {
+    /// What isn't about a selection.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum InApp {
+        AddFile,
+        /// The newest change, a torrent action's or a setting's (#255); the menu bar's Edit ▸ Undo too.
+        Undo,
+        /// Opens the command palette.
+        Palette,
+    }
 }
 
 impl InApp {
-    pub const ALL: [InApp; 3] = [InApp::AddFile, InApp::Undo, InApp::Palette];
-
     pub fn spec(self) -> Spec {
         let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
             InApp::AddFile => ("add-file", "Add file…", Some(Icon::AddFile), ADD_FILE_KEYS),
@@ -342,35 +329,28 @@ impl InApp {
     }
 }
 
-/// What the Look sheet over Settings offers (#434): leaving it, resetting it, and each row's Split
-/// or Join. Each acts in the Settings window, on what the sheet edits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OnSheet {
-    /// Done: keeps what was edited.
-    Done,
-    /// Cancel: puts the Look Presets back as they were when the sheet opened.
-    Cancel,
-    /// Restore Defaults in this half (or both).
-    Restore(Side),
-    /// A row's Split, by the row's key ([`THEME`](crate::model::settings::THEME) for the Theme row).
-    Split(&'static str),
-    /// A row's Join.
-    Join(&'static str),
+listed_enum! {
+    /// What the Look sheet over Settings offers (#434): leaving it, resetting it, and each row's Split
+    /// or Join. Each acts in the Settings window, on what the sheet edits.
+    ///
+    /// `ALL` has one of each, for what is the same in every use (the name, the icon, the keys): the
+    /// Split and Join of a row are made for each row the sheet shows, the key here being none.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OnSheet {
+        /// Done: keeps what was edited.
+        Done,
+        /// Cancel: puts the Look Presets back as they were when the sheet opened.
+        Cancel,
+        /// Restore Defaults in this half (or both).
+        Restore(Side) => [Side::Both, Side::Only(Appearance::Light), Side::Only(Appearance::Dark)],
+        /// A row's Split, by the row's key ([`THEME`](crate::model::settings::THEME) for the Theme row).
+        Split(&'static str) => [""],
+        /// A row's Join.
+        Join(&'static str) => [""],
+    }
 }
 
 impl OnSheet {
-    /// One of each, for what is the same in every use (the name, the icon, the keys): the Split and
-    /// Join of a row are made for each row the sheet shows, the key here being none.
-    pub const ALL: [OnSheet; 7] = [
-        OnSheet::Done,
-        OnSheet::Cancel,
-        OnSheet::Restore(Side::Both),
-        OnSheet::Restore(Side::Only(Appearance::Light)),
-        OnSheet::Restore(Side::Only(Appearance::Dark)),
-        OnSheet::Split(""),
-        OnSheet::Join(""),
-    ];
-
     pub fn spec(self) -> Spec {
         let (id, name, icon, keys): (_, _, Option<Icon>, &'static [Chord]) = match self {
             OnSheet::Done => ("done", "Done", None, &[]),

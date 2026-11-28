@@ -11,6 +11,7 @@
 mod bar;
 mod changes;
 mod commands;
+mod listed;
 mod menu;
 mod menu_bar;
 mod model;

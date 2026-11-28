@@ -29,6 +29,7 @@ use rune::{FileDialogOptions, TextEdit, Tx};
 
 use super::Phantom;
 use crate::changes::{Presets, Target};
+use crate::listed::listed_enum;
 use crate::notice::{Notice, NoticeAction};
 use crate::platform::app_icon::loader::Loader;
 use crate::platform::app_icon::{FILE, FOLLOW, Icons, Manifest};
@@ -270,22 +271,22 @@ impl Switch {
     }
 }
 
-/// The sheet's tabs, in order; each setting is on one of them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Tab {
-    /// The default destination, keeping the Mac awake, and when seeding stops.
-    #[default]
-    General,
-    /// The listening port, UPnP and the speed limits.
-    Network,
-    /// The Look Presets (the Active look and the saved ones, whose editor sheet sets a theme in each
-    /// Appearance and its settings), then the App icon section.
-    Appearance,
+listed_enum! {
+    /// The sheet's tabs, in order; each setting is on one of them.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub enum Tab {
+        /// The default destination, keeping the Mac awake, and when seeding stops.
+        #[default]
+        General,
+        /// The listening port, UPnP and the speed limits.
+        Network,
+        /// The Look Presets (the Active look and the saved ones, whose editor sheet sets a theme in each
+        /// Appearance and its settings), then the App icon section.
+        Appearance,
+    }
 }
 
 impl Tab {
-    pub const ALL: [Tab; 3] = [Tab::General, Tab::Network, Tab::Appearance];
-
     pub fn label(self) -> &'static str {
         match self {
             Tab::General => "General",

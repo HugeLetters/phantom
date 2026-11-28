@@ -254,6 +254,12 @@ pub enum Place {
     AppIcon,
 }
 
+// `fixed()` lists the places by hand, in the order the palette shows them. A new `Place` stops this
+// from compiling until it's named here: add it to `fixed()` too.
+const _: fn(Place) = |place| match place {
+    Place::Settings | Place::Tab(_) | Place::EditLook | Place::AppIcon => {}
+};
+
 /// What an entry is, and so what picking it does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
