@@ -1474,14 +1474,18 @@ fn main() {
     let reset = if !headless { settings::repair(&proto::data_dir().join("gui.json")) } else { Ok(vec![]) };
     // The toolbar is in the titlebar band (#33): only its empty parts move the window.
     let main_app = App::new(spec()).chrome(rune::Chrome { drag_regions: true, ..rune::Chrome::DEFAULT });
-    let mut app = main_app.standard_menus().keep_running().on_open_url(platform::open_url).on_focus(on_focus).on_reopen(on_reopen);
+    let mut app = main_app
+        .standard_menus()
+        .keep_running()
+        .on_open_url(platform::open_url)
+        .on_open_files(platform::open_files)
+        .on_focus(on_focus)
+        .on_reopen(on_reopen);
     let handle = app.handle();
     let looks = looks(headless);
     #[cfg(target_os = "macos")]
     if !headless {
         platform::menu_bar::install(handle.clone());
-        let opened = handle.clone();
-        platform::open_documents::listen(move |paths| opened.update(move |s, tx| platform::open_files(s, &paths, tx)));
         platform::app_icon::appkit::install(looks.app_icons());
     }
     // The two windows, each with its own state, and the ways from one to the other (`windows`).
