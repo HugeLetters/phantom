@@ -27,8 +27,6 @@
 //! Rare (the startup disk's data is one volume), so not added up.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::CStr;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -212,44 +210,18 @@ pub fn cache() -> &'static Cache {
 /// Finder's figures for the volume `folder` is on (a call into Foundation: it may block like
 /// `statfs` does, so it's only made from a look's own thread).
 pub fn finder(folder: &Path) -> Finder {
-    use objc2::rc::autoreleasepool;
-    use objc2_foundation::{
-        NSArray, NSNumber, NSString, NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeLocalizedNameKey,
-    };
-    // Not the main thread: its own pool, so what Foundation autoreleases is freed here.
-    autoreleasepool(|_| {
-        let Some(path) = folder.to_str() else { return Finder::default() };
-        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
-        // SAFETY: the keys are Foundation's own constants.
-        let (important, localized) = unsafe { (NSURLVolumeAvailableCapacityForImportantUsageKey, NSURLVolumeLocalizedNameKey) };
-        let keys = NSArray::from_slice(&[important, localized]);
-        let Ok(values) = url.resourceValuesForKeys_error(&keys) else { return Finder::default() };
-        let free_bytes = values
-            .objectForKey(important)
-            .and_then(|v| v.downcast::<NSNumber>().ok())
-            .map(|n| n.as_i64())
-            .and_then(|n| u64::try_from(n).ok());
-        let name = values.objectForKey(localized).and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string());
-        Finder { free_bytes, name }
-    })
+    let (free_bytes, name) = crate::platform::finder(folder);
+    Finder { free_bytes, name }
 }
 
 /// The disk `folder` is on, or `None` when it can't be reached.
 pub fn disk(folder: &Path) -> Option<Disk> {
-    let path = std::ffi::CString::new(folder.as_os_str().as_bytes()).ok()?;
-    let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: `path` is a C string that lives through the call, and `fs` is a place for the answer.
-    if unsafe { libc::statfs(path.as_ptr(), &mut fs) } != 0 {
-        return None;
-    }
-    // SAFETY: statfs fills `f_mntonname` with a NUL-terminated path.
-    let mount = unsafe { CStr::from_ptr(fs.f_mntonname.as_ptr()) };
-    let mount = AbsolutePath::new(PathBuf::from(std::ffi::OsStr::from_bytes(mount.to_bytes()))).ok()?;
-    // SAFETY: `fsid_t` is two `i32`s.
-    let key = DiskKey { fsid: unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(fs.f_fsid) }, mount: mount.as_ref().to_path_buf() };
+    let fs = crate::platform::disk(folder)?;
+    let mount = AbsolutePath::new(fs.mount).ok()?;
+    let key = DiskKey { fsid: fs.fsid, mount: mount.as_ref().to_path_buf() };
     let finder = cache().get(key, Instant::now(), || finder(folder));
     let name = name(finder.name, mount.as_ref());
-    Some(Disk { mount, name, free_bytes: free_bytes(finder.free_bytes, fs.f_bavail * u64::from(fs.f_bsize)) })
+    Some(Disk { mount, name, free_bytes: free_bytes(finder.free_bytes, fs.free_bytes) })
 }
 
 /// Each disk with the torrents that still need space on it, by mount: `needs` is each torrent's
@@ -406,6 +378,8 @@ mod tests {
     /// The real figures of a temp folder's volume: Finder has a name for it, and its free space,
     /// counting what's purgeable, is never less than `statfs`'s on this machine's disks (a volume
     /// that gives none is covered above).
+    /// macOS only: elsewhere there's no Finder to name it.
+    #[cfg(target_os = "macos")]
     #[test]
     fn finder_names_a_real_volume_and_counts_its_free_space() {
         let dir = tempfile::tempdir().unwrap();

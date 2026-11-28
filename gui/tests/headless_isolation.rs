@@ -37,7 +37,11 @@ fn a_headless_start_with_the_default_data_dir_leaves_it_untouched() {
     let before = snapshot(home.path());
 
     let out = tempfile::tempdir().unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_phantom-gui"))
+    let mut gui = Command::new(env!("CARGO_BIN_EXE_phantom-gui"));
+    // Linux's GPU driver (Mesa) keeps its shader cache in `~/.cache`: not Phantom's to leave alone.
+    #[cfg(not(target_os = "macos"))]
+    gui.env("XDG_CACHE_HOME", out.path());
+    let status = gui
         .args(["--snap"])
         .arg(out.path().join("out.png"))
         .args(["--scene", "demo", "--size", "640x320"])

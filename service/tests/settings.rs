@@ -17,6 +17,9 @@
 //! was generated, each case shows a limit applied and kept, the actor hearing of the setting, and
 //! releasing at a stop.
 
+// macOS only: it reads the power assertion with `pmset` and the listening ports with `lsof`.
+#![cfg(target_os = "macos")]
+
 mod fake;
 
 use std::collections::BTreeMap;

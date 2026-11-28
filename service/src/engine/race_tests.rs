@@ -1509,9 +1509,12 @@ fn stash_of(entry: &super::undo::Entry) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Pack 1's is on a drive.
+/// Pack 1's is on a drive (on macOS: elsewhere there's no `/Volumes`, and it's in the temp dir too).
 fn destination(dir: &Path, pack: usize) -> std::path::PathBuf {
+    #[cfg(target_os = "macos")]
     let on = if pack == 1 { Path::new("/Volumes/Macintosh HD").join(dir.strip_prefix("/").unwrap()) } else { dir.to_owned() };
+    #[cfg(not(target_os = "macos"))]
+    let on = dir.to_owned();
     on.join(format!("destination{pack}"))
 }
 

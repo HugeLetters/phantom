@@ -215,11 +215,11 @@ fn folder(path: &Path) -> Option<Ino> {
     std::fs::metadata(path).ok().filter(|m| m.is_dir()).map(|m| Ino::of(&m))
 }
 
-/// `name` in Unicode's composed form (NFC), as Foundation has it: a drive that doesn't tell the forms
-/// apart (APFS) keeps one name for `é` as one character and as `e` and an accent.
+/// `name` as the drive compares it ([`crate::platform::normalized`]: in Unicode's composed form,
+/// NFC, on macOS, where a drive that doesn't tell the forms apart, APFS, keeps one name for `é` as
+/// one character and as `e` and an accent).
 pub fn normalized(name: &str) -> String {
-    use objc2_foundation::NSString;
-    NSString::from_str(name).precomposedStringWithCanonicalMapping().to_string()
+    crate::platform::normalized(name)
 }
 
 /// Whether `a` and `b` are the same folder on disk: through a link, in another case on a drive
@@ -461,10 +461,8 @@ fn make_folders(root: &Path, inside: &Path, made: &mut Vec<PathBuf>) -> Result<(
 /// Flushes `dir`'s entries to the drive itself (`F_FULLFSYNC`; `fsync` where that isn't had), so
 /// what was renamed or made in it is there before anything relies on it.
 fn sync_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
     let d = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(dir)?;
-    // SAFETY: a descriptor open through the call.
-    if unsafe { libc::fcntl(d.as_raw_fd(), libc::F_FULLFSYNC) } == 0 {
+    if crate::platform::full_fsync(&d) {
         return Ok(());
     }
     d.sync_all()
@@ -802,11 +800,7 @@ fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::other);
     let (from, to) = (c(from)?, c(to)?);
-    // SAFETY: two NUL-terminated paths that live through the call.
-    match unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } {
-        0 => Ok(()),
-        _ => Err(std::io::Error::last_os_error()),
-    }
+    crate::platform::rename_excl(&from, &to)
 }
 
 /// Moves the file at `from` to `to` only if nothing is at `to`: renamed, or across drives copied

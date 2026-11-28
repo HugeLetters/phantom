@@ -14,9 +14,6 @@ machine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-librqbit = { version = "9.1", default-features = false, features = ["default-tls"] }
-# The version and TLS librqbit builds: fetches a .torrent URL without the engine.
-reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -28,6 +25,13 @@ libsql = { version = "0.10", default-features = false, features = ["core"] }
 libc = "0.2"
 notify = "8"
 notify-debouncer-full = "0.6"
+
+# What the service asks of the OS (`src/platform/`): macOS's own frameworks for the app, and
+# crates for Linux, where the workspace builds and its tests run too.
+[target.'cfg(target_os = "macos")'.dependencies]
+librqbit = { version = "9.1", default-features = false, features = ["default-tls"] }
+# The version and TLS librqbit builds: fetches a .torrent URL without the engine.
+reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
 # Delete moves files to the Trash (NSFileManager); free space is what Finder says of a volume: its
 # name and its free space with purgeable space counted. The version and the objc2 the GUI already uses.
 objc2 = "0.6"
@@ -35,6 +39,15 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # The IOKit power assertion (`awake.rs`): its pwr_mgt bindings and the CoreFoundation string they take.
 objc2-io-kit = { version = "0.3.2", default-features = false, features = ["pwr_mgt"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# rustls instead of the system's TLS, which on Linux is OpenSSL: its headers are a system package.
+librqbit = { version = "9.1", default-features = false, features = ["rust-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Keeping the machine awake (`awake.rs`): an idle-sleep inhibitor.
+keepawake = "0.6"
+# Delete's FreeDesktop trash, and the items in it, for where one went.
+trash = "5.4"
 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }

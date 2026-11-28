@@ -20,7 +20,7 @@
 
 pub mod disk;
 pub mod moving;
-#[cfg(feature = "harness")]
+#[cfg(any(test, feature = "harness"))]
 pub mod samples;
 pub mod seeding;
 pub mod settings;

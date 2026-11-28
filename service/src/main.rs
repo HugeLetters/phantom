@@ -26,6 +26,7 @@ use tracing::{info, warn};
 mod awake;
 mod engine;
 mod machine;
+mod platform;
 mod settings;
 #[cfg(test)]
 mod spawn_lock;
@@ -237,7 +238,7 @@ async fn main() -> Result<()> {
     let Decoded { value: mut settings, reset } = Settings::load(&dir)?;
     let running = Running::start(&dir, &mut settings, Default::default()).await?;
     let records_set_aside = running.engine.records_set_aside().map(Into::into);
-    let awake = awake::KeepAwake::start(settings.keep_awake, awake::MacOs::default());
+    let awake = awake::KeepAwake::start(settings.keep_awake, awake::System::default());
 
     let socket = proto::socket_path();
     let _ = fs::remove_file(&socket);
@@ -698,7 +699,7 @@ mod set_tests {
             events,
             lifetime,
             build_id: String::new(),
-            awake: awake::KeepAwake::start(false, awake::MacOs::default()),
+            awake: awake::KeepAwake::start(false, awake::System::default()),
         }
     }
 
@@ -884,7 +885,7 @@ mod reach_tests {
             events,
             lifetime,
             build_id: String::new(),
-            awake: awake::KeepAwake::start(false, awake::MacOs::default()),
+            awake: awake::KeepAwake::start(false, awake::System::default()),
         }
     }
 
