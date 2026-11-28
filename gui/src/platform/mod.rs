@@ -7,8 +7,6 @@ pub mod app_icon;
 pub mod looks;
 pub mod menu_bar;
 #[cfg(target_os = "macos")]
-pub mod open_documents;
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -92,8 +90,8 @@ pub fn open_link(url: &str) -> Result<AddRequest, AddFailure> {
     }
 }
 
-/// [`open_documents`]' hook: macOS hands us files; bring the window back and add the torrents.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+/// Rune's `on_open_files`: the system hands us files (Finder, the Dock, `open -a`); bring the window back and add
+/// the torrents.
 pub fn open_files(s: &mut Phantom, paths: &[PathBuf], _: &mut Tx) {
     let opened = open_torrent_files(paths);
     if !opened.adds.is_empty() {
