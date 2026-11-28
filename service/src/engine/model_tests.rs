@@ -43,7 +43,8 @@
 //!
 //! Move (#24): a pack's torrent moves between the pack's destination and its other one,
 //! `elsewhere<pack>`, its files with it (renamed: both are on the case's drive), and is back in
-//! librqbit there with what it had, nothing checked. One missing a file it gets is moved without it,
+//! librqbit there with what it had, nothing checked, unless a file at its path isn't the one librqbit
+//! had open (written there by hand): then it's checked in full (#406). One missing a file it gets is moved without it,
 //! and says so. Its files are then in exactly one destination: nothing of the torrent's, and nothing
 //! the move staged, is left in the other. A pack moves only while nothing of the person's is in its
 //! folder and nothing of it is in the trash or on the stack, so the model's one disk per pack holds.
@@ -724,14 +725,22 @@ impl Model {
         // Out of librqbit and back, as at a restart: it trusts the pieces it saved while it can read
         // each file it says it has, and checks them all once it can't (a file set Off and deleted by
         // hand, which it read through the file it had open until then).
+        // A file at its path that isn't the one librqbit had open (replaced, or put back, by hand; one
+        // set Off too) makes it checked in full once nothing else is missing (#406, #467); till then
+        // none of it is had.
         let disk = self.disk[pack];
+        let inodes = self.inodes[pack];
         let Some(Torrent::Pack(p)) = self.torrents.get_mut(&id) else { unreachable!() };
+        let replaced: [bool; FILES] = std::array::from_fn(|f| disk[f] != OnDisk::Absent && p.open[f] != Some(inodes[f]));
         p.open = [None; FILES];
         p.reopens = p.missing.is_empty() && !p.unchecked;
         if !(p.unchecked && !p.missing.is_empty()) {
             let read = read(&disk);
-            if (0..FILES).any(|f| p.have[f] && !read[f]) {
+            if (0..FILES).any(|f| p.have[f] && !read[f]) || (p.missing.is_empty() && replaced.contains(&true)) {
                 p.have = read;
+            }
+            if !p.missing.is_empty() {
+                (0..FILES).filter(|&f| replaced[f]).for_each(|f| p.have[f] = false);
             }
         }
         match (0..FILES).any(|f| !off[f] && self.disk[pack][f] == OnDisk::Absent) {
@@ -939,12 +948,21 @@ impl Model {
         let files = &files[..];
         let previous: Vec<(usize, bool)> = files.iter().map(|&f| (f, p.off[f])).collect();
         let mut moved_as: BTreeMap<usize, usize> = BTreeMap::new();
+        let live = matches!(p.status(), Status::Seeding | Status::Downloading) && !p.letting_go;
+        let changed = files.iter().any(|&f| !p.off[f]);
+        let replaced: [bool; FILES] =
+            std::array::from_fn(|f| self.disk[pack][f] != OnDisk::Absent && p.open[f] != Some(self.inodes[pack][f]));
         for &f in files {
             p.off[f] = true;
             // Missing, set Off: let go of, as by a priority.
             if p.missing.remove(&f).is_some() {
                 p.lets_go(f);
             }
+        }
+        // Set Off as a priority is (#477): running, the new choice is handed to librqbit once its files
+        // are granted, and one a file replaced by hand isn't the one its check read, so it's checked again.
+        if live && changed && (0..FILES).any(|f| !p.off[f] && replaced[f]) {
+            p.check(&mut self.disk[pack], &mut self.folder[pack], self.checks_held, BTreeMap::new());
         }
         let mut items = Vec::new();
         let mut kept = 0;
@@ -3943,4 +3961,34 @@ fn a_file_missing_as_the_drive_went_is_still_missing_once_its_back() {
         Step::DestinationGone { pack: 0 },
         Step::DestinationBack { pack: 0 },
     ]);
+}
+
+/// #477, found by a 256-case run: the model was wrong. A file put back by hand isn't the one librqbit
+/// opened, so a Move to Trash of another, setting it Off as a priority does, has the running torrent
+/// checked again as its files are granted: the check finds the file put back whole.
+#[test]
+fn a_move_to_trash_checks_a_running_torrent_with_a_file_put_back_by_hand() {
+    use Step::*;
+    replay(&[
+        Add { pack: Some(1), paused: false },
+        Add { pack: None, paused: false },
+        Selection { delete: true, ids: vec![0, 1] },
+        Add { pack: Some(1), paused: false },
+        PutBack { pack: 1, file: 2 },
+        TrashFiles { id: 2, files: vec![1] },
+    ]);
+}
+
+/// #467, found by a 256-case run: the model was wrong. A file set Off and deleted by hand is let go
+/// of; put back by hand, it isn't the one librqbit had open, so a Move checks the torrent in full
+/// (#406), which finds it whole: librqbit has it, Off. Missing another file, none of the one put back
+/// is had till it's checked.
+#[test]
+fn a_move_checks_in_full_a_file_set_off_and_put_back_by_hand() {
+    use Step::*;
+    let off = SetPriority { id: 0, file: 0, priority: Priority::Off };
+    let (gone, back) = (DeleteFile { pack: 0, file: 0 }, PutBack { pack: 0, file: 0 });
+    replay(&[Add { pack: Some(0), paused: false }, off.clone(), gone.clone(), back.clone(), Move(0)]);
+    replay(&[Add { pack: Some(0), paused: true }, off, gone, Restart, back, Move(0)]);
+    replay(&[Add { pack: Some(0), paused: false }, PutBack { pack: 0, file: 0 }, DeleteFile { pack: 0, file: 1 }, Move(0)]);
 }
