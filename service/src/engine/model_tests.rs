@@ -3126,7 +3126,8 @@ fn replay(steps: &[Step]) {
     replay_with(steps, |_, _| ());
 }
 
-/// [`replay`], with `before(n, sut)` run before step `n`.
+/// [`replay`], with `before(n, sut)` run before step `n`, and once more after the last, with `n`
+/// the number of steps.
 fn replay_with(steps: &[Step], before: impl Fn(usize, &Sut)) {
     let mut model = EngineModel::init_state().new_tree(&mut proptest::test_runner::TestRunner::deterministic()).unwrap().current();
     let mut sut = <EngineModel as StateMachineTest>::init_test(&model);
@@ -3136,6 +3137,7 @@ fn replay_with(steps: &[Step], before: impl Fn(usize, &Sut)) {
         model = <EngineModel as ReferenceStateMachine>::apply(model, step);
         sut = <EngineModel as StateMachineTest>::apply(sut, &model, step.clone());
     }
+    before(steps.len(), &sut);
     <EngineModel as StateMachineTest>::teardown(sut, model);
 }
 
@@ -3954,7 +3956,7 @@ fn a_pause_behind_a_delete_undone_means_its_torrent_never_starts() {
 }
 
 /// #468: the same, with grants finding a file busy, as on a loaded machine, which once put the start
-/// off past the Pause. Nothing is granted before the Pause now, busy or not.
+/// off past the Pause. Nothing is granted before the Pause now, busy or not: no grant is even tried.
 #[test]
 fn a_pause_behind_a_delete_undone_means_its_torrent_never_starts_with_files_busy() {
     use Step::*;
@@ -3969,10 +3971,10 @@ fn a_pause_behind_a_delete_undone_means_its_torrent_never_starts_with_files_busy
         Pause(1),
         ReleaseTrash,
     ];
-    replay_with(&steps, |n, sut| {
-        if matches!(steps[n], ReleaseTrash) {
-            sut.rt.block_on(sut.engine().inspect(|actor| actor.busy_grants = 3));
-        }
+    replay_with(&steps, |n, sut| match steps.get(n) {
+        Some(ReleaseTrash) => sut.rt.block_on(sut.engine().inspect(|actor| actor.busy_grants = 3)),
+        None => assert_eq!(sut.rt.block_on(sut.engine().inspect(|actor| actor.busy_grants)), 3, "no grant was tried"),
+        Some(_) => {}
     });
 }
 

@@ -868,7 +868,8 @@ impl Actor {
         // for it, as for a Delete (ADR 0008).
         if ending == Ending::Shutdown {
             self.interrupt_moves().await;
-            // What waits on a lane is dropped, and nothing starts as the service stops.
+            // What waited on a lane is dropped: a torrent it kept from starting stays stopped. One an
+            // undo still under way adds back starts once it's back, as the undo was pressed.
             self.starts_once_idle.clear();
         }
         // What was held for librqbit's sampling runs now, and what's under way ends first, so how
