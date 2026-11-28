@@ -5,6 +5,8 @@
 # The budget: a test is flagged SLOW past 20 s on an idle machine. `--profile budget` fails it there,
 # unless the budget profile lists it below, with why. The default profile only kills one at 300 s:
 # agents' runs share a loaded machine, where a 20 s test can take minutes.
+experimental = ["wrapper-scripts"]
+
 [profile.default]
 default-filter = 'not binary(appkit)'
 retries = 1
@@ -14,6 +16,16 @@ test-threads = 24
 slow-timeout = { period = "20s", terminate-after = 15 }
 status-level = "slow"
 final-status-level = "slow"
+
+# Every test binary runs from its own folder, `target/<profile>/run/<binary>/` (`scripts/own-folder.sh`):
+# the executable's directory is read at process start, and `deps/` holds tens of thousands of files.
+[scripts.wrapper.own-folder]
+# nextest runs a wrapper from the package's folder, so the script is found from the workspace root.
+command = ['/bin/bash', '-c', 'exec "$NEXTEST_WORKSPACE_ROOT/scripts/own-folder.sh" "$@"', 'own-folder']
+
+[[profile.default.scripts]]
+filter = 'all()'
+run-wrapper = 'own-folder'
 
 [test-groups]
 cpu = { max-threads = "num-cpus" }
