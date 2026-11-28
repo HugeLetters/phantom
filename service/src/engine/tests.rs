@@ -2878,12 +2878,17 @@ mod seeding_limits {
         polls(&engine, 3).await;
         assert_eq!(find(&engine, id).await.status, Status::Seeding, "a Resume isn't undone by the same limit straight away");
 
-        // A second or so into the new round: kept across the restart.
+        // A second or so into the new round, as the engine counted it: kept across the restart,
+        // where it goes on until it reaches the limit.
+        let round = async |engine: &Engine| engine.inspect(move |a| a.torrents[&id].meter.round).await;
+        let kept = round(&engine).await;
+        assert!(kept.seeded > Duration::ZERO && kept.seeded < Duration::from_secs(2), "a new round: {kept:?}");
         engine.stop().await;
         let engine = start(dir.path(), limits).await;
-        until(&engine, id, &Status::Seeding).await;
-        let took = until(&engine, id, &done).await;
-        assert!(took < Duration::from_millis(1800), "a fresh round takes two seconds; this one took {took:?}");
+        let restored = round(&engine).await;
+        assert!(restored.seeded >= kept.seeded, "the round goes on after the restart: {restored:?}, of {kept:?}");
+        until(&engine, id, &done).await;
+        assert!(round(&engine).await.seeded >= Duration::from_secs(2), "it reached the limit");
         engine.stop().await;
     }
 
