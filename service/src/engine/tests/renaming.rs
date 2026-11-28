@@ -387,49 +387,65 @@ async fn aborting(engine: &Engine) {
 /// when the Rename never came between them, and the torrent ends Seeding without a manual check.
 /// The Rename took the torrent out of librqbit and added it back without what it had of the trashed
 /// file, so the Move to Trash's undo must check the torrent (#328's case, reached another way).
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_put_back_under_a_rename_is_counted_whichever_order_they_are_undone_in() {
-    for (rename_first, file) in [(false, 0), (false, 1), (false, 2), (true, 0), (true, 1), (true, 2)] {
-        let dir = temp();
-        let engine = engine(dir.path()).await;
-        let downloads = dir.path().join("downloads");
-        let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
-        wait_for(&engine, id, Status::Seeding).await;
-        let before = bytes_in(&downloads.join("pack"));
-        match rename_first {
-            false => {
-                engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
-                // The trashed file let go of first: librqbit has the torrent back without its pieces.
-                let let_go = move |a: &mut super::super::actor::Actor| {
-                    let t = &a.torrents[&id];
-                    t.record.letting_go == super::super::machine::letgo::State::Holding
-                        && t.lib.torrent().is_some_and(|h| h.stats().file_progress[file] == 0)
-                };
-                for _ in 0..1000 {
-                    if engine.inspect(let_go).await {
-                        break;
+mod a_file_put_back_under_a_rename_is_counted_whichever_order_they_are_undone_in {
+    use super::*;
+
+    macro_rules! cases {
+        ($($name:ident: ($rename_first:expr, $file:expr)),*) => {$(
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                of($rename_first, $file).await;
+            }
+        )*};
+    }
+    cases!(
+        rename_after_file_0: (false, 0), rename_after_file_1: (false, 1), rename_after_file_2: (false, 2),
+        rename_first_file_0: (true, 0), rename_first_file_1: (true, 1), rename_first_file_2: (true, 2)
+    );
+
+    async fn of(rename_first: bool, file: usize) {
+        {
+            let dir = temp();
+            let engine = engine(dir.path()).await;
+            let downloads = dir.path().join("downloads");
+            let id = add(&engine, &downloads, complete_torrent(dir.path()).await, false).await.unwrap().id;
+            wait_for(&engine, id, Status::Seeding).await;
+            let before = bytes_in(&downloads.join("pack"));
+            match rename_first {
+                false => {
+                    engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
+                    // The trashed file let go of first: librqbit has the torrent back without its pieces.
+                    let let_go = move |a: &mut super::super::super::actor::Actor| {
+                        let t = &a.torrents[&id];
+                        t.record.letting_go == super::super::super::machine::letgo::State::Holding
+                            && t.lib.torrent().is_some_and(|h| h.stats().file_progress[file] == 0)
+                    };
+                    for _ in 0..1000 {
+                        if engine.inspect(let_go).await {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    assert!(engine.inspect(let_go).await, "the trashed file is let go of");
+                    engine.command(id, rename("New")).await.unwrap();
+                    moved(&engine, id).await;
                 }
-                assert!(engine.inspect(let_go).await, "the trashed file is let go of");
-                engine.command(id, rename("New")).await.unwrap();
+                true => {
+                    engine.command(id, rename("New")).await.unwrap();
+                    moved(&engine, id).await;
+                    engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
+                }
+            }
+            for _ in 0..2 {
+                engine.undo().await.unwrap();
                 moved(&engine, id).await;
             }
-            true => {
-                engine.command(id, rename("New")).await.unwrap();
-                moved(&engine, id).await;
-                engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
-            }
+            assert_eq!(bytes_in(&downloads.join("pack")), before, "rename_first {rename_first}: everything is back");
+            wait_for(&engine, id, Status::Seeding).await;
+            let counted = engine.details(id).await.unwrap().files.iter().map(|f| f.progress_bytes).collect::<Vec<_>>();
+            assert_eq!(counted, [FULL, FULL, FULL], "rename_first {rename_first}: the file put back is counted");
+            engine.stop().await;
         }
-        for _ in 0..2 {
-            engine.undo().await.unwrap();
-            moved(&engine, id).await;
-        }
-        assert_eq!(bytes_in(&downloads.join("pack")), before, "rename_first {rename_first}: everything is back");
-        wait_for(&engine, id, Status::Seeding).await;
-        let counted = engine.details(id).await.unwrap().files.iter().map(|f| f.progress_bytes).collect::<Vec<_>>();
-        assert_eq!(counted, [FULL, FULL, FULL], "rename_first {rename_first}: the file put back is counted");
-        engine.stop().await;
     }
 }
 

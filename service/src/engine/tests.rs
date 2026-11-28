@@ -2643,46 +2643,60 @@ async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engi
 /// Free space follows the disk (#127): generated writes and deletes on a real disk (APFS, so the
 /// torrent's file is sparse and it needs space there all along), and after each the snapshot's
 /// free space for that disk comes to what statfs says.
-#[test]
-fn the_free_space_shown_follows_writes_and_deletes_on_the_disk() {
-    use proptest::prelude::*;
-    let config = proptest::test_runner::Config { cases: 6, max_shrink_iters: 16, ..Default::default() };
-    let writes = proptest::collection::vec(prop_oneof![(1..6u64).prop_map(Some), Just(None)], 1..6);
-    proptest::test_runner::TestRunner::new(config)
-        .run(&writes, |writes| {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async {
-                let dir = temp();
-                let disk = SmallDisk::of(dir.path(), "40m", "APFS");
-                let engine = engine(dir.path()).await;
-                let id = add_to(&engine, torrent_file_of("big.bin", 8 << 20), false, &disk.mount).await.unwrap().id;
-                let mut written = Vec::new();
-                for (n, write) in writes.iter().enumerate() {
-                    match write {
-                        Some(mib) => {
-                            let file = disk.mount.join(format!("filler{n}"));
-                            let bytes: Vec<u8> = (0..mib << 20).map(|i| (i * 2_654_435_761 >> 13) as u8).collect();
-                            std::fs::write(&file, bytes).unwrap();
-                            std::fs::File::open(&file).unwrap().sync_all().unwrap();
-                            written.push(file);
-                        }
-                        None => {
-                            if let Some(file) = written.pop() {
-                                std::fs::remove_file(file).unwrap();
+mod the_free_space_shown_follows_writes_and_deletes_on_the_disk {
+    use super::*;
+
+    /// Six generated cases, one test each.
+    macro_rules! cases {
+        ($($name:ident),*) => {$(
+            #[test]
+            fn $name() {
+                one_case();
+            }
+        )*};
+    }
+    cases!(case_1, case_2, case_3, case_4, case_5, case_6);
+
+    fn one_case() {
+        use proptest::prelude::*;
+        let config = proptest::test_runner::Config { cases: 1, max_shrink_iters: 16, ..Default::default() };
+        let writes = proptest::collection::vec(prop_oneof![(1..6u64).prop_map(Some), Just(None)], 1..6);
+        proptest::test_runner::TestRunner::new(config)
+            .run(&writes, |writes| {
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                rt.block_on(async {
+                    let dir = temp();
+                    let disk = SmallDisk::of(dir.path(), "40m", "APFS");
+                    let engine = engine(dir.path()).await;
+                    let id = add_to(&engine, torrent_file_of("big.bin", 8 << 20), false, &disk.mount).await.unwrap().id;
+                    let mut written = Vec::new();
+                    for (n, write) in writes.iter().enumerate() {
+                        match write {
+                            Some(mib) => {
+                                let file = disk.mount.join(format!("filler{n}"));
+                                let bytes: Vec<u8> = (0..mib << 20).map(|i| (i * 2_654_435_761 >> 13) as u8).collect();
+                                std::fs::write(&file, bytes).unwrap();
+                                std::fs::File::open(&file).unwrap().sync_all().unwrap();
+                                written.push(file);
+                            }
+                            None => {
+                                if let Some(file) = written.pop() {
+                                    std::fs::remove_file(file).unwrap();
+                                }
                             }
                         }
+                        // Free space is kept per disk for 3 s: the write's effect is asked for at once.
+                        super::super::space::cache().refresh();
+                        let close = |shown: Option<Option<u64>>| shown.flatten().is_some_and(|free| free.abs_diff(disk.free()) < 512 << 10);
+                        let followed = eventually(5, || close(free_for(&engine, id))).await;
+                        prop_assert!(followed, "after {:?}: shown {:?}, statfs {}", write, free_for(&engine, id), disk.free());
                     }
-                    // Free space is kept per disk for 3 s: the write's effect is asked for at once.
-                    super::space::cache().refresh();
-                    let close = |shown: Option<Option<u64>>| shown.flatten().is_some_and(|free| free.abs_diff(disk.free()) < 512 << 10);
-                    let followed = eventually(5, || close(free_for(&engine, id))).await;
-                    prop_assert!(followed, "after {:?}: shown {:?}, statfs {}", write, free_for(&engine, id), disk.free());
-                }
-                engine.stop().await;
-                Ok(())
+                    engine.stop().await;
+                    Ok(())
+                })
             })
-        })
-        .unwrap();
+            .unwrap();
+    }
 }
 
 mod limits {

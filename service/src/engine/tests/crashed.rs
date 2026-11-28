@@ -176,18 +176,6 @@ async fn interrupted(at: At, gone: &[&str], put: Put, when: When, off: bool, cra
     engine.stop().await;
 }
 
-const EVERY: [At; 10] = [
-    At::Ready,
-    At::PiecesLost,
-    At::Downloaded,
-    At::Missing,
-    At::Away,
-    At::AwayTwice,
-    At::AwayWhole,
-    At::Checking,
-    At::Unchecked,
-    At::Error,
-];
 const B: &[&str] = &["b.bin"];
 const TWO: &[&str] = &["a.bin", "b.bin"];
 
@@ -212,20 +200,32 @@ async fn each(cases: impl IntoIterator<Item = (At, &'static [&'static str], Put,
     }
 }
 
+/// One test per `At` (each in a process of its own, so nextest runs them in parallel): `$run` is the
+/// module's function taking the `At`.
+macro_rules! at_each {
+    ($run:ident, $($name:ident: $at:ident),*) => {$(
+        #[tokio::test(flavor = "multi_thread")]
+        async fn $name() {
+            $run(At::$at).await;
+        }
+    )*};
+}
+
 /// The issue's steps.
 #[tokio::test(flavor = "multi_thread")]
 async fn another_file_put_where_one_was_missing_across_a_crash_while_its_destination_was_gone_isnt_downloaded_over() {
     interrupted(At::Away, B, Put::Other, When::After, false, true).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn another_file_put_where_one_was_missing_isnt_downloaded_over_whatever_a_crash_cut_short() {
-    each(
-        EVERY
-            .into_iter()
-            .flat_map(|at| [(B, false), (B, true), (TWO, false)].map(|(gone, off)| (at, gone, Put::Other, When::After, off, true))),
-    )
-    .await;
+mod another_file_put_where_one_was_missing_isnt_downloaded_over_whatever_a_crash_cut_short {
+    use super::*;
+
+    /// The three cases of one state the file went missing in.
+    async fn at(at: At) {
+        each([(B, false), (B, true), (TWO, false)].map(|(gone, off)| (at, gone, Put::Other, When::After, off, true))).await;
+    }
+
+    at_each!(at, ready: Ready, pieces_lost: PiecesLost, downloaded: Downloaded, missing: Missing, away: Away, away_twice: AwayTwice, away_whole: AwayWhole, checking: Checking, unchecked: Unchecked, error: Error);
 }
 
 /// Those known missing before it: put there while the service wasn't running too.
@@ -241,13 +241,21 @@ async fn another_file_put_where_one_was_missing_isnt_downloaded_over_after_a_sto
     each(after.into_iter().chain([(At::Away, B, Put::Other, When::Before, false, false)])).await;
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_persons_own_file_put_back_is_the_torrents_again_whatever_a_crash_cut_short() {
-    each(EVERY.into_iter().flat_map(|at| {
-        [(B, When::Before), (B, When::After), (TWO, When::After)].map(|(gone, when)| (at, gone, Put::Own, when, false, true))
-    }))
-    .await;
-    interrupted(At::Away, B, Put::Own, When::Before, false, false).await;
+mod a_persons_own_file_put_back_is_the_torrents_again_whatever_a_crash_cut_short {
+    use super::*;
+
+    /// The three cases of one state the file went missing in.
+    async fn at(at: At) {
+        each([(B, When::Before), (B, When::After), (TWO, When::After)].map(|(gone, when)| (at, gone, Put::Own, when, false, true))).await;
+    }
+
+    at_each!(at, ready: Ready, pieces_lost: PiecesLost, downloaded: Downloaded, missing: Missing, away: Away, away_twice: AwayTwice, away_whole: AwayWhole, checking: Checking, unchecked: Unchecked, error: Error);
+
+    /// After a clean stop, not a crash.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn after_a_stop() {
+        interrupted(At::Away, B, Put::Own, When::Before, false, false).await;
+    }
 }
 
 /// A save that fails as a file goes missing is made up for at the next phase change: taking the

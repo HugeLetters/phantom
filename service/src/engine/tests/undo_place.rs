@@ -64,10 +64,26 @@ fn the_magnet_of(hash: &str, name: &str) -> String {
 /// A Remove or a Delete isn't undone while another listed torrent has the files, whatever that
 /// torrent is doing or how its place is spelled: refused with both torrents named, dropped, nothing
 /// kept for it, the other torrent exactly as it was, and what the Delete moved still in the Trash.
-#[tokio::test(flavor = "multi_thread")]
-async fn an_undo_is_refused_and_dropped_while_another_torrent_has_the_files() {
-    for other in [Other::Running, Other::Stopped, Other::InsideItsFolder, Other::InAnotherCase] {
-        for delete in [false, true] {
+mod an_undo_is_refused_and_dropped_while_another_torrent_has_the_files {
+    use super::*;
+
+    macro_rules! cases {
+        ($($name:ident: ($other:ident, $delete:expr)),*) => {$(
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                of(Other::$other, $delete).await;
+            }
+        )*};
+    }
+    cases!(
+        running_removed: (Running, false), running_deleted: (Running, true),
+        stopped_removed: (Stopped, false), stopped_deleted: (Stopped, true),
+        inside_its_folder_removed: (InsideItsFolder, false), inside_its_folder_deleted: (InsideItsFolder, true),
+        in_another_case_removed: (InAnotherCase, false), in_another_case_deleted: (InAnotherCase, true)
+    );
+
+    async fn of(other: Other, delete: bool) {
+        {
             let case = format!("{other:?}, delete: {delete}");
             let dir = temp();
             let engine = engine(dir.path()).await;

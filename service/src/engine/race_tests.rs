@@ -1876,23 +1876,53 @@ fn an_add_into_the_old_folder_of_a_moved_torrent_goes_through_while_its_new_fold
     ]);
 }
 
-#[test]
-fn a_move_held_mid_copy_ends_in_exactly_one_destination_however_it_ends() {
-    let arrived = [Add { pack: 0, paused: false }, Arrive { pack: 0 }];
-    for copies in [false, true] {
+mod a_move_held_mid_copy_ends_in_exactly_one_destination_however_it_ends {
+    use super::*;
+
+    /// One of the ways a move held mid-copy goes on, as `copies` or not.
+    fn run_one(copies: bool, way: usize) {
+        let arrived = [Add { pack: 0, paused: false }, Arrive { pack: 0 }];
         let held = Move { pack: 0, held: true, copies };
-        for then in [&[MoveEnds][..], &[Remove { pack: 0, delete: false }], &[Remove { pack: 0, delete: true }], &[Restart], &[KillMidMove]]
-        {
-            run(&[&arrived[..], &[held.clone()], then].concat());
-        }
-        // A crash once its first file took its place: the start finishes it; and back again.
-        run(&[&arrived[..], &[KillAfterPlaced { pack: 0, copies }, KillAfterPlaced { pack: 0, copies }]].concat());
-        // There and back, and a Pause behind it, answered once it's moved.
-        run(&[&arrived[..], &[held.clone(), Pause { pack: 0 }, MoveEnds, Move { pack: 0, held: false, copies }]].concat());
+        let then: Vec<Step> = match way {
+            0 => vec![held, MoveEnds],
+            1 => vec![held, Remove { pack: 0, delete: false }],
+            2 => vec![held, Remove { pack: 0, delete: true }],
+            3 => vec![held, Restart],
+            4 => vec![held, KillMidMove],
+            // A crash once its first file took its place: the start finishes it; and back again.
+            5 => vec![KillAfterPlaced { pack: 0, copies }, KillAfterPlaced { pack: 0, copies }],
+            // There and back, and a Pause behind it, answered once it's moved.
+            6 => vec![held, Pause { pack: 0 }, MoveEnds, Move { pack: 0, held: false, copies }],
+            _ => unreachable!(),
+        };
+        run(&[&arrived[..], &then].concat());
     }
-    // The old destination goes as the copy waits: it's put back, once its drive is.
-    run(&[&arrived[..], &[Move { pack: 0, held: true, copies: true }, DestinationGone { pack: 0 }, MoveEnds, DestinationBack { pack: 0 }]]
+
+    macro_rules! ways {
+        ($($name:ident: ($copies:expr, $way:expr)),*) => {$(
+            #[test]
+            fn $name() {
+                run_one($copies, $way);
+            }
+        )*};
+    }
+    ways!(
+        ends: (false, 0), removed: (false, 1), deleted: (false, 2), restarted: (false, 3), killed_mid_move: (false, 4),
+        killed_after_placed: (false, 5), paused_behind: (false, 6),
+        copies_ends: (true, 0), copies_removed: (true, 1), copies_deleted: (true, 2), copies_restarted: (true, 3),
+        copies_killed_mid_move: (true, 4), copies_killed_after_placed: (true, 5), copies_paused_behind: (true, 6)
+    );
+
+    /// The old destination goes as the copy waits: it's put back, once its drive is.
+    #[test]
+    fn the_old_destination_goes_as_the_copy_waits() {
+        let arrived = [Add { pack: 0, paused: false }, Arrive { pack: 0 }];
+        run(&[
+            &arrived[..],
+            &[Move { pack: 0, held: true, copies: true }, DestinationGone { pack: 0 }, MoveEnds, DestinationBack { pack: 0 }],
+        ]
         .concat());
+    }
 }
 
 /// Found by #264's 256-case run: a move held at its gate, checks held, then a Remove that crashes

@@ -1532,10 +1532,14 @@ async fn fails(peers: &Arc<Peers>, case: &Case, strict: bool) -> Result<Power, S
     })
 }
 
+/// How many tests the generated cases are split over, each in a process of its own.
+const SHARDS: usize = 4;
+
 /// Generated cases, some at a time: each takes seconds, most of them waiting. A failing one is shrunk.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_persons_bytes_stay_and_a_torrents_own_files_work() {
-    let cases = std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(32);
+/// `PROPTEST_CASES` (32 by default) are split over [`SHARDS`] tests, which nextest runs in parallel.
+async fn generated_shard() {
+    let total: usize = std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(32);
+    let cases = total.div_ceil(SHARDS);
     let peers = Arc::new(Peers::start().await);
     let width = Arc::new(tokio::sync::Semaphore::new(WIDTH));
     let mut running = tokio::task::JoinSet::new();
@@ -1575,7 +1579,7 @@ async fn a_persons_bytes_stay_and_a_torrents_own_files_work() {
     );
     println!("known open, seen: {seen:#?}");
     let Some((n, mut why)) = failed else {
-        assert!(cases < 256 || sent * 16 >= theirs, "the peer hardly sends: nothing is tested");
+        assert!(total < 256 || sent * 16 >= theirs, "the peer hardly sends: nothing is tested");
         return;
     };
     // The rest is over before it's shrunk: they'd load the machine.
@@ -1596,6 +1600,19 @@ async fn a_persons_bytes_stay_and_a_torrents_own_files_work() {
         };
     }
     panic!("{why}\nminimal: {least:?}");
+}
+
+/// The generated cases, `SHARDS` tests of an equal share.
+mod a_persons_bytes_stay_and_a_torrents_own_files_work {
+    macro_rules! shards {
+        ($($name:ident),*) => {$(
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                super::generated_shard().await;
+            }
+        )*};
+    }
+    shards!(shard_1, shard_2, shard_3, shard_4);
 }
 
 /// Each class of [`KNOWN_OPEN`] on its own: fails while that's open.
@@ -1685,12 +1702,28 @@ closed! {
 /// ADR 0014: a file a Move to Trash takes is closed as it goes, so nothing writes into it in the
 /// Trash, a person's file put at the torrent's path too, while the pieces it shares with its
 /// neighbours are downloaded, and once the torrent lets go of its pieces.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_file_moved_to_the_trash_is_never_written_there() {
-    let peers = Peers::start().await;
-    for kind in [Same, Edit, OnePiece] {
+mod a_file_moved_to_the_trash_is_never_written_there {
+    use super::*;
+
+    async fn of(kind: Kind) {
+        let peers = Peers::start().await;
         let steps = vec![put(kind), Step::Do(Do::TrashFile { file: B }), Step::Settle, Step::PeerOpens, Step::Settle];
         World::run(&peers, &Case { start: Start::Nothing, peer: true, paused: false, before: None, steps }, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same() {
+        of(Same).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn edit() {
+        of(Edit).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_piece() {
+        of(OnePiece).await;
     }
 }
 
@@ -1733,17 +1766,28 @@ async fn a_move_without_a_missing_file_takes_the_choice_it_was_sent_with() {
 }
 
 /// #406: a Move that uses one file there leaves the person's where another was missing as it is.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_move_that_uses_a_file_there_leaves_one_where_a_file_was_missing() {
-    let cases = [Same, Shorter, Empty, OnePiece, Cut, HardLink, Edit, Longer].into_iter().flat_map(|kind| {
-        [false, true].map(|peer| {
+mod a_move_that_uses_a_file_there_leaves_one_where_a_file_was_missing {
+    use super::*;
+
+    async fn of(kind: Kind) {
+        let cases = [false, true].map(|peer| {
             let gone = [Step::Settle, Step::By(By::TakeAway { file: B }), Step::Settle, put(kind)];
             let used = Step::By(By::PutAtTarget { file: 0, kind: Same });
             let steps = [gone.to_vec(), vec![used, Step::Do(Do::Move { replace: false }), Step::Settle]].concat();
             Case { start: Start::Whole, peer, paused: false, before: None, steps }
-        })
-    });
-    strictly(cases).await;
+        });
+        strictly(cases).await;
+    }
+
+    macro_rules! kinds {
+        ($($name:ident: $kind:expr),*) => {$(
+            #[tokio::test(flavor = "multi_thread")]
+            async fn $name() {
+                of($kind).await;
+            }
+        )*};
+    }
+    kinds!(same: Same, shorter: Shorter, empty: Empty, one_piece: OnePiece, cut: Cut, hard_link: HardLink, edit: Edit, longer: Longer);
 }
 
 /// Runs each of `cases` strictly, `WIDTH` at a time as the generated ones are: each takes seconds,

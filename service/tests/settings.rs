@@ -451,10 +451,11 @@ impl Case {
     }
 }
 
-#[test]
-fn settings_and_torrents_survive_changes_and_restarts() {
-    // Each case starts a service, and many steps restart its engine: a few cases go a long way.
-    let config = ProptestConfig { cases: 6, failure_persistence: None, ..ProptestConfig::default() };
+/// One generated case: a service started, and a generated sequence of steps run against it.
+fn one_generated_case() {
+    // Each case starts a service, and many steps restart its engine: each runs as a test of its own,
+    // in a process of its own (its own `PHANTOM_DATA_DIR`), so nextest runs them in parallel.
+    let config = ProptestConfig { cases: 1, failure_persistence: None, ..ProptestConfig::default() };
     proptest!(config, |(steps in proptest::collection::vec(step(), 1..10))| {
         let dir = tempfile::tempdir().unwrap();
         let mut case = Case::new(dir.path());
@@ -475,4 +476,17 @@ fn settings_and_torrents_survive_changes_and_restarts() {
         }
         case.end()?;
     });
+}
+
+/// Six generated cases (as one test ran them one after another before), one test each.
+mod settings_and_torrents_survive_changes_and_restarts {
+    macro_rules! cases {
+        ($($name:ident),*) => {$(
+            #[test]
+            fn $name() {
+                super::one_generated_case();
+            }
+        )*};
+    }
+    cases!(case_1, case_2, case_3, case_4, case_5, case_6);
 }
