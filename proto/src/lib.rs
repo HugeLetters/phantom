@@ -1641,13 +1641,23 @@ pub fn data_dir() -> PathBuf {
 
 /// Where the service listens and clients find it: part of the contract, like the messages.
 pub fn socket_path() -> PathBuf {
-    data_dir().join("service.sock")
+    socket_in(&data_dir())
+}
+
+/// [`socket_path`] of the service whose data dir is `dir`.
+pub fn socket_in(dir: &Path) -> PathBuf {
+    dir.join("service.sock")
 }
 
 /// Held by the service for its whole life, from before it binds the socket until after it has
 /// stopped: while it's held, a service is there, starting, serving or stopping.
 pub fn lock_path() -> PathBuf {
-    data_dir().join("service.lock")
+    lock_path_in(&data_dir())
+}
+
+/// [`lock_path`] of the service whose data dir is `dir`.
+pub fn lock_path_in(dir: &Path) -> PathBuf {
+    dir.join("service.lock")
 }
 
 #[cfg(test)]

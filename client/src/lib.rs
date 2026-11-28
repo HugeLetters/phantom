@@ -19,7 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use machine::{Build, Do, Observed, State, World};
 use proto::{
     AbsolutePath, AddSource, Added, Details, Refusal, Request, Response, Setting, Settings, Snapshot, Status, TorrentCommand, TorrentId,
-    TorrentInfo, TorrentRefusal, data_dir, socket_path,
+    TorrentInfo, TorrentRefusal, data_dir,
 };
 
 pub mod display;
@@ -121,6 +121,8 @@ pub struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
     pub service_version: String,
+    /// The service's data dir, where a fresh connection goes.
+    data_dir: PathBuf,
 }
 
 impl Client {
@@ -131,7 +133,7 @@ impl Client {
     }
 
     fn connect_to_build_of(service_exe: &Path) -> Result<Self> {
-        let mut client = Self::connect_raw()?;
+        let mut client = Self::connect_raw(&data_dir())?;
         let build_id = client.hello()?;
         let ours = our_build_id(service_exe)?;
         if build_id != ours {
@@ -143,7 +145,16 @@ impl Client {
     /// Connects to the service, starting `service_exe` if none is running. A service
     /// that isn't `service_exe`'s build, or is stopping, is waited for to go and replaced.
     pub fn connect_or_spawn(service_exe: &Path) -> Result<Self> {
-        let mut socket = Socket::new(service_exe);
+        Self::connect_or_spawn_with(Socket::new(service_exe))
+    }
+
+    /// [`connect_or_spawn`](Self::connect_or_spawn) in `dirs`, not the ones the environment names:
+    /// for tests that run several services side by side in one process.
+    pub fn connect_or_spawn_in(service_exe: &Path, dirs: &Dirs) -> Result<Self> {
+        Self::connect_or_spawn_with(Socket::new_in(service_exe, dirs))
+    }
+
+    fn connect_or_spawn_with(mut socket: Socket) -> Result<Self> {
         match machine::settle(State::Connecting, &mut socket) {
             State::Lost { why, .. } => bail!("{}", display::lost(&why)),
             State::Outdated => bail!("{}", display::lost(&machine::Why::Outdated)),
@@ -153,12 +164,22 @@ impl Client {
 
     /// Another connection to the service a link reached, as it is: no hello, no starting one.
     pub fn open() -> Result<Self> {
-        Self::connect_raw()
+        Self::connect_raw(&data_dir())
     }
 
-    fn connect_raw() -> Result<Self> {
-        let stream = UnixStream::connect(socket_path())?;
-        Ok(Self { reader: BufReader::new(stream.try_clone()?), writer: stream, service_version: String::new() })
+    /// [`open`](Self::open) to the service of `dirs`.
+    pub fn open_in(dirs: &Dirs) -> Result<Self> {
+        Self::connect_raw(&dirs.data)
+    }
+
+    fn connect_raw(data_dir: &Path) -> Result<Self> {
+        let stream = with_fds_not_inherited(|| UnixStream::connect(proto::socket_in(data_dir)))?;
+        Ok(Self {
+            reader: BufReader::new(stream.try_clone()?),
+            writer: stream,
+            service_version: String::new(),
+            data_dir: data_dir.to_owned(),
+        })
     }
 
     /// The service's build id.
@@ -192,7 +213,7 @@ impl Client {
     /// The first snapshot on this connection, which becomes a stream: so the client goes on with a
     /// fresh one to the same service, opened first so the service never sees it without one.
     fn snapshot_here(&mut self, watching: Vec<TorrentId>) -> Result<Snapshot, Failure> {
-        let fresh = Self { service_version: self.service_version.clone(), ..Self::connect_raw()? };
+        let fresh = Self { service_version: self.service_version.clone(), ..Self::connect_raw(&self.data_dir)? };
         std::mem::replace(self, fresh).snapshot(watching)
     }
 
@@ -390,10 +411,48 @@ fn our_build_id(service_exe: &Path) -> Result<&'static str> {
     Ok(ID.get_or_init(|| id))
 }
 
-fn spawn_service(service_exe: &Path) -> Result<()> {
-    std::fs::create_dir_all(data_dir())?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("service.log"))?;
-    Command::new(service_exe)
+/// The data and download dirs of one service, named outright instead of through the environment
+/// (`PHANTOM_DATA_DIR`, `PHANTOM_DOWNLOAD_DIR`), which a process has once: for tests that run
+/// several services side by side. The service still reads the environment; it's started with these
+/// in it.
+#[derive(Debug, Clone)]
+pub struct Dirs {
+    pub data: PathBuf,
+    pub download: PathBuf,
+}
+
+/// Held for writing while a process is started, for reading while a descriptor is created.
+static SPAWNING: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Runs `create`, which makes a socket or the like, while no process is being started in this
+/// process. macOS can't make a descriptor close-on-exec as it's created: one made while another
+/// thread starts a service is inherited by it, which then keeps a port or a connection open for as
+/// long as it runs. Only matters to a process that starts processes from several threads, as a
+/// test does.
+pub fn with_fds_not_inherited<T>(create: impl FnOnce() -> T) -> T {
+    let _reading = SPAWNING.read().unwrap_or_else(|e| e.into_inner());
+    create()
+}
+
+/// Runs `start`, which starts a process, alone: no descriptor is created or process started in
+/// this process meanwhile. Many threads starting processes at once, and reading their sockets,
+/// makes macOS fail a read with EBADF now and then: the tests that run services side by side
+/// start theirs through this.
+pub fn with_process_started<T>(start: impl FnOnce() -> T) -> T {
+    let _writing = SPAWNING.write().unwrap_or_else(|e| e.into_inner());
+    start()
+}
+
+fn spawn_service(service_exe: &Path, dirs: Option<&Dirs>) -> Result<()> {
+    let _writing = SPAWNING.write().unwrap_or_else(|e| e.into_inner());
+    let data = dirs.map_or_else(data_dir, |d| d.data.clone());
+    std::fs::create_dir_all(&data)?;
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(data.join("service.log"))?;
+    let mut command = Command::new(service_exe);
+    if let Some(dirs) = dirs {
+        command.env("PHANTOM_DATA_DIR", &dirs.data).env("PHANTOM_DOWNLOAD_DIR", &dirs.download);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)
         .stderr(log)
@@ -407,6 +466,8 @@ fn spawn_service(service_exe: &Path) -> Result<()> {
 /// The socket and the real clock, which a link reaches the service through.
 pub struct Socket {
     service_exe: PathBuf,
+    /// `None`: the environment's.
+    dirs: Option<Dirs>,
     /// The connection that answered the last hello.
     client: Option<Client>,
 }
@@ -414,7 +475,16 @@ pub struct Socket {
 impl Socket {
     /// For a link that starts `service_exe`.
     pub fn new(service_exe: &Path) -> Self {
-        Self { service_exe: service_exe.to_owned(), client: None }
+        Self { service_exe: service_exe.to_owned(), dirs: None, client: None }
+    }
+
+    /// For a link to the service of `dirs`.
+    pub fn new_in(service_exe: &Path, dirs: &Dirs) -> Self {
+        Self { service_exe: service_exe.to_owned(), dirs: Some(dirs.clone()), client: None }
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        self.dirs.as_ref().map_or_else(data_dir, |d| d.data.clone())
     }
 
     /// The connection a hello from our build came through, once connected.
@@ -428,11 +498,12 @@ impl Socket {
             Ok(ours) => ours,
             Err(e) => return Observed::Failed(format!("{e:#}")),
         };
-        let Ok(mut client) = Client::connect_raw() else {
-            return match data_dir_held() {
+        let data = self.data_dir();
+        let Ok(mut client) = Client::connect_raw(&data) else {
+            return match data_dir_held(&data) {
                 Ok(true) => Observed::Going,
                 Ok(false) => Observed::Gone,
-                Err(e) => Observed::Failed(format!("can't read {}: {e}", proto::lock_path().display())),
+                Err(e) => Observed::Failed(format!("can't read {}: {e}", proto::lock_path_in(&data).display())),
             };
         };
         // One that accepts but never answers is as good as going.
@@ -480,7 +551,7 @@ impl World for Socket {
                 }
                 Observed::Closed
             }
-            Do::Spawn => match spawn_service(&self.service_exe) {
+            Do::Spawn => match spawn_service(&self.service_exe, self.dirs.as_ref()) {
                 Ok(()) => Observed::Spawned,
                 Err(e) => Observed::Failed(format!("{e:#}")),
             },
@@ -496,8 +567,8 @@ impl World for Socket {
 const HELLO_WITHIN: Duration = Duration::from_secs(5);
 
 /// Whether a service holds the data dir's lock: starting, serving or stopping.
-fn data_dir_held() -> std::io::Result<bool> {
-    let lock = match File::open(proto::lock_path()) {
+fn data_dir_held(data_dir: &Path) -> std::io::Result<bool> {
+    let lock = match File::open(proto::lock_path_in(data_dir)) {
         Ok(lock) => lock,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e),

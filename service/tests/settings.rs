@@ -17,8 +17,6 @@
 //! was generated, each case shows a limit applied and kept, the actor hearing of the setting, and
 //! releasing at a stop.
 
-mod fake;
-
 use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 use std::path::{Path, PathBuf};
@@ -26,7 +24,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use client::setting::{self, ValueProblem};
-use client::{Client, Failure};
+use client::{Client, Dirs, Failure};
 use proptest::prelude::*;
 use proto::{
     AbsolutePath, AddSource, Direction, ListenPort, Ratio, Refusal, SeedTime, SeedingLimit, SeedingLimits, Setting, Settings, SpeedLimit,
@@ -145,8 +143,20 @@ struct Added {
     progress: u64,
 }
 
+/// How many cases run at once, at most (the runners of `cases::side_by_side`), and the ports each
+/// of them takes its generated ports from: its own window, as no two services of one machine can
+/// listen on the same port.
+const SLOTS: usize = 8;
+const WINDOW: u16 = 1000 / SLOTS as u16;
+
+/// Which of the windows each running case holds.
+static SLOTS_TAKEN: std::sync::Mutex<[bool; SLOTS]> = std::sync::Mutex::new([false; SLOTS]);
+
 struct Case {
+    /// The window of ports this case's generated ports fall in.
+    slot: usize,
     root: PathBuf,
+    dirs: Dirs,
     client: Client,
     stored: Stored,
     /// By pack.
@@ -156,8 +166,10 @@ struct Case {
     torrents: Vec<Vec<u8>>,
 }
 
-fn connect() -> Client {
-    Client::connect_or_spawn(env!("CARGO_BIN_EXE_phantom-service").as_ref()).unwrap()
+/// A client of the service of `dirs`, started if none runs. The case's dirs are named outright, not
+/// through the environment, which cases running side by side in one process can't each have.
+fn connect(dirs: &Dirs) -> Client {
+    Client::connect_or_spawn_in(env!("CARGO_BIN_EXE_phantom-service").as_ref(), dirs).unwrap()
 }
 
 fn folder(root: &Path, i: usize) -> AbsolutePath {
@@ -167,7 +179,7 @@ fn folder(root: &Path, i: usize) -> AbsolutePath {
 /// Two files of two pieces each in `content/pack-<i>`, and a .torrent of them whose tracker is a
 /// closed local port; the odd packs then lose their second file, so they have something to get.
 fn packs(root: &Path) -> Vec<Vec<u8>> {
-    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let runtime = client::with_fds_not_inherited(|| tokio::runtime::Runtime::new().unwrap());
     (0..PACKS)
         .map(|i| {
             let pack = root.join(format!("content/pack-{i}"));
@@ -194,14 +206,14 @@ fn packs(root: &Path) -> Vec<Vec<u8>> {
 }
 
 /// How many times the services of this data dir restarted their engine, from their log.
-fn engine_restarts() -> usize {
-    let log = std::fs::read_to_string(proto::data_dir().join("service.log")).unwrap_or_default();
+fn engine_restarts(data: &Path) -> usize {
+    let log = std::fs::read_to_string(data.join("service.log")).unwrap_or_default();
     log.matches("restarting the engine").count()
 }
 
 /// The limits the data dir's services last ran their sessions with, from their log.
-fn limits_applied() -> Option<SpeedLimits> {
-    let log = std::fs::read_to_string(proto::data_dir().join("service.log")).unwrap_or_default();
+fn limits_applied(data: &Path) -> Option<SpeedLimits> {
+    let log = std::fs::read_to_string(data.join("service.log")).unwrap_or_default();
     let line = log.lines().rev().find(|l| l.contains("speed limits"))?;
     let bps = |name: &str| -> Option<SpeedLimit> {
         let value = line.split(&format!("{name}=")).nth(1)?.split_whitespace().next()?;
@@ -211,14 +223,15 @@ fn limits_applied() -> Option<SpeedLimits> {
 }
 
 /// The pid of the service holding the data dir's lock.
-fn service_pid() -> String {
-    let out = Command::new("lsof").args(["-t"]).arg(proto::lock_path()).output().unwrap();
+fn service_pid(data: &Path) -> String {
+    let out = client::with_process_started(|| Command::new("lsof").args(["-t"]).arg(proto::lock_path_in(data)).output()).unwrap();
     String::from_utf8(out.stdout).unwrap().lines().next().expect("a service holds the lock").to_owned()
 }
 
 /// The TCP ports the service listens on: one librqbit session's peer listener.
 fn listening(pid: &str) -> Vec<u16> {
-    let out = Command::new("lsof").args(["-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"]).output().unwrap();
+    let out = client::with_process_started(|| Command::new("lsof").args(["-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"]).output())
+        .unwrap();
     let mut ports: Vec<u16> =
         String::from_utf8(out.stdout).unwrap().lines().filter_map(|l| l.strip_prefix('n')?.rsplit(':').next()?.parse().ok()).collect();
     ports.sort();
@@ -228,21 +241,41 @@ fn listening(pid: &str) -> Vec<u16> {
 
 /// Whether macOS lists the service's assertion that keeps the Mac awake.
 fn keeps_awake(pid: &str) -> bool {
-    let out = Command::new("pmset").args(["-g", "assertions"]).output().unwrap();
+    let out = client::with_process_started(|| Command::new("pmset").args(["-g", "assertions"]).output()).unwrap();
     let owner = format!("pid {pid}(");
     String::from_utf8(out.stdout).unwrap().lines().any(|l| l.contains(&owner) && l.contains("PreventUserIdleSystemSleep"))
 }
 
+impl Drop for Case {
+    fn drop(&mut self) {
+        SLOTS_TAKEN.lock().unwrap_or_else(|e| e.into_inner())[self.slot] = false;
+    }
+}
+
 impl Case {
     fn new(root: &Path) -> Self {
-        fake::isolate(root);
+        let slot = loop {
+            let mut taken = SLOTS_TAKEN.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(free) = taken.iter().position(|t| !t) {
+                taken[free] = true;
+                break free;
+            }
+            drop(taken);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let dirs = Dirs { data: root.join("data"), download: root.join("downloads") };
+        std::fs::create_dir_all(&dirs.data).unwrap();
         for i in 0..2 {
             std::fs::create_dir_all(folder(root, i)).unwrap();
         }
         let torrents = packs(root);
-        let mut client = connect();
+        let mut client = connect(&dirs);
         let stored = Stored::of(&client.settings().unwrap());
-        Self { root: root.to_owned(), client, stored, added: BTreeMap::new(), order: Vec::new(), torrents }
+        Self { slot, root: root.to_owned(), dirs, client, stored, added: BTreeMap::new(), order: Vec::new(), torrents }
+    }
+
+    fn pid(&self) -> String {
+        service_pid(&self.dirs.data)
     }
 
     /// The list once no torrent is checking: what a restart's done with them.
@@ -260,9 +293,9 @@ impl Case {
 
     fn check(&mut self, settings: &Settings) -> Result<(), TestCaseError> {
         prop_assert_eq!(&Stored::of(settings), &self.stored, "what's stored");
-        prop_assert_eq!(limits_applied(), Some(self.stored.speed_limits), "the limits the torrents run with");
+        prop_assert_eq!(limits_applied(&self.dirs.data), Some(self.stored.speed_limits), "the limits the torrents run with");
         prop_assert_eq!(settings.listening_on, settings.listen_port.port(), "nothing else has the port");
-        let pid = service_pid();
+        let pid = self.pid();
         prop_assert_eq!(listening(&pid), vec![settings.listening_on.get()], "one session, listening where it says");
         let list = self.settled();
         let mut ids: Vec<TorrentId> = list.iter().map(|t| t.id).collect();
@@ -293,15 +326,17 @@ impl Case {
     /// Stops the service. While it stops (its socket is still there, which it removes last), the
     /// Mac is no longer kept awake: the last look before the socket goes finds no assertion.
     fn stop(&mut self) -> Result<(), TestCaseError> {
-        let pid = service_pid();
+        let pid = self.pid();
         self.client.shutdown().unwrap();
         let mut last = None;
         loop {
             let held = keeps_awake(&pid);
-            if !proto::socket_path().exists() {
+            if !proto::socket_in(&self.dirs.data).exists() {
                 break;
             }
             last = Some(held);
+            // Each look starts a process: not a busy loop, with the others running side by side.
+            std::thread::sleep(Duration::from_millis(20));
         }
         prop_assert_ne!(last, Some(true), "still kept awake while the service stops");
         self.client.wait_closed().unwrap();
@@ -321,11 +356,23 @@ impl Case {
         }
         self.run(Step::KeepAwake(Some(false)))?;
         self.run(Step::KeepAwake(Some(true)))?;
-        prop_assert!(keeps_awake(&service_pid()), "kept awake before the stop");
+        prop_assert!(keeps_awake(&self.pid()), "kept awake before the stop");
         self.stop()
     }
 
+    /// A generated port, folded into this case's window of ports.
+    fn windowed(&self, port: NonZeroU16) -> NonZeroU16 {
+        let offset = (port.get() - 40_000) % WINDOW;
+        NonZeroU16::new(40_000 + self.slot as u16 * WINDOW + offset).unwrap()
+    }
+
     fn run(&mut self, step: Step) -> Result<(), TestCaseError> {
+        let step = match step {
+            Step::Port(port) => Step::Port(port.map(|p| self.windowed(p))),
+            Step::ConnectDuringRestart(port) => Step::ConnectDuringRestart(self.windowed(port)),
+            Step::FolderWhilePinnedTaken { port, folder } => Step::FolderWhilePinnedTaken { port: self.windowed(port), folder },
+            other => other,
+        };
         let answer = match step {
             Step::Add { pack, paused } => {
                 if !self.added.contains_key(&pack) {
@@ -351,9 +398,9 @@ impl Case {
             Step::Destination(i) => {
                 let folder = i.map(|i| folder(&self.root, i));
                 self.stored.default_destination = folder.clone();
-                let pid = service_pid();
+                let pid = self.pid();
                 let answer = self.client.set_setting(Setting::DefaultDestination(folder)).unwrap();
-                prop_assert_eq!(service_pid(), pid);
+                prop_assert_eq!(self.pid(), pid);
                 answer
             }
             Step::MissingDestination => {
@@ -407,31 +454,32 @@ impl Case {
             }
             Step::ConnectDuringRestart(port) => {
                 self.stored.listen_port = ListenPort::Pinned(port);
-                let pid = service_pid();
-                let mut changer = connect();
+                let pid = self.pid();
+                let mut changer = connect(&self.dirs);
                 let change = std::thread::spawn(move || changer.set_setting(Setting::ListenPort(Some(port))));
                 let mut met = 0;
                 while !change.is_finished() || met == 0 {
                     let started = Instant::now();
-                    let mut other = connect();
+                    let mut other = connect(&self.dirs);
                     let listed = other.list();
                     prop_assert!(listed.is_ok(), "a client meeting the restart was answered: {:?}", listed.err());
                     prop_assert!(started.elapsed() < Duration::from_secs(30), "and not timed out");
                     met += 1;
                 }
-                prop_assert_eq!(service_pid(), pid, "the same service");
+                prop_assert_eq!(self.pid(), pid, "the same service");
                 change.join().unwrap().unwrap()
             }
             Step::FolderWhilePinnedTaken { port, folder: i } => {
-                let held = std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port.get())).unwrap();
+                let held =
+                    client::with_fds_not_inherited(|| std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, port.get()))).unwrap();
                 let pinned = self.client.set_setting(Setting::ListenPort(Some(port))).unwrap();
                 prop_assert_ne!(pinned.listening_on, port, "a temporary port while it's taken");
-                let restarts = engine_restarts();
+                let restarts = engine_restarts(&self.dirs.data);
                 let folder = folder(&self.root, i);
                 let changed = self.client.set_setting(Setting::DefaultDestination(Some(folder.clone()))).unwrap();
-                prop_assert_eq!(engine_restarts(), restarts, "a new folder doesn't restart the engine");
+                prop_assert_eq!(engine_restarts(&self.dirs.data), restarts, "a new folder doesn't restart the engine");
                 prop_assert_eq!(changed.listening_on, pinned.listening_on, "and it listens where it did");
-                prop_assert_eq!(listening(&service_pid()), vec![pinned.listening_on.get()]);
+                prop_assert_eq!(listening(&self.pid()), vec![pinned.listening_on.get()]);
                 drop(held);
                 self.stored.default_destination = Some(folder);
                 self.stored.listen_port = ListenPort::Picked(port);
@@ -439,7 +487,7 @@ impl Case {
             }
             Step::Restart => {
                 self.stop()?;
-                self.client = connect();
+                self.client = connect(&self.dirs);
                 self.client.settings().unwrap()
             }
         };
@@ -452,25 +500,35 @@ impl Case {
 #[test]
 fn settings_and_torrents_survive_changes_and_restarts() {
     // Each case starts a service, and many steps restart its engine: a few cases go a long way.
+    // Each case has its own dirs, so they run side by side.
     let config = ProptestConfig { cases: 6, failure_persistence: None, ..ProptestConfig::default() };
-    proptest!(config, |(steps in proptest::collection::vec(step(), 1..10))| {
-        let dir = tempfile::tempdir().unwrap();
-        let mut case = Case::new(dir.path());
-        let defaults = Stored {
-            default_destination: None,
-            listen_port: case.stored.listen_port,
-            upnp: true,
-            keep_awake: false,
-            speed_limits: SpeedLimits::default(),
-            seeding: SeedingLimits::default(),
-        };
-        prop_assert_eq!(&case.stored, &defaults, "defaults");
-        prop_assert!(matches!(case.stored.listen_port, ListenPort::Picked(_)), "picked at the first start");
-        let first = case.client.settings().unwrap();
-        case.check(&first)?;
-        for step in steps {
-            case.run(step)?;
-        }
-        case.end()?;
+    let config = proptest::test_runner::contextualize_config(ProptestConfig {
+        source_file: Some(file!()),
+        test_name: Some(concat!(module_path!(), "::settings_and_torrents_survive_changes_and_restarts")),
+        ..config
     });
+    cases::side_by_side(
+        config,
+        || proptest::collection::vec(step(), 1..10),
+        |steps| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut case = Case::new(dir.path());
+            let defaults = Stored {
+                default_destination: None,
+                listen_port: case.stored.listen_port,
+                upnp: true,
+                keep_awake: false,
+                speed_limits: SpeedLimits::default(),
+                seeding: SeedingLimits::default(),
+            };
+            prop_assert_eq!(&case.stored, &defaults, "defaults");
+            prop_assert!(matches!(case.stored.listen_port, ListenPort::Picked(_)), "picked at the first start");
+            let first = case.client.settings().unwrap();
+            case.check(&first)?;
+            for step in steps {
+                case.run(step)?;
+            }
+            case.end()
+        },
+    );
 }
