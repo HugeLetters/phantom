@@ -667,6 +667,16 @@ impl Actor {
                 }
             }
         }
+        // A torrent an undo added back starts once nothing waits on its lane, if it's still wanted
+        // running then (#468).
+        let idle: Vec<TorrentId> =
+            self.starts_once_idle.iter().copied().filter(|id| !self.steps.machine().lanes.contains_key(id)).collect();
+        for id in idle {
+            self.starts_once_idle.remove(&id);
+            if let Err(e) = self.carry_out(id).await {
+                warn!(id, error = ?e, "failed to start a torrent an undo added back");
+            }
+        }
     }
 
     /// Reports what the actor found that ends no step ([`Steps::report`]), written ahead.

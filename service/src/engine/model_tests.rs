@@ -221,6 +221,9 @@ struct Model {
     /// waits its turn behind the rollback (#217's re-review, N1), answered once the gate opens. An
     /// action of them is on the stack, queued; ⌘Z drops it.
     behind: Vec<Behind>,
+    /// As what waited behind the rollbacks runs, the torrents with some of it still to run: added
+    /// back, they start only once it has all run (#468), so none of their files is granted.
+    unstarted: BTreeSet<TorrentId>,
     /// After a `Step::Burst`, the model after each of its steps, which the engine is held to.
     trail: Vec<Model>,
     /// The files Delete moved to the Trash, by pack: none may come back at its path until it's
@@ -778,7 +781,8 @@ impl Model {
     /// an error. Either way it's refused. With the trash held, the first item goes, and the rest
     /// wait for the gate.
     fn delete(&mut self, id: TorrentId, pack: usize) -> Answer {
-        // What ran before it on the lane has started.
+        // What ran before it on the lane has started, but a torrent a rollback added back: it starts
+        // only once its lane is idle (#468).
         self.grant_running();
         // A folder that isn't there (every file moved to the Trash by a Move to Trash took it) has nothing to go.
         let items: Vec<Item> = if !self.folder[pack] {
@@ -1225,18 +1229,21 @@ impl Model {
         // The Deletes, in the order they came.
         deletes.sort_by_key(|(at, _)| *at);
         self.came.clear();
-        // Then what waited behind the rollbacks, in the order it came, each once what ran before it
-        // has started, its files granted (#374). A torrent with more on its lane lets go of nothing
-        // meanwhile: that waits for its lane to be idle.
+        // Then what waited behind the rollbacks, in the order it came. A torrent added back starts,
+        // its files granted (#374), only once all of it has run (#468): a Pause among it means it
+        // never does. One with more on its lane lets go of nothing meanwhile either: that waits for
+        // its lane to be idle.
         let behind = std::mem::take(&mut self.behind);
         let behind = (0..behind.len())
             .map(|n| {
                 let busy: BTreeSet<TorrentId> = behind[n..].iter().map(|b| b.id).collect();
                 self.reopen_but(&busy);
+                self.unstarted = busy;
                 self.grant_running();
                 self.after_rollback(behind[n].clone())
             })
             .collect();
+        self.unstarted.clear();
         Answer::Released { deletes: deletes.into_iter().map(|(_, d)| d).collect(), undos, behind }
     }
 
@@ -1653,6 +1660,7 @@ impl ReferenceStateMachine for EngineModel {
             came: Vec::new(),
             aborts: Vec::new(),
             behind: Vec::new(),
+            unstarted: BTreeSet::new(),
             trail: Vec::new(),
             moved: BTreeSet::new(),
             folder: [true; PACKS],
@@ -2311,11 +2319,17 @@ impl Model {
     }
 
     /// Each torrent let run has its files granted, those not there made (#374): as it starts, before
-    /// anything after it on its lane.
+    /// anything after it on its lane. Not one added back by a rollback with steps still behind it
+    /// (`Model::unstarted`, #468).
     fn grant_running(&mut self) {
-        for t in self.torrents.values_mut() {
+        for (id, t) in self.torrents.iter_mut() {
             let Torrent::Pack(p) = t else { continue };
-            if !matches!(p.status(), Status::Seeding | Status::Downloading) || p.letting_go || p.deleting || p.delete_failed {
+            if !matches!(p.status(), Status::Seeding | Status::Downloading)
+                || p.letting_go
+                || p.deleting
+                || p.delete_failed
+                || self.unstarted.contains(id)
+            {
                 continue;
             }
             for f in p.make_absent(&mut self.disk[p.pack], &mut self.folder[p.pack]) {
@@ -3520,10 +3534,11 @@ fn a_file_put_back_by_hand_then_moved_to_the_trash_isnt_had_after_a_restart() {
     ]);
 }
 
-/// Found at 256 cases (#374): a Resume behind a Delete's rollback starts the torrent, which makes the
-/// file that wasn't there; the Delete after it takes that file to the Trash with the rest.
+/// Found at 256 cases (#374). #468, B: a Resume behind a Delete's rollback no longer starts the
+/// torrent while the Delete after it waits too, so the file that wasn't there isn't made: the Delete
+/// takes what's there.
 #[test]
-fn a_file_made_as_a_resume_behind_a_rollback_starts_goes_with_the_next_delete() {
+fn a_resume_and_a_delete_behind_a_rollback_never_start_the_torrent() {
     replay(&[
         Step::DeleteFile { pack: 0, file: 0 },
         Step::Add { pack: Some(0), paused: true },
@@ -3919,11 +3934,11 @@ fn a_file_made_then_deleted_by_hand_is_made_again_once_its_torrents_delete_is_un
     ]);
 }
 
-/// Found by a 256-case run for #438: the model was wrong. A Pause sent while an aborted Delete is
-/// rolled back comes once the torrent is back running, so its start has made the file deleted by
-/// hand meanwhile (#374): it's paused with that file there, empty.
+/// Found by a 256-case run for #438. #468, B: a Pause sent while an aborted Delete is rolled back
+/// comes before the torrent starts, so it never does: the file deleted by hand meanwhile isn't made
+/// (#374), whether librqbit's check of it has ended or not.
 #[test]
-fn a_pause_behind_a_delete_undone_comes_once_its_torrent_has_started() {
+fn a_pause_behind_a_delete_undone_means_its_torrent_never_starts() {
     use Step::*;
     replay(&[
         Add { pack: None, paused: false },
@@ -3938,13 +3953,10 @@ fn a_pause_behind_a_delete_undone_comes_once_its_torrent_has_started() {
     ]);
 }
 
-/// #468: the same, with the start after the rollback put off by a file being read (its grant
-/// busy, as on a loaded machine): the Pause runs while the start is put off, so the file deleted by
-/// hand is never made, and the model disagrees. Nothing holds the lane of a torrent that isn't
-/// sampling for its start. Deterministic here; the full run meets it only under load.
+/// #468: the same, with grants finding a file busy, as on a loaded machine, which once put the start
+/// off past the Pause. Nothing is granted before the Pause now, busy or not.
 #[test]
-#[ignore = "#468: a Pause behind a rollback overtakes a start put off by a busy file"]
-fn a_pause_behind_a_delete_undone_comes_after_a_start_put_off_by_a_busy_file() {
+fn a_pause_behind_a_delete_undone_means_its_torrent_never_starts_with_files_busy() {
     use Step::*;
     let steps = [
         Add { pack: None, paused: false },
@@ -3964,11 +3976,11 @@ fn a_pause_behind_a_delete_undone_comes_after_a_start_put_off_by_a_busy_file() {
     });
 }
 
-/// Found by a 256-case run for #438: the model was wrong. What waits behind an aborted Delete's
-/// rollback runs in turn, each after what came before it has started: a Resume grants the files,
-/// making the one deleted by hand, before a Move to Trash of them all takes it too (#374).
+/// Found by a 256-case run for #438. #468, B: what waits behind an aborted Delete's rollback all runs
+/// before the torrent starts: a Resume grants no file yet, so the one deleted by hand isn't made, and
+/// a Move to Trash of them all takes the two there.
 #[test]
-fn what_waits_behind_a_delete_undone_runs_once_what_came_before_it_has_started() {
+fn what_waits_behind_a_delete_undone_runs_before_its_torrent_starts() {
     use Step::*;
     replay(&[
         Add { pack: None, paused: false },
