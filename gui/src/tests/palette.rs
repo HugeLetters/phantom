@@ -805,3 +805,28 @@ fn a_palette_row_is_28_points_and_a_heading_24() {
     let heading = rects.iter().find(|(r, _)| r == "heading").expect("a heading");
     assert!((heading.1[3] - 24.0).abs() < 0.5, "{:?}", heading.1);
 }
+
+/// A command is also found by the other words people know it by (#434): "stop" finds Pause, "start"
+/// Resume, "verify" Check; Remove and Delete keep apart; a name ranks over a synonym.
+#[test]
+fn a_command_is_found_by_its_synonyms_and_a_name_ranks_over_one() {
+    let mut rt = app(with_an_album());
+    select(&mut rt, 1);
+    cmd_p(&mut rt);
+    let names_for = |rt: &mut Runtime<Phantom>, text: &str| {
+        press(rt, Key::Escape);
+        cmd_p(rt);
+        type_text(rt, text);
+        labels(rt)
+    };
+    for (text, name) in [("stop", "Pause"), ("start", "Resume"), ("verify", "Check")] {
+        let found = names_for(&mut rt, text);
+        assert_eq!(found.first().map(String::as_str), Some(name), "{text:?}: {found:?}");
+    }
+    let remove = names_for(&mut rt, "remove");
+    assert!(remove.first().is_some_and(|l| l.starts_with("Remove")), "{remove:?}");
+    assert!(!remove.iter().any(|l| l.starts_with("Delete")), "Delete isn't found by a synonym of Remove: {remove:?}");
+    let delete = names_for(&mut rt, "delete");
+    assert!(delete.first().is_some_and(|l| l.starts_with("Delete")), "{delete:?}");
+    assert!(!delete.iter().any(|l| l.starts_with("Remove")), "Remove isn't found by a synonym of Delete: {delete:?}");
+}

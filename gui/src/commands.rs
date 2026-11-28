@@ -333,14 +333,14 @@ impl OnTorrents {
     pub fn decl(self) -> Decl<OnTorrents, Phantom> {
         use crate::platform::{Show, show_torrent};
         use client::display;
-        let (scope, synonyms) = (Scope::MAIN, &[] as &[&str]);
+        let scope = Scope::MAIN;
         match self {
             OnTorrents::Resume => Decl {
                 id: "resume",
                 name: "Resume",
                 icon: Some(Icon::Resume),
                 keys: &[],
-                synonyms,
+                synonyms: &["start", "continue", "play", "unpause"],
                 scope,
                 when: Some(|ctx, c| ctx.any(c)),
                 run: |s, _, _| send(s, Action::Resume, TorrentCommand::Resume),
@@ -350,7 +350,7 @@ impl OnTorrents {
                 name: "Pause",
                 icon: Some(Icon::Pause),
                 keys: &[],
-                synonyms,
+                synonyms: &["stop", "halt", "suspend"],
                 scope,
                 when: Some(|ctx, c| ctx.any(c)),
                 run: |s, _, _| send(s, Action::Pause, TorrentCommand::Pause),
@@ -360,7 +360,7 @@ impl OnTorrents {
                 name: "Check",
                 icon: Some(Icon::Verify),
                 keys: &[],
-                synonyms,
+                synonyms: &["verify", "recheck", "rehash", "integrity"],
                 scope,
                 when: Some(|ctx, c| ctx.any(c)),
                 run: |s, _, _| send(s, Action::Check, TorrentCommand::Check),
@@ -370,7 +370,7 @@ impl OnTorrents {
                 name: display::cancel_check(),
                 icon: Some(Icon::CancelCheck),
                 keys: &[],
-                synonyms,
+                synonyms: &["abort check"],
                 scope,
                 when: Some(|ctx, c| ctx.any(c)),
                 run: |s, _, _| send(s, Action::CancelCheck, TorrentCommand::CancelCheck),
@@ -380,7 +380,7 @@ impl OnTorrents {
                 name: display::cancel_move(),
                 icon: Some(Icon::CancelMove),
                 keys: &[],
-                synonyms,
+                synonyms: &["abort move"],
                 scope,
                 when: Some(|ctx, c| ctx.any(c)),
                 run: |s, _, _| send(s, Action::CancelMove, TorrentCommand::CancelMove),
@@ -390,7 +390,7 @@ impl OnTorrents {
                 name: "Open",
                 icon: Some(Icon::Open),
                 keys: OPEN_KEYS,
-                synonyms,
+                synonyms: &["launch", "open file"],
                 scope,
                 when: Some(|ctx, c| ctx.selected.there && ctx.one(c)),
                 run: |s, _, _| single(s).into_iter().for_each(|id| show_torrent(s, id, Show::Open)),
@@ -400,7 +400,7 @@ impl OnTorrents {
                 name: display::reveal_in_finder(),
                 icon: Some(Icon::Reveal),
                 keys: REVEAL_KEYS,
-                synonyms,
+                synonyms: &["show in finder", "locate", "show file", "find file"],
                 scope,
                 when: Some(|ctx, c| ctx.selected.there && ctx.one(c)),
                 run: |s, _, _| single(s).into_iter().for_each(|id| show_torrent(s, id, Show::Reveal)),
@@ -410,7 +410,7 @@ impl OnTorrents {
                 name: display::move_to(),
                 icon: Some(Icon::MoveTo),
                 keys: &[],
-                synonyms,
+                synonyms: &["relocate", "change folder", "change location"],
                 scope,
                 when: Some(|ctx, c| ctx.any(c)),
                 run: |s, _, tx| crate::model::moving::move_to(s, tx),
@@ -420,7 +420,7 @@ impl OnTorrents {
                 name: display::rename(),
                 icon: Some(Icon::Rename),
                 keys: &[],
-                synonyms,
+                synonyms: &["name", "change name"],
                 scope,
                 when: Some(|ctx, c| ctx.one(c)),
                 run: |s, _, _| single(s).into_iter().for_each(|id| crate::model::renaming::open(s, id)),
@@ -430,7 +430,7 @@ impl OnTorrents {
                 name: "Copy magnet link",
                 icon: Some(Icon::Copy),
                 keys: COPY_KEYS,
-                synonyms,
+                synonyms: &["share", "link", "copy link", "magnet uri"],
                 scope,
                 when: Some(|ctx, c| ctx.one(c)),
                 run: |s, _, tx| crate::model::copy_magnet(s, tx),
@@ -440,7 +440,7 @@ impl OnTorrents {
                 name: "Remove",
                 icon: Some(Icon::Remove),
                 keys: REMOVE_KEYS,
-                synonyms,
+                synonyms: &["forget", "keep files", "remove from list"],
                 scope,
                 when: Some(|ctx, c| ctx.focus != Focus::Field && ctx.all(c)),
                 run: |s, _, _| crate::model::remove_selected(s, false),
@@ -450,7 +450,7 @@ impl OnTorrents {
                 name: "Delete",
                 icon: Some(Icon::Trash),
                 keys: DELETE_KEYS,
-                synonyms,
+                synonyms: &["erase", "trash", "bin", "wipe"],
                 scope,
                 when: Some(|ctx, c| ctx.focus != Focus::Field && ctx.all(c)),
                 run: |s, _, _| crate::model::remove_selected(s, true),
@@ -585,14 +585,14 @@ impl OnFiles {
         use crate::model::{set_selected_files, trash_selected_files};
         use crate::platform::{Show, show_file};
         use client::display;
-        let (scope, synonyms) = (Scope::MAIN, &[] as &[&str]);
+        let scope = Scope::MAIN;
         match self {
             OnFiles::Open => Decl {
                 id: "open",
                 name: "Open",
                 icon: Some(Icon::Open),
                 keys: OPEN_KEYS,
-                synonyms,
+                synonyms: &["launch", "open file"],
                 scope,
                 when: Some(|ctx, c| ctx.file_there && ctx.one_file_on_disk() && ctx.pane(c)),
                 run: |s, _, _| show_file(s, Show::Open),
@@ -602,7 +602,7 @@ impl OnFiles {
                 name: display::reveal_in_finder(),
                 icon: Some(Icon::Reveal),
                 keys: REVEAL_KEYS,
-                synonyms,
+                synonyms: &["show in finder", "locate", "show file", "find file"],
                 scope,
                 when: Some(|ctx, c| ctx.file_there && ctx.one_file_on_disk() && ctx.pane(c)),
                 run: |s, _, _| show_file(s, Show::Reveal),
@@ -612,7 +612,7 @@ impl OnFiles {
                 name: display::priority(Priority::Normal),
                 icon: None,
                 keys: &[],
-                synonyms,
+                synonyms: &["download", "include"],
                 scope,
                 when: Some(|ctx, c| ctx.pane(c)),
                 run: |s, _, _| set_selected_files(s, Priority::Normal),
@@ -622,7 +622,7 @@ impl OnFiles {
                 name: display::priority(Priority::Off),
                 icon: None,
                 keys: &[],
-                synonyms,
+                synonyms: &["skip", "don't download", "do not download", "exclude"],
                 scope,
                 when: Some(|ctx, c| ctx.pane(c)),
                 run: |s, _, _| set_selected_files(s, Priority::Off),
@@ -632,7 +632,7 @@ impl OnFiles {
                 name: display::move_to_trash(),
                 icon: Some(Icon::Trash),
                 keys: DELETE_KEYS,
-                synonyms,
+                synonyms: &["erase file", "delete file", "send to trash"],
                 scope,
                 when: Some(|ctx, c| ctx.some_file_on_disk() && ctx.pane(c)),
                 run: |s, _, _| trash_selected_files(s),
@@ -685,14 +685,13 @@ listed_enum! {
 
 impl InApp {
     pub fn decl(self) -> Decl<InApp, Phantom> {
-        let synonyms = &[] as &[&str];
         match self {
             InApp::AddFile => Decl {
                 id: "add-file",
                 name: "Add file…",
                 icon: Some(Icon::AddFile),
                 keys: ADD_FILE_KEYS,
-                synonyms,
+                synonyms: &["open torrent", "add torrent", "import", "new torrent"],
                 scope: Scope::MAIN,
                 // Also with Settings in front, or no window: the main one comes back for it.
                 when: Some(|ctx, _| !matches!(ctx.focus, Focus::Modal | Focus::Panel)),
@@ -703,7 +702,7 @@ impl InApp {
                 name: client::display::undo(),
                 icon: Some(Icon::Undo),
                 keys: UNDO_KEYS,
-                synonyms,
+                synonyms: &["revert", "take back", "step back"],
                 scope: Scope::MAIN,
                 when: Some(|ctx, _| ctx.undo),
                 run: |s, _, _| crate::changes::press(s),
@@ -714,7 +713,7 @@ impl InApp {
                 name: "Command palette…",
                 icon: Some(Icon::Search),
                 keys: PALETTE_KEYS,
-                synonyms,
+                synonyms: &[],
                 scope: Scope::EVERYWHERE,
                 when: Some(|ctx, _| ctx.live() && ctx.palette),
                 run: |s, _, _| crate::model::palette::open(s),
@@ -762,14 +761,14 @@ impl OnSheet {
     /// theme is in each; Split and Join for each row the sheet shows, with one theme in both halves.
     pub fn decl(self) -> Decl<OnSheet, SettingsWindow> {
         use crate::model::settings::{self as st, presets};
-        let (scope, synonyms, keys, icon) = (Scope::LOOK_SHEET, &[] as &[&str], &[] as &[Chord], None);
+        let (scope, keys, icon) = (Scope::LOOK_SHEET, &[] as &[Chord], None);
         match self {
             OnSheet::Done => Decl {
                 id: "done",
                 name: "Done",
                 icon,
                 keys,
-                synonyms,
+                synonyms: &["save", "apply", "ok"],
                 scope,
                 when: Some(|ctx, _| ctx.look.is_some()),
                 run: |w, _, _| presets::close(w),
@@ -779,7 +778,7 @@ impl OnSheet {
                 name: "Cancel",
                 icon,
                 keys,
-                synonyms,
+                synonyms: &["discard", "dismiss"],
                 scope,
                 when: Some(|ctx, _| ctx.look.is_some()),
                 run: |w, _, _| presets::cancel(w),
@@ -789,7 +788,7 @@ impl OnSheet {
                 name: "Restore Defaults",
                 icon,
                 keys,
-                synonyms,
+                synonyms: &["reset", "defaults"],
                 scope,
                 when: Some(|ctx, _| ctx.restorable(Side::Both)),
                 run: |w, _, _| st::restore_defaults(w, Side::Both),
@@ -799,7 +798,7 @@ impl OnSheet {
                 name: "Restore Defaults ☀",
                 icon,
                 keys,
-                synonyms,
+                synonyms: &["reset light", "light defaults"],
                 scope,
                 when: Some(|ctx, _| ctx.two_themes() && ctx.restorable(Side::Only(Appearance::Light))),
                 run: |w, _, _| st::restore_defaults(w, Side::Only(Appearance::Light)),
@@ -809,7 +808,7 @@ impl OnSheet {
                 name: "Restore Defaults ☾",
                 icon,
                 keys,
-                synonyms,
+                synonyms: &["reset dark", "dark defaults"],
                 scope,
                 when: Some(|ctx, _| ctx.two_themes() && ctx.restorable(Side::Only(Appearance::Dark))),
                 run: |w, _, _| st::restore_defaults(w, Side::Only(Appearance::Dark)),
@@ -819,7 +818,7 @@ impl OnSheet {
                 name: "Split",
                 icon,
                 keys,
-                synonyms,
+                synonyms: &["separate", "unlink", "divide"],
                 scope,
                 when: Some(|ctx, c| matches!(c, OnSheet::Split(key) if ctx.joined(key) == Some(true))),
                 run: |w, c, _| {
@@ -833,7 +832,7 @@ impl OnSheet {
                 name: "Join",
                 icon,
                 keys,
-                synonyms,
+                synonyms: &["merge", "combine", "unify"],
                 scope,
                 when: Some(|ctx, c| matches!(c, OnSheet::Join(key) if ctx.joined(key) == Some(false))),
                 run: |w, c, _| {
@@ -1071,6 +1070,47 @@ mod tests {
             [(OnFiles::Open, OnTorrents::Open), (OnFiles::Reveal, OnTorrents::Reveal), (OnFiles::MoveToTrash, OnTorrents::Delete)]
         {
             assert_eq!((file.spec().icon, file.spec().keys), (torrent.spec().icon, torrent.spec().keys), "{file:?}");
+        }
+    }
+
+    /// A synonym only helps search find a command: it never equals another command's name (Remove
+    /// keeps the files, Delete moves them to the Trash: neither is the other's synonym), and no
+    /// two commands that can be offered together share one. A torrent's and a file's Open and
+    /// Reveal are one deed on two lists and say the same.
+    #[test]
+    fn a_synonym_never_points_at_another_command() {
+        let lower = |s: &str| s.to_lowercase();
+        let names: Vec<(Command, String)> = Command::all().map(|c| (c, lower(c.spec().name.trim_end_matches('…')))).collect();
+        for (a, name) in &names {
+            for syn in a.spec().synonyms {
+                assert_eq!(*syn, lower(syn), "{a:?}: {syn:?} is lower case");
+                for (b, other) in &names {
+                    assert!(a == b || lower(syn) != *other, "{a:?}'s synonym {syn:?} is {b:?}'s name");
+                }
+            }
+        }
+        for window in Which::ALL {
+            for sheet in Sheet::ALL {
+                let here: Vec<Command> = Command::all().filter(|c| c.scope().holds(window, sheet)).collect();
+                for (i, a) in here.iter().enumerate() {
+                    for b in &here[i + 1..] {
+                        if a.spec().name == b.spec().name {
+                            continue;
+                        }
+                        for syn in a.spec().synonyms {
+                            assert!(!b.spec().synonyms.contains(syn), "{syn:?} is both {a:?}'s and {b:?}'s in {window:?}, {sheet:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every command but the palette itself (never listed) has some.
+    #[test]
+    fn every_listed_command_has_synonyms() {
+        for c in Command::all() {
+            assert_eq!(c.spec().synonyms.is_empty(), c == Command::App(InApp::Palette), "{c:?}");
         }
     }
 }
