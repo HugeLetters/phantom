@@ -3,7 +3,7 @@
 //! the form of proptest's macros of those names; [`side_by_side`] is what they run.
 
 use proptest::strategy::Strategy;
-use proptest::test_runner::{Config, FailurePersistence, PersistedSeed, TestCaseResult, TestRunner};
+use proptest::test_runner::{Config, FailurePersistence, PersistedSeed, RngSeed, TestCaseResult, TestRunner};
 
 #[doc(hidden)]
 pub use {proptest as __proptest, proptest_state_machine as __state_machine};
@@ -15,14 +15,21 @@ const RUNNERS: u32 = 8;
 /// side, at least 2 cases each: each its own thread, generator and share of the cases, run as
 /// `proptest!` runs them. The seeds saved for `config.source_file` are replayed once, by the first
 /// runner; a failure of any is saved. The first failure, shrunk, fails the test once every runner
-/// is done.
+/// is done, shrunk as far as a single runner would. A fixed seed (`PROPTEST_RNG_SEED`) gives each
+/// runner its own, derived from it.
 pub fn side_by_side<S: Strategy>(config: Config, strategy: impl Fn() -> S + Sync, test: impl Fn(S::Value) -> TestCaseResult + Sync) {
     let runners = (config.cases / 2).clamp(1, RUNNERS);
+    // Each shrinks as much as the whole run would: by default proptest's budget follows `cases`.
+    let max_shrink_iters = config.max_shrink_iters();
     let failures: Vec<String> = std::thread::scope(|scope| {
         let running: Vec<_> = (0..runners)
             .map(|n| {
                 let cases = config.cases / runners + u32::from(n < config.cases % runners);
-                let mut config = Config { cases, ..config.clone() };
+                let rng_seed = match config.rng_seed {
+                    RngSeed::Fixed(seed) => RngSeed::Fixed(seed.wrapping_add(n.into())),
+                    RngSeed::Random => RngSeed::Random,
+                };
+                let mut config = Config { cases, rng_seed, max_shrink_iters, ..config.clone() };
                 if n > 0 {
                     config.failure_persistence = config.failure_persistence.map(|saves| Box::new(SaveOnly(saves)) as _);
                 }
@@ -76,7 +83,12 @@ macro_rules! proptest {
     (#![proptest_config($config:expr)] $($(#[$meta:meta])* fn $name:ident($($arg:pat in $strategy:expr),+ $(,)?) $body:block)*) => { $(
         $(#[$meta])*
         fn $name() {
-            let config = $crate::__proptest::test_runner::Config { source_file: Some(file!()), ..$config };
+            // As proptest's own: what `PROPTEST_*` says wins over `$config`.
+            let config = $crate::__proptest::test_runner::contextualize_config($crate::__proptest::test_runner::Config {
+                source_file: Some(file!()),
+                test_name: Some(concat!(module_path!(), "::", stringify!($name))),
+                ..$config
+            });
             $crate::side_by_side(config, || ($($strategy,)+), |($($arg,)+)| {
                 let _: () = $body;
                 Ok(())
@@ -93,7 +105,12 @@ macro_rules! prop_state_machine {
         fn $name() {
             use $crate::__state_machine::{ReferenceStateMachine as _, StateMachineTest as _};
             type Reference = <$test as $crate::__state_machine::StateMachineTest>::Reference;
-            let config = $crate::__proptest::test_runner::Config { source_file: Some(file!()), ..$config };
+            // As proptest's own: what `PROPTEST_*` says wins over `$config`.
+            let config = $crate::__proptest::test_runner::contextualize_config($crate::__proptest::test_runner::Config {
+                source_file: Some(file!()),
+                test_name: Some(concat!(module_path!(), "::", stringify!($name))),
+                ..$config
+            });
             $crate::side_by_side(config.clone(), || Reference::sequential_strategy($size), |(initial, transitions, seen)| {
                 <$test>::test_sequential(config.clone(), initial, transitions, seen);
                 Ok(())
