@@ -34,8 +34,11 @@ on every torrent in it, and one Undo brings all of it back. Each torrent's steps
 in that order; different torrents' run side by side. Remove, Delete and Move to Trash are on
 Undo's stack from the moment they're asked, in that order too. librqbit reading the pieces it saved
 of a torrent added back (at a start, by an undo) counts as running on its lane: a step meanwhile
-shows done at once and runs right after. A Move is a step that runs until its files are moved, or
-back where they were; what comes meanwhile waits behind it, but a Remove or a Delete cancels it first.
+shows done at once and runs right after. A torrent an undo adds back (its put-back, or an aborted
+Delete's rollback) starts only once what waits on its lane has run: a Pause among it means it never
+starts, whether its Check has ended or not (#468). A Move is a step that runs until its files are
+moved, or back where they were; what comes meanwhile waits behind it, but a Remove or a Delete
+cancels it first.
 Moves of any torrents run one at a time, in the order they came: a Move not started waits for
 every older one, whichever torrent's, and shows Waiting to move. It joins its torrent's lane only at
 its turn, so it holds none meanwhile: the torrent's other commands run as they come. Cancel move, a

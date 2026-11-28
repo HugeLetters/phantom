@@ -4366,6 +4366,69 @@ async fn a_command_after_undo_of_a_running_delete_waits_for_the_rollback() {
     }
 }
 
+/// #468, B: a torrent an aborted Delete's rollback adds back starts only once what waited behind the
+/// rollback has run. A Resume alone starts it; a Pause, a Delete or a Move after the Resume runs
+/// first: paused or deleted, it never starts, and moved, it starts at its new place.
+#[tokio::test(flavor = "multi_thread")]
+async fn what_waits_behind_a_rollback_runs_before_its_torrent_starts() {
+    #[derive(Debug, Clone, Copy)]
+    enum Then {
+        Nothing,
+        Pause,
+        Delete,
+        Move,
+    }
+    side_by_side(4, [Then::Nothing, Then::Pause, Then::Delete, Then::Move], |then| async move {
+        let dir = temp();
+        let (engine, gate, id) = gated_pack(dir.path()).await;
+        let _opens = OpensTrash(gate.clone());
+        wait_for(&engine, id, Status::Paused).await;
+        super::trash::hold(&gate, true);
+        let delete = engine.sent(id, TorrentCommand::Delete).await;
+        held_at_the_gate(&gate).await;
+        let undo = engine.undo_sent().await;
+        let mut behind = vec![engine.sent(id, TorrentCommand::Resume).await];
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let next = match then {
+            Then::Nothing => None,
+            Then::Pause => Some(TorrentCommand::Pause),
+            Then::Delete => Some(TorrentCommand::Delete),
+            Then::Move => Some(TorrentCommand::Move { to: AbsolutePath::new(&elsewhere).unwrap(), clash: None, name: None }),
+        };
+        if let Some(next) = next {
+            behind.push(engine.sent(id, next).await);
+        }
+        // All of it handled while the Delete is held: the Undo aborts it.
+        engine.inspect(|_| ()).await;
+        super::trash::hold(&gate, false);
+        let deleted = delete.await;
+        assert!(matches!(deleted, Err(Failure::Refused(proto::Refusal::Undone))), "{then:?}: {deleted:?}");
+        undo.await.unwrap();
+        for answer in behind {
+            answer.await.unwrap_or_else(|e| panic!("{then:?}: {e:?}"));
+        }
+        // Answered, the lane is idle: a start due has come by now.
+        let started = engine.inspect(move |a| a.torrents.get(&id).map(|t| t.started)).await;
+        match then {
+            Then::Nothing => assert_eq!(started, Some(1), "the Resume starts it"),
+            Then::Pause => {
+                assert_eq!(started, Some(0), "paused before it started");
+                settled(&engine).await;
+                assert_eq!(engine.inspect(move |a| a.torrents[&id].started).await, 0, "nor later");
+                assert_eq!(find(&engine, id).await.status, Status::Paused);
+            }
+            Then::Delete => assert_eq!(started, None, "deleted before it started"),
+            Then::Move => {
+                until(&engine, id, |s| *s != Status::Paused).await;
+                assert!(elsewhere.join("pack").join("a.bin").exists(), "it runs where it was moved");
+            }
+        }
+        engine.stop().await;
+    })
+    .await;
+}
+
 /// S3 of #217's review: a command that waits behind a Move to Trash under way shows done at once (a
 /// Resume: no longer Paused), and runs when its turn comes. One that then fails (a priority for a
 /// file there isn't) is answered with why, and the list never showed anything of it.

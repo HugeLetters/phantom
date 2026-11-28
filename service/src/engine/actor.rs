@@ -252,6 +252,10 @@ pub(super) struct Actor {
     /// The steps held, by step and torrent, while librqbit reads the pieces it saved of their torrent
     /// ([`lib::Lib::Resuming`]): started once it's done (`steps.rs`).
     held: BTreeSet<(u64, TorrentId)>,
+    /// The torrents an undo added back (its put-back, or an aborted Delete's rollback) that start
+    /// only once their lane is idle: what waited behind it runs first, so a Pause among it means
+    /// it never starts (#468). Started, if wanted, at the end of [`Actor::run_steps`].
+    starts_once_idle: BTreeSet<TorrentId>,
     /// How many of the next grants find a file busy, as on a loaded machine, for tests.
     #[cfg(test)]
     pub(super) busy_grants: u32,
@@ -498,6 +502,7 @@ impl Actor {
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
             held: BTreeSet::new(),
+            starts_once_idle: BTreeSet::new(),
             #[cfg(test)]
             busy_grants: 0,
             #[cfg(test)]
@@ -872,6 +877,9 @@ impl Actor {
         // for it, as for a Delete (ADR 0008).
         if ending == Ending::Shutdown {
             self.interrupt_moves().await;
+            // What waited on a lane is dropped: a torrent it kept from starting stays stopped. One an
+            // undo still under way adds back starts once it's back, as the undo was pressed.
+            self.starts_once_idle.clear();
         }
         // What was held for librqbit's sampling runs now, and what's under way ends first, so how
         // it went is saved, and so do the undos after it.
@@ -1079,6 +1087,10 @@ impl Actor {
                 (lib::Do::Resume, _) => self.add_to_librqbit(id, false).await?,
                 (lib::Do::Check, _) => self.add_to_librqbit(id, true).await?,
                 (lib::Do::TakeOut, _) => self.take_out(id).await?,
+                // Added back by an undo, not while steps wait on its lane: they come first (#468).
+                (lib::Do::Start, Some(_)) if self.starts_once_idle.contains(&id) && self.steps.machine().lanes.contains_key(&id) => {
+                    return Ok(());
+                }
                 // Not while it has pieces to let go of (#234): librqbit would offer some it can't read,
                 // and drop each peer that asks. It starts once it's added back without them.
                 (lib::Do::Start, Some(_)) if matches!(torrent.record.letting_go, machine::letgo::State::Gone { .. }) => return Ok(()),

@@ -657,8 +657,11 @@ impl Actor {
             chosen_running: 0,
         };
         self.torrents.insert(id, torrent);
+        // What waits behind the undo on its lane runs before it starts (#468).
+        self.starts_once_idle.insert(id);
         if let Err(e) = self.carry_out(id).await {
             self.torrents.remove(&id);
+            self.starts_once_idle.remove(&id);
             return Err(e);
         }
         self.save();
