@@ -29,10 +29,7 @@ fn still_a_link(dir: &Path, target: &Path) {
 /// found it missing, if it was to be.
 async fn settled(engine: &Engine, id: u64) -> Status {
     until(engine, id, |s| !matches!(s, Status::Checking { .. } | Status::FetchingInfo)).await;
-    let checks = engine.inspect(|a| a.size_checks).await;
-    while engine.inspect(|a| a.size_checks).await < checks + 2 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    size_checks(engine, 2).await;
     find(engine, id).await.status
 }
 
@@ -175,8 +172,9 @@ async fn an_off_file_with_a_link_at_its_path_is_never_written_through_it() {
     for resume in ["Resume", "Resume again"] {
         engine.command(id, TorrentCommand::Resume).await.unwrap();
         until(&engine, id, |s| matches!(s, Status::Error { .. })).await;
-        // A write that must not happen is nothing to wait on: a short fixed wait for it to.
-        tokio::time::sleep(SIZE_CHECK_EVERY).await;
+        // A write that must not happen is nothing to wait on: what the engine does by itself
+        // meanwhile has its turn.
+        super::settled(&engine).await;
         assert!(matches!(find(&engine, id).await.status, Status::Error { .. }), "{resume}: still Error");
         assert_eq!(as_it_is(&target), was, "{resume}: the file the link points to, as it was");
         still_a_link(dir.path(), &target);

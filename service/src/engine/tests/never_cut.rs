@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// How many cases of a test run at once.
+const WIDTH: usize = 6;
+
 /// What leads the engine to the longer file.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Way {
@@ -105,8 +108,8 @@ async fn longer_file(way: Way) {
             engine.command(id, TorrentCommand::Move { to, clash: Some(answered), name: None }).await.unwrap();
         }
     }
-    // It may be Missing files before what was asked too: long enough for that to have begun.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // It may be Missing files before what was asked too: once that has begun.
+    size_checks(&engine, 2).await;
     wait_for(&engine, id, Status::MissingFiles).await;
     let now = std::fs::read(&path).unwrap();
     assert!(now == theirs, "{way:?}: {} bytes, not the {} put there", now.len(), theirs.len());
@@ -178,16 +181,19 @@ async fn source_back_with(dir: &Path, source: AddSource, put: &[u8], started: St
     std::fs::write(away.join("pack/b.bin"), put).unwrap();
     std::fs::rename(&away, &here).unwrap();
     until(&engine, id, |s| !is_away(s)).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    size_checks(&engine, 2).await;
     (engine, id, added)
 }
 
 /// Not added to librqbit, so nothing of it is written, until the own file is back.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_of_an_impossible_size_as_its_destination_is_back_is_missing_until_its_own_is_back() {
-    for started in STARTED {
-        let own: Vec<u8> = (0..2 * PIECE).map(|n| (n * 7 + 31) as u8).collect();
-        for put in [longer(&own), own[..PIECE + 10].to_vec(), Vec::new()] {
+    let own: Vec<u8> = (0..2 * PIECE).map(|n| (n * 7 + 31) as u8).collect();
+    let puts = [longer(&own), own[..PIECE + 10].to_vec(), Vec::new()];
+    let cases = STARTED.into_iter().flat_map(|started| puts.clone().map(|put| (started, put)));
+    side_by_side(WIDTH, cases, move |(started, put)| {
+        let own = own.clone();
+        async move {
             let case = format!("{} bytes, {started:?}", put.len());
             let (dir, engine, id, added) = back_with(&put, started).await;
             assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "{case}");
@@ -197,46 +203,47 @@ async fn a_file_of_an_impossible_size_as_its_destination_is_back_is_missing_unti
             wait_for(&engine, id, Status::Seeding).await;
             engine.stop().await;
         }
-    }
+    })
+    .await;
 }
 
 /// The person's own file, cut off by a drive pulled as it was written: Resume, or Check and Resume
 /// of one paused meanwhile, keeps what's valid of it and downloads the rest.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_cut_off_as_its_drive_went_is_checked_and_downloaded_by_resume() {
-    for started in STARTED {
-        for paused in [false, true] {
-            let case = format!("{started:?}, paused {paused}");
-            let temp = temp();
-            let dir = temp.path();
-            let (seeded, pack) = (dir.join("seed/pack"), dir.join("downloads/pack"));
-            std::fs::create_dir_all(&seeded).unwrap();
-            std::fs::create_dir_all(&pack).unwrap();
-            let whole = |seed: usize| -> Vec<u8> { (0..4 * PIECE).map(|n| (n % 241) as u8 ^ seed as u8).collect() };
-            for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {
-                std::fs::write(seeded.join(name), whole(i + 1)).unwrap();
-                std::fs::write(pack.join(name), whole(i + 1)).unwrap();
-            }
-            let (_seeder, torrent, _, _) = seed(dir, &seeded, PIECE as u32).await;
-            let cut = whole(2)[..PIECE + 10].to_vec();
-            let (engine, id, _) = source_back_with(dir, AddSource::TorrentFile(torrent), &cut, started).await;
-            assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "{case}");
-            assert!(std::fs::read(file(dir, "b.bin")).unwrap() == cut, "{case}: as it was");
-            if paused {
-                engine.command(id, TorrentCommand::Pause).await.unwrap();
-                engine.command(id, TorrentCommand::Check).await.unwrap();
-                wait_for(&engine, id, Status::Paused).await;
-                let b = files_on(&engine, id).await[1].clone();
-                assert_eq!(b, ("b.bin".into(), PIECE as u64, false), "{case}: its whole piece kept");
-            }
-            engine.command(id, TorrentCommand::Resume).await.unwrap();
-            wait_for(&engine, id, Status::Seeding).await;
-            for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {
-                assert!(std::fs::read(file(dir, name)).unwrap() == whole(i + 1), "{case}: {name}");
-            }
-            engine.stop().await;
+    let cases = STARTED.into_iter().flat_map(|started| [false, true].map(|paused| (started, paused)));
+    side_by_side(WIDTH, cases, |(started, paused)| async move {
+        let case = format!("{started:?}, paused {paused}");
+        let temp = temp();
+        let dir = temp.path();
+        let (seeded, pack) = (dir.join("seed/pack"), dir.join("downloads/pack"));
+        std::fs::create_dir_all(&seeded).unwrap();
+        std::fs::create_dir_all(&pack).unwrap();
+        let whole = |seed: usize| -> Vec<u8> { (0..4 * PIECE).map(|n| (n % 241) as u8 ^ seed as u8).collect() };
+        for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {
+            std::fs::write(seeded.join(name), whole(i + 1)).unwrap();
+            std::fs::write(pack.join(name), whole(i + 1)).unwrap();
         }
-    }
+        let (_seeder, torrent, _, _) = seed(dir, &seeded, PIECE as u32).await;
+        let cut = whole(2)[..PIECE + 10].to_vec();
+        let (engine, id, _) = source_back_with(dir, AddSource::TorrentFile(torrent), &cut, started).await;
+        assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "{case}");
+        assert!(std::fs::read(file(dir, "b.bin")).unwrap() == cut, "{case}: as it was");
+        if paused {
+            engine.command(id, TorrentCommand::Pause).await.unwrap();
+            engine.command(id, TorrentCommand::Check).await.unwrap();
+            wait_for(&engine, id, Status::Paused).await;
+            let b = files_on(&engine, id).await[1].clone();
+            assert_eq!(b, ("b.bin".into(), PIECE as u64, false), "{case}: its whole piece kept");
+        }
+        engine.command(id, TorrentCommand::Resume).await.unwrap();
+        wait_for(&engine, id, Status::Seeding).await;
+        for (i, name) in ["a.bin", "b.bin", "c.bin"].iter().enumerate() {
+            assert!(std::fs::read(file(dir, name)).unwrap() == whole(i + 1), "{case}: {name}");
+        }
+        engine.stop().await;
+    })
+    .await;
 }
 
 /// Set Normal on a running torrent, a longer file isn't handed to librqbit while it runs: it would
@@ -273,8 +280,8 @@ async fn a_longer_file_set_normal_isnt_given_to_librqbit_while_it_runs() {
 /// return, not trusted from the pieces saved before it went.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_rest_of_a_returned_torrent_is_checked_in_full_once_the_file_is_set_off() {
-    let own: Vec<u8> = (0..2 * PIECE).map(|n| (n * 7 + 31) as u8).collect();
-    for started in STARTED {
+    side_by_side(WIDTH, STARTED, |started| async move {
+        let own: Vec<u8> = (0..2 * PIECE).map(|n| (n * 7 + 31) as u8).collect();
         let (dir, engine, id, _) = back_with(&longer(&own), started).await;
         // A piece of another file differs, its size the same.
         let mut a = std::fs::read(file(dir.path(), "a.bin")).unwrap();
@@ -285,7 +292,8 @@ async fn the_rest_of_a_returned_torrent_is_checked_in_full_once_the_file_is_set_
         wait_for(&engine, id, Status::Downloading).await;
         assert_eq!(files_on(&engine, id).await[0], ("a.bin".into(), PIECE as u64, false), "{started:?}");
         engine.stop().await;
-    }
+    })
+    .await;
 }
 
 /// A check pressed for a longer file ends without librqbit running the torrent, not even until the

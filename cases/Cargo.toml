@@ -1,0 +1,9 @@
+[package]
+name = "cases"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+proptest = "1.12"
+proptest-state-machine = "0.9"

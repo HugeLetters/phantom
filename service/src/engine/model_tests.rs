@@ -60,7 +60,7 @@ use std::time::{Duration, Instant};
 use proptest::prelude::*;
 use proptest::strategy::ValueTree;
 use proptest::test_runner::Config;
-use proptest_state_machine::{ReferenceStateMachine, StateMachineTest, prop_state_machine};
+use proptest_state_machine::{ReferenceStateMachine, StateMachineTest};
 use proto::{AbsolutePath, AddSource, Added, Priority, Status, TorrentCommand, TorrentId, Unavailable};
 use tempfile::TempDir;
 
@@ -3099,7 +3099,7 @@ fn config() -> Config {
     Config { cases, max_shrink_iters: 256, ..Config::default() }
 }
 
-prop_state_machine! {
+cases::prop_state_machine! {
     #![proptest_config(config())]
 
     #[test]
@@ -3109,10 +3109,16 @@ prop_state_machine! {
 /// Runs `steps` against the model and the engine, as a generated case does, each step meeting
 /// its preconditions.
 fn replay(steps: &[Step]) {
+    replay_with(steps, |_, _| ());
+}
+
+/// [`replay`], with `before(n, sut)` run before step `n`.
+fn replay_with(steps: &[Step], before: impl Fn(usize, &Sut)) {
     let mut model = EngineModel::init_state().new_tree(&mut proptest::test_runner::TestRunner::deterministic()).unwrap().current();
     let mut sut = <EngineModel as StateMachineTest>::init_test(&model);
-    for step in steps {
+    for (n, step) in steps.iter().enumerate() {
         assert!(EngineModel::preconditions(&model, step), "{step:?} can't be taken here");
+        before(n, &sut);
         model = <EngineModel as ReferenceStateMachine>::apply(model, step);
         sut = <EngineModel as StateMachineTest>::apply(sut, &model, step.clone());
     }
@@ -3930,6 +3936,32 @@ fn a_pause_behind_a_delete_undone_comes_once_its_torrent_has_started() {
         Pause(1),
         ReleaseTrash,
     ]);
+}
+
+/// #468: the same, with the start after the rollback put off by a file being read (its grant
+/// busy, as on a loaded machine): the Pause runs while the start is put off, so the file deleted by
+/// hand is never made, and the model disagrees. Nothing holds the lane of a torrent that isn't
+/// sampling for its start. Deterministic here; the full run meets it only under load.
+#[test]
+#[ignore = "#468: a Pause behind a rollback overtakes a start put off by a busy file"]
+fn a_pause_behind_a_delete_undone_comes_after_a_start_put_off_by_a_busy_file() {
+    use Step::*;
+    let steps = [
+        Add { pack: None, paused: false },
+        Add { pack: Some(0), paused: true },
+        HoldTrash,
+        Resume(1),
+        DeleteFile { pack: 0, file: 0 },
+        Delete(1),
+        Undo,
+        Pause(1),
+        ReleaseTrash,
+    ];
+    replay_with(&steps, |n, sut| {
+        if matches!(steps[n], ReleaseTrash) {
+            sut.rt.block_on(sut.engine().inspect(|actor| actor.busy_grants = 3));
+        }
+    });
 }
 
 /// Found by a 256-case run for #438: the model was wrong. What waits behind an aborted Delete's

@@ -151,19 +151,19 @@ mod tests {
         assert_eq!(pieces_in(32, 16), 2);
     }
 
-    #[tokio::test]
+    /// On tokio's paused clock, which moves only when every task waits for a timer: its polls take
+    /// no real time.
+    #[tokio::test(start_paused = true)]
     async fn waits_for_the_file_then_returns() {
-        let dir = std::env::temp_dir().join(format!("phantom-bitv-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = path(&dir, "abc");
-        let later = file.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            std::fs::write(later, [0b1100_0000]).unwrap();
-        });
-        let started = std::time::Instant::now();
-        wait_for_saves(&dir, &[("abc".into(), 2)]).await;
-        assert!(started.elapsed() >= Duration::from_millis(100) && started.elapsed() < GIVE_UP_AFTER);
-        std::fs::remove_dir_all(dir).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = path(dir.path(), "abc");
+        let started = tokio::time::Instant::now();
+        let wanted = [("abc".into(), 2)];
+        let mut waiting = std::pin::pin!(wait_for_saves(dir.path(), &wanted));
+        let early = tokio::time::timeout(POLL_EVERY * 10, &mut waiting).await;
+        assert!(early.is_err(), "it waits while the file isn't there");
+        std::fs::write(file, [0b1100_0000]).unwrap();
+        waiting.await;
+        assert!(started.elapsed() < GIVE_UP_AFTER, "back once the file is, not when it gives up: {:?}", started.elapsed());
     }
 }

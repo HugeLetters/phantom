@@ -301,11 +301,11 @@ async fn peers_connect_again_once_a_file_moved_to_the_trash_is_let_go_of_and_get
     }
     assert!(whole(&leeching.stats()), "the peer got the rest: {:?}", leeching.stats());
     assert_eq!(std::fs::read(leech.join(&second)).unwrap(), std::fs::read(pack.join(&second)).unwrap());
-    // And stays: nothing it asks for drops it again.
-    for _ in 0..20 {
+    // And stays, through what the engine does by itself: nothing it asks for drops it again.
+    for _ in 0..2 {
+        tokio::join!(polls(&engine, 1), size_checks(&engine, 1));
         let live = leeching.stats().live.map_or(0, |l| l.snapshot.peer_stats.live);
         assert_eq!(live, 1, "connected: {:?}", leeching.stats());
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     engine.stop().await;
     leecher.stop().await;
@@ -338,9 +338,10 @@ async fn a_file_emptied_while_a_step_runs_on_its_lane_is_closed_and_let_go_of_on
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(open(), 0, "closed while the step runs");
-    for _ in 0..60 {
+    // A let-go is taken at the size checks.
+    for _ in 0..3 {
+        size_checks(&engine, 1).await;
         assert_eq!(librqbit_handle(&engine, id).await, before, "not taken out of librqbit while a step runs on its lane");
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     super::super::trash::hold(&trash, false);
     moving.await.unwrap();
@@ -529,11 +530,11 @@ async fn a_file_deleted_by_hand_then_set_off_drops_no_peer() {
     }
     assert!(whole(&leeching.stats()), "the peer got the other file: {:?}", leeching.stats());
     assert_eq!(std::fs::read(leech.join(&second)).unwrap(), std::fs::read(pack.join(&second)).unwrap());
-    // And stays: nothing it asks for drops it again.
-    for _ in 0..20 {
+    // And stays, through what the engine does by itself: nothing it asks for drops it again.
+    for _ in 0..2 {
+        tokio::join!(polls(&engine, 1), size_checks(&engine, 1));
         let live = leeching.stats().live.map_or(0, |l| l.snapshot.peer_stats.live);
         assert_eq!(live, 1, "connected: {:?}", leeching.stats());
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     engine.stop().await;
 }
@@ -661,7 +662,7 @@ async fn a_file_set_off_and_gone_set_normal_again_downloads_from_nothing() {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+        size_checks(&engine, 3).await;
         assert_eq!(find(&engine, id).await.status, Status::Downloading, "trashed: {trashed}");
         assert_eq!(librqbit_has(&engine, id).await, [0, 65536], "librqbit has none of it (trashed: {trashed})");
         let details = engine.details(id).await.unwrap();
@@ -992,7 +993,8 @@ async fn a_peer_is_sent_of_a_file_written_by_hand_only_what_the_undo_of_its_move
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Two polls of librqbit since, a whole one between them: what would follow has.
+        polls(&engine, 2).await;
         let stats = leeching.stats();
         assert_eq!((stats.file_progress[file], stats.file_progress[1 - file]), (want, LEN), "{case}");
         // Counted as received whatever its hash: nothing else was sent.

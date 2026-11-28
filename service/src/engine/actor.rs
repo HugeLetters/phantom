@@ -198,6 +198,15 @@ pub(super) struct Actor {
     trash: Trash,
     /// Regular size checks of every torrent run so far, for tests to wait on one.
     pub(super) size_checks: u64,
+    /// Polls of librqbit run so far, for tests to wait on one.
+    pub(super) polls: u64,
+    /// Reports of the watcher (or of a refused add) handled so far, for tests to wait on one.
+    pub(super) changes_seen: u64,
+    /// Reports of the looks at disks and at the default folder handled so far, for tests to wait on.
+    pub(super) looks_reported: u64,
+    /// Set as a stop begins, for tests to wait on: the actor answers nothing then.
+    #[cfg(test)]
+    pub(super) stopping: Arc<std::sync::atomic::AtomicBool>,
     add_into: AddInto,
     /// Delete's trashing, a blocking task per torrent [`Phase::Deleting`]: how it went, of how
     /// many items it planned.
@@ -241,6 +250,9 @@ pub(super) struct Actor {
     /// The steps held, by step and torrent, while librqbit reads the pieces it saved of their torrent
     /// ([`lib::Lib::Resuming`]): started once it's done (`steps.rs`).
     held: BTreeSet<(u64, TorrentId)>,
+    /// How many of the next grants find a file busy, as on a loaded machine, for tests.
+    #[cfg(test)]
+    pub(super) busy_grants: u32,
     /// A test's hook, run as a Move to Trash has polled its torrent, before it sets the files Off.
     #[cfg(test)]
     pub(super) before_off: Option<Box<dyn FnMut(&mut Actor) + Send + Sync>>,
@@ -458,6 +470,11 @@ impl Actor {
             poll_every,
             trash,
             size_checks: 0,
+            polls: 0,
+            changes_seen: 0,
+            looks_reported: 0,
+            #[cfg(test)]
+            stopping: Arc::default(),
             add_into,
             trashing: JoinSet::new(),
             went,
@@ -478,6 +495,8 @@ impl Actor {
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
             held: BTreeSet::new(),
+            #[cfg(test)]
+            busy_grants: 0,
             #[cfg(test)]
             before_off: None,
             interrupted_deletes: ended,
@@ -567,6 +586,7 @@ impl Actor {
                     // left where it is.
                     #[cfg(test)]
                     Some(Message::Kill(reply)) => {
+                        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
                         self.session.stop().await;
                         let _ = reply.send(());
                         return;
@@ -611,6 +631,7 @@ impl Actor {
                     self.poll_librqbit().await;
                     // A torrent librqbit is done sampling: what was held for it goes on.
                     self.run_steps().await;
+                    self.polls += 1;
                 }
                 _ = size_checks.tick() => {
                     self.watch_destinations();
@@ -789,14 +810,23 @@ impl Actor {
             Message::Clashes { ids, to, reply } => drop(reply.send(self.clashes(ids, to).await)),
             Message::FreeName { id, to, reply } => drop(reply.send(self.free_name(id, &to))),
             Message::AddFinished { id, task, added } => self.add_finished(id, task, added).await,
-            Message::FilesChanged(paths) => self.files_changed(&paths).await,
+            Message::FilesChanged(paths) => {
+                self.files_changed(&paths).await;
+                self.changes_seen += 1;
+            }
             Message::Sampled(id) => {
                 self.poll_torrent(id).await;
                 self.run_steps().await;
             }
-            Message::Space(report) => self.space(report),
+            Message::Space(report) => {
+                self.space(report);
+                self.looks_reported += 1;
+            }
             Message::DefaultFolder(folder, reply) => self.default_folder(folder, reply),
-            Message::DefaultFolderLook(report) => self.default_folder_found(report),
+            Message::DefaultFolderLook(report) => {
+                self.default_folder_found(report);
+                self.looks_reported += 1;
+            }
             // Applied at the next poll.
             Message::Seeding(limits) => self.seeding = limits,
             Message::Undo(reply) => self.undo(reply).await,
@@ -822,6 +852,8 @@ impl Actor {
         // still run: an Undo never waits. At a restart for new settings the service carries on, so
         // everything waiting runs first, as asked, but a Move waiting its turn: the restart waits
         // only for the one under way, and those waiting go on once the engine is back (ADR 0008).
+        #[cfg(test)]
+        self.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
         match ending {
             Ending::Shutdown => self.report(steps::Fact::Stopping),
             Ending::Restart => self.report(steps::Fact::Restarting),
@@ -1101,6 +1133,12 @@ impl Actor {
         let destination = torrent.record.destination.to_path_buf();
         let granting = Granting::of(info, handle.stats().file_progress, destination.clone());
         let (trashed, hash, files) = (self.guard.trashed().clone(), torrent.record.info_hash.clone(), files.clone());
+        // Refused as busy, without a look, as a file held past `slots::BUSY_FOR` is (#468).
+        #[cfg(test)]
+        if self.busy_grants > 0 {
+            self.busy_grants -= 1;
+            return Ok(false);
+        }
         let refused = tokio::task::spawn_blocking(move || trashed.grant(&hash, &granting, &files))
             .await
             .map_err(|e| anyhow!("granting its files: {e}"))?;
@@ -1560,7 +1598,8 @@ impl Actor {
     pub(super) fn old_add_ends(&self, id: TorrentId) {
         let (task, added) = (tokio::spawn(async {}).id(), Err(anyhow!("cut short")));
         let inbox = self.inbox.upgrade().expect("it runs");
-        tokio::spawn(async move { inbox.send(Message::AddFinished { id, task, added }).await });
+        // In the inbox as this returns: what's sent after comes after it.
+        inbox.try_send(Message::AddFinished { id, task, added }).expect("room in the inbox");
     }
 
     /// Torrent `id`'s add task ended with `added`: [`add::decide`], from what the add was when it

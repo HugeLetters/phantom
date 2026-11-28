@@ -28,6 +28,9 @@ struct State {
     /// Where each torrent being added for the first time has its files, until its record says it.
     adding: BTreeMap<TorrentId, Vec<PathBuf>>,
     next: u64,
+    /// The adds waiting in [`Places::claim`] for an undo to be over, for tests to wait on.
+    #[cfg(test)]
+    waiting: BTreeSet<TorrentId>,
 }
 
 #[derive(Clone)]
@@ -101,8 +104,18 @@ impl Places {
             if matches!(taken, Ok(false)) {
                 return;
             }
+            #[cfg(test)]
+            self.state().waiting.insert(id);
             freed.await;
+            #[cfg(test)]
+            self.state().waiting.remove(&id);
         }
+    }
+
+    /// Whether the add of torrent `id` waits for an undo to be over.
+    #[cfg(test)]
+    pub fn waits(&self, id: TorrentId) -> bool {
+        self.state().waiting.contains(&id)
     }
 
     /// Whether the add of torrent `id` said where its files go.

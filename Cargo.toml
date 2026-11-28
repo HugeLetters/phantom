@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["proto", "machine", "lifecycle", "client", "service", "cli", "gui"]
+members = ["proto", "machine", "lifecycle", "client", "service", "cli", "gui", "cases"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ proto = { path = "proto" }
 machine = { path = "machine" }
 lifecycle = { path = "lifecycle" }
 client = { path = "client" }
+cases = { path = "cases" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

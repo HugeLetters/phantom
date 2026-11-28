@@ -165,6 +165,102 @@ async fn wait_for(engine: &Engine, id: u64, status: Status) {
     panic!("torrent {id} is {:?}, not {status:?}", find(engine, id).await.status);
 }
 
+/// Waits for the engine's next `n` size checks, each whole after this call: what one sees, and what
+/// it starts, has been seen and started by then, however loaded the machine. Wait on this, or on a
+/// status ([`until`], [`wait_for`]), never for a time.
+async fn size_checks(engine: &Engine, n: u64) {
+    let done = engine.inspect(|a| a.size_checks).await;
+    for _ in 0..2000 {
+        if engine.inspect(move |a| a.size_checks >= done + n).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the engine did no {n} size checks in 10 s");
+}
+
+/// Waits for the engine's next `n` polls of librqbit, each whole after this call: what librqbit
+/// did by then has been seen, and what the polls start has started.
+async fn polls(engine: &Engine, n: u64) {
+    let done = engine.inspect(|a| a.polls).await;
+    for _ in 0..2000 {
+        if engine.inspect(move |a| a.polls >= done + n).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the engine did no {n} polls of librqbit in 10 s");
+}
+
+/// Waits for the next `n` reports of the engine's looks at disks and the default folder, each
+/// handled after this call.
+async fn looks(engine: &Engine, n: u64) {
+    looks_since(engine, engine.inspect(|a| a.looks_reported).await, n).await;
+}
+
+/// Waits until the engine has handled `n` reports of its looks since it had handled `done`
+/// (`actor.looks_reported`).
+async fn looks_since(engine: &Engine, done: u64, n: u64) {
+    for _ in 0..2000 {
+        if engine.inspect(move |a| a.looks_reported >= done + n).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the engine had no {n} reports of its looks in 10 s");
+}
+
+/// Waits until what the engine does by itself has come round twice since this call: two polls of
+/// librqbit and two size checks, each whole. What a test that something *doesn't* happen waits
+/// for before it looks, instead of a time: whatever would have happened has had its turn.
+async fn settled(engine: &Engine) {
+    tokio::join!(polls(engine, 2), size_checks(engine, 2));
+}
+
+/// Waits until the engine's file watcher reports a change under `folder`: FSEvents starts
+/// watching a moment after it's asked to. A file is made and removed there until a report comes.
+async fn watching(engine: &Engine, folder: &Path) {
+    let probe = folder.join(".watched");
+    for _ in 0..100 {
+        let seen = engine.inspect(|a| a.changes_seen).await;
+        std::fs::write(&probe, b"").unwrap();
+        std::fs::remove_file(&probe).unwrap();
+        // The watcher gathers events for `files::DEBOUNCE` before it reports them.
+        for _ in 0..100 {
+            if engine.inspect(move |a| a.changes_seen > seen).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    panic!("the watcher never reported a change under {}", folder.display());
+}
+
+/// Runs `run` of each of `cases` side by side, `width` at a time: each in its own temp dir with its
+/// own engine, most of its time waiting (every engine's stop alone takes librqbit's 1 s). The
+/// first case to panic fails the test with its panic.
+async fn side_by_side<C, F>(width: usize, cases: impl IntoIterator<Item = C>, run: impl Fn(C) -> F)
+where
+    C: Send + 'static,
+    F: Future<Output = ()> + Send + 'static,
+{
+    let width = Arc::new(tokio::sync::Semaphore::new(width));
+    let mut running = tokio::task::JoinSet::new();
+    for case in cases {
+        let (width, case) = (width.clone(), run(case));
+        running.spawn(async move {
+            let _turn = width.acquire().await.unwrap();
+            case.await
+        });
+    }
+    while let Some(done) = running.join_next().await {
+        if let Err(failed) = done {
+            running.shutdown().await;
+            std::panic::resume_unwind(failed.into_panic());
+        }
+    }
+}
+
 /// A bare info hash, as the client sends it: the magnet link of it, which librqbit takes.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_info_hash_on_its_own_is_added() {
@@ -374,7 +470,7 @@ async fn a_partial_delete_outlasts_its_drive_going_and_a_restart_meanwhile() {
     std::fs::rename(&away, &downloads).unwrap();
     until(&engine, added.id, partly).await;
     // A few size checks more: nothing turns it into a check.
-    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    size_checks(&engine, 3).await;
     assert!(partly(&find(&engine, added.id).await.status));
     assert!(a.exists() && !b.exists(), "what Delete moved isn't made again");
     engine.stop().await;
@@ -482,7 +578,7 @@ async fn trashing_files_sets_them_off_before_any_moves_and_holds_the_torrents_ot
         let parked_pause = tokio::spawn(engine.command_later(id, TorrentCommand::Pause));
         // Several size checks pass while it's half done.
         for _ in 0..8 {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            size_checks(&engine, 1).await;
             assert_ne!(find(&engine, id).await.status, Status::MissingFiles, "{files:?}: Off before anything goes");
             let want: Vec<Priority> = (0..3).map(|f| if files.contains(&f) { Priority::Off } else { Priority::Normal }).collect();
             assert_eq!(priorities().await, want, "{files:?}: the chosen files are Off at once, the others untouched");
@@ -492,7 +588,14 @@ async fn trashing_files_sets_them_off_before_any_moves_and_holds_the_torrents_ot
         let aborted = chosen % 2 == 1;
         let undo = aborted.then(|| tokio::spawn(engine.undo_later()));
         if aborted {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Still held at the gate: "at once" is before the file in flight ends.
+            for _ in 0..500 {
+                if priorities().await == [Priority::Normal; 3] {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(super::trash::waiting(&gate), "{files:?}: the file in flight is still held");
             assert_eq!(priorities().await, [Priority::Normal; 3], "{files:?}: their priorities show back at once");
             assert!(!undo.as_ref().unwrap().is_finished(), "{files:?}: the file in flight ends first");
         }
@@ -525,6 +628,32 @@ async fn trashing_files_sets_them_off_before_any_moves_and_holds_the_torrents_ot
         assert_eq!(top(&engine).await, None);
     }
     engine.stop().await;
+}
+
+/// Waits until what the size checks make of torrent `id`'s files is settled: the size checks that
+/// see what's on disk now, a check that starts for a file that can be the one that went, and what
+/// librqbit says once it ends.
+async fn judged(engine: &Engine, id: u64) {
+    size_checks(engine, 2).await;
+    until(engine, id, |s| *s != Status::Checking).await;
+    settled(engine).await;
+}
+
+/// Waits until the engine has begun the stop just asked of it (`stop`, `stop_to_restart`).
+async fn stop_begun(engine: &Engine) {
+    for _ in 0..1000 {
+        if engine.stopping() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the engine never began to stop");
+}
+
+/// Whether `answer` is still unanswered, polled once now. After `engine.inspect(|_| ()).await`, the
+/// actor has handled everything sent before it, so an answer it gave as it handled one is in.
+async fn unanswered<F: Future + Unpin>(answer: &mut F) -> bool {
+    tokio::time::timeout(Duration::ZERO, answer).await.is_err()
 }
 
 /// Opens a test trash's gate when the test ends, however it ends.
@@ -680,12 +809,12 @@ async fn commands_for_a_torrent_wait_while_its_move_to_trash_is_being_undone() {
             "set another file Off" => TorrentCommand::SetPriority { files: vec![2], priority: Priority::Off },
             _ => TorrentCommand::Delete,
         };
-        let sent = tokio::spawn(engine.command_later(id, command));
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!sent.is_finished(), "{during}: it waits for the put-back");
+        let mut sent = Box::pin(engine.sent(id, command).await);
+        engine.inspect(|_| ()).await;
+        assert!(unanswered(&mut sent).await, "{during}: it waits for the put-back");
         super::trash::hold(&gate, false);
         undoing.await.unwrap().unwrap();
-        sent.await.unwrap().unwrap();
+        sent.await.unwrap();
         use proto::UndoAction::{Delete, TrashFiles};
         match during {
             "trash the file again" => {
@@ -727,8 +856,8 @@ async fn undoing_a_move_to_trash_with_one_file_emptied_from_the_trash_keeps_that
     assert!(!pack.join("a.bin").exists() && pack.join("b.bin").exists(), "b is back; a is gone for good");
     let priorities: Vec<Priority> = engine.details(id).await.unwrap().files.iter().map(|f| f.priority).collect();
     assert_eq!(priorities, [Priority::Off, Priority::Normal, Priority::Normal], "a stays Off, b has the priority it had");
-    for _ in 0..10 {
-        tokio::time::sleep(Duration::from_millis(30)).await;
+    for _ in 0..3 {
+        size_checks(&engine, 1).await;
         assert_ne!(find(&engine, id).await.status, Status::MissingFiles);
     }
     assert_eq!(stack(&engine).await, []);
@@ -847,15 +976,22 @@ async fn a_stop_during_the_put_back_of_a_move_to_trash_runs_nothing_that_waited_
     super::trash::hold(&gate, true);
     let undoing = tokio::spawn(engine.undo_later());
     held_at_the_gate(&gate).await;
-    let delete = tokio::spawn(engine.command_later(id, TorrentCommand::Delete));
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let moving = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![2] }));
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Sent in this order, each handled before the next.
+    let delete = tokio::spawn(engine.sent(id, TorrentCommand::Delete).await);
+    let moving = tokio::spawn(engine.sent(id, TorrentCommand::TrashFiles { files: vec![2] }).await);
+    engine.inspect(|_| ()).await;
     let stopping = tokio::spawn({
         let engine = engine.clone();
         async move { engine.stop().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The stop has begun once it answers what waited: then the put-back goes on.
+    for _ in 0..1000 {
+        if delete.is_finished() && moving.is_finished() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(super::trash::waiting(&gate), "the put-back is still held");
     super::trash::hold(&gate, false);
     stopping.await.unwrap();
     undoing.await.unwrap().unwrap();
@@ -1127,7 +1263,7 @@ async fn running_torrents_resume_after_a_restart_and_paused_ones_stay_paused() {
 
     let engine = engine(dir.path()).await;
     wait_for(&engine, running, Status::Downloading).await;
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, paused).await.status, Status::Paused, "paused by the user");
     assert_eq!(find(&engine, added_paused).await.status, Status::Paused, "added paused");
     engine.stop().await;
@@ -1153,7 +1289,7 @@ async fn pausing_during_a_check_lets_it_end_then_the_torrent_stays_paused() {
     assert_eq!(find(&engine, id).await.status, Status::Checking, "the check goes on");
     gate.hold(false);
     wait_for(&engine, id, Status::Paused).await;
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::Paused, "stays paused");
     assert!(!librqbit_live(&engine, id).await);
     engine.command(id, TorrentCommand::Resume).await.unwrap();
@@ -1178,7 +1314,7 @@ async fn a_cancelled_check_leaves_the_torrent_not_checked_until_it_is_checked_ag
         assert_eq!((t.status, t.content.unwrap().progress_bytes), (Status::Unchecked, 0));
         assert!(!t.actions.does(proto::Action::CancelCheck), "nothing left to cancel");
         assert_eq!(refusal(engine.command(id, TorrentCommand::CancelCheck).await), (id, TorrentRefusal::NotChecking));
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        settled(&engine).await;
         assert_eq!(find(&engine, id).await.status, Status::Unchecked, "the check doesn't start again, nor end as a finished one");
         assert!(!librqbit_live(&engine, id).await);
         // Pause is remembered; it stays not checked.
@@ -1186,7 +1322,7 @@ async fn a_cancelled_check_leaves_the_torrent_not_checked_until_it_is_checked_ag
         assert_eq!(find(&engine, id).await.status, Status::Unchecked);
         // A priority is held until the next check, and shows meanwhile.
         engine.command(id, TorrentCommand::SetPriority { files: vec![1], priority: Priority::Off }).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        settled(&engine).await;
         assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "shown as asked");
         assert_eq!(held(&engine, id).await, Some([0].into()), "held: nothing applies it to a torrent not checked");
         assert_eq!(librqbit_only_files(&engine, id).await, None, "out of librqbit until it's checked, which gets it added with them");
@@ -1204,7 +1340,7 @@ async fn a_cancelled_check_leaves_the_torrent_not_checked_until_it_is_checked_ag
     let engine = engine(dir.path()).await;
     assert_eq!(find(&engine, id).await.status, Status::Unchecked, "restored not checked, not Ready");
     assert_eq!(priorities(&engine, id).await, [Priority::Normal, Priority::Off], "the held priority too");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::Unchecked, "and it stays so");
     assert!(!librqbit_live(&engine, id).await);
     engine.command(id, TorrentCommand::Resume).await.unwrap();
@@ -1286,7 +1422,7 @@ async fn a_torrent_not_checked_shows_no_progress_of_files_it_had_before() {
     wait_for(&engine, id, Status::Checking).await;
     engine.command(id, TorrentCommand::CancelCheck).await.unwrap();
     gate.hold(false);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    settled(&engine).await;
     let shown: Vec<u64> = engine.details(id).await.unwrap().files.iter().map(|f| f.progress_bytes).collect();
     assert_eq!((find(&engine, id).await.status, shown), (Status::Unchecked, vec![0, 0]));
     // Checked again, what it has shows again.
@@ -1344,7 +1480,7 @@ async fn a_torrent_missing_files_at_start_shows_its_progress_and_isnt_added() {
     gate.hold(true);
     let engine = engine_gated(dir.path(), &gate).await;
     wait_for(&engine, id, Status::MissingFiles).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(librqbit_torrent(&engine, id).await, 0, "never added");
     assert!(!dir.path().join("downloads/pack/b.bin").exists(), "nothing made it again");
     gate.hold(false);
@@ -1493,7 +1629,7 @@ async fn a_file_deleted_outside_phantom_stops_the_torrent_as_missing_files() {
     );
     assert_eq!(find(&engine, id).await.content.unwrap().progress_bytes, 2 * FULL, "nor counted in the torrent's progress");
     assert!(!librqbit_live(&engine, id).await, "stopped in librqbit");
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "and stays so");
     assert!(!file(dir.path(), "b.bin").exists(), "nothing put back");
     assert_eq!(engine.command(id, TorrentCommand::Pause).await.unwrap(), (), "pausing is nothing to do");
@@ -1523,7 +1659,7 @@ async fn the_watcher_sees_a_torrent_folder_go_without_waiting_for_the_regular_lo
     wait_for(&engine, id, Status::Seeding).await;
     // The first size check, at start, ran before the torrent was added; this one watches its destination.
     engine.inspect(|actor| actor.watch_destinations()).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    watching(&engine, &dir.path().join("downloads")).await;
 
     std::fs::remove_dir_all(dir.path().join("downloads/pack")).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
@@ -1576,7 +1712,7 @@ async fn setting_the_missing_file_off_runs_the_torrent_again_as_it_was() {
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "everything it's getting is there");
     assert!(files_on(&engine, id).await.iter().all(|(_, _, missing)| !missing));
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "an Off file is never missing");
 
     // Set Normal again, it's downloaded from nothing (#276): Missing files is for a file it gets
@@ -1630,8 +1766,8 @@ async fn another_file_put_where_one_was_missing_across_a_stop_while_its_destinat
     let other = vec![0u8; 2 * PIECE];
     std::fs::write(file(dir.path(), "b.bin"), &other).unwrap();
 
-    // Long enough for its size check to see the file and a check to end.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // Its size check sees the file, and a check ends.
+    judged(&engine, id).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "not the file that went");
     assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), 0, true));
     assert_eq!(std::fs::read(file(dir.path(), "b.bin")).unwrap(), other, "not written over");
@@ -1654,7 +1790,7 @@ async fn a_file_deleted_while_the_service_was_stopped_is_missing_on_start_and_no
         let engine = engine(dir.path()).await;
         assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "instead of resuming");
         assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), 0, true));
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        settled(&engine).await;
         assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "though librqbit made the file again");
         assert!(!librqbit_live(&engine, id).await);
         engine.stop().await;
@@ -1678,7 +1814,7 @@ async fn check_finds_a_changed_file_keeps_what_is_valid_and_keeps_the_torrent_ru
 
     // The same size, other bytes: only a check sees it.
     std::fs::write(file(dir.path(), "b.bin"), vec![0; 2 * PIECE]).unwrap();
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "not missing");
 
     let before = librqbit_torrent(&engine, id).await;
@@ -1690,7 +1826,7 @@ async fn check_finds_a_changed_file_keeps_what_is_valid_and_keeps_the_torrent_ru
     engine.command(id, TorrentCommand::Pause).await.unwrap();
     engine.command(id, TorrentCommand::Check).await.unwrap();
     wait_for(&engine, id, Status::Paused).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::Paused, "a stopped torrent stays stopped");
 
     let fetching = add(&engine, &dir.path().join("downloads"), magnet(HASH), false).await.unwrap().id;
@@ -1857,7 +1993,7 @@ async fn a_missing_file_put_back_is_checked_and_the_torrent_runs_again_as_it_was
     wait_for(&engine, id, Status::MissingFiles).await;
     std::fs::rename(&trash, file(dir.path(), "b.bin")).unwrap();
     wait_for(&engine, id, Status::Done { reached: None }).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(find(&engine, id).await.status, Status::Done { reached: None }, "a paused one stays paused");
     assert!(!librqbit_live(&engine, id).await);
     engine.stop().await;
@@ -1885,7 +2021,7 @@ async fn a_file_put_back_that_is_not_the_one_that_went_leaves_the_torrent_missin
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
     assert_eq!(files_on(&engine, id).await[1], ("b.bin".into(), 0, true));
     let checked = librqbit_torrent(&engine, id).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert_eq!(librqbit_torrent(&engine, id).await, checked, "not checked over and over");
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
     engine.stop().await;
@@ -1906,7 +2042,7 @@ async fn after_a_restart_a_missing_file_isnt_made_again_and_counts_once_put_back
 
     let engine = engine(dir.path()).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     assert!(!file(dir.path(), "b.bin").exists(), "out of librqbit (#45): nothing makes it again");
     assert_eq!(librqbit_torrent(&engine, id).await, 0, "not added until it's checked");
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
@@ -1981,7 +2117,7 @@ async fn a_destination_that_goes_stops_the_torrent_until_it_is_back_then_it_chec
     assert!(engine.command(id, TorrentCommand::Check).await.is_err());
     let (_, why) = refusal(engine.command(id, TorrentCommand::Delete).await);
     assert!(matches!(why, TorrentRefusal::DestinationUnavailable { action: proto::Action::Delete, .. }));
-    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    size_checks(&engine, 3).await;
     assert!(!destination.exists(), "never made again");
 
     let before = librqbit_torrent(&engine, id).await;
@@ -2026,7 +2162,7 @@ async fn a_destination_away_at_start_is_not_created_and_a_torrent_running_before
 
     let engine = engine(dir.path()).await;
     assert_eq!(find(&engine, id).await.status, folder_gone(&destination));
-    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    size_checks(&engine, 3).await;
     assert!(!destination.exists(), "listed without making its folder");
     assert_eq!(find(&engine, id).await.status, folder_gone(&destination), "not Missing files");
 
@@ -2495,7 +2631,8 @@ async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engi
     let paused = tokio::time::timeout(Duration::from_secs(1), engine.command(id, TorrentCommand::Pause)).await;
     assert!(matches!(paused, Ok(Ok(()))), "{paused:?}");
     engine.command(id, TorrentCommand::Resume).await.unwrap();
-    tokio::time::sleep(super::space::STALLED_AFTER).await;
+    // Each tick while the look is stuck reports it stalled, and starts no other.
+    looks(&engine, 3).await;
     assert_eq!(stalling.looks.load(std::sync::atomic::Ordering::SeqCst), 1, "one look at a time, after {answered} answers");
 
     stalling.set(false);
@@ -2595,7 +2732,7 @@ mod limits {
         std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(16)
     }
 
-    proptest! {
+    cases::proptest! {
         #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
 
         /// The running session's limits are the ones last set, from the start and across restarts.
@@ -2737,15 +2874,21 @@ mod seeding_limits {
 
         engine.command(id, TorrentCommand::Resume).await.unwrap();
         until(&engine, id, &Status::Seeding).await;
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        // Three polls of it seeding, where the limit is applied: 1 to 1.5 s of the new round.
+        polls(&engine, 3).await;
         assert_eq!(find(&engine, id).await.status, Status::Seeding, "a Resume isn't undone by the same limit straight away");
 
-        // About a second and a half into the new round: kept across the restart.
+        // A second or so into the new round, as the engine counted it: kept across the restart,
+        // where it goes on until it reaches the limit.
+        let round = async |engine: &Engine| engine.inspect(move |a| a.torrents[&id].meter.round).await;
+        let kept = round(&engine).await;
+        assert!(kept.seeded > Duration::ZERO && kept.seeded < Duration::from_secs(2), "a new round: {kept:?}");
         engine.stop().await;
         let engine = start(dir.path(), limits).await;
-        until(&engine, id, &Status::Seeding).await;
-        let took = until(&engine, id, &done).await;
-        assert!(took < Duration::from_millis(1800), "a fresh round takes two seconds; this one took {took:?}");
+        let restored = round(&engine).await;
+        assert!(restored.seeded >= kept.seeded, "the round goes on after the restart: {restored:?}, of {kept:?}");
+        until(&engine, id, &done).await;
+        assert!(round(&engine).await.seeded >= Duration::from_secs(2), "it reached the limit");
         engine.stop().await;
     }
 
@@ -3654,7 +3797,7 @@ async fn undo_of_a_remove_or_delete_while_unchecked_brings_it_back_unchecked() {
             engine.undo().await.unwrap();
             let t = find(&engine, id).await;
             assert_eq!((t.status, t.content.unwrap().progress_bytes), (Status::Unchecked, 0), "{command:?}, undone");
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            settled(&engine).await;
             assert_eq!(find(&engine, id).await.status, Status::Unchecked, "{command:?}: and it stays so");
             assert!(!librqbit_live(&engine, id).await);
             engine.stop().await;
@@ -3786,8 +3929,8 @@ async fn a_stop_finishes_every_undo_under_way() {
     super::trash::hold(&gate, true);
     let newest = tokio::spawn(engine.undo_later());
     held_at_the_gate(&gate).await;
-    let older = tokio::spawn(engine.undo_later());
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let older = tokio::spawn(engine.undo_sent().await);
+    engine.inspect(|_| ()).await;
     let stopping = engine.stop();
     tokio::pin!(stopping);
     assert!(tokio::time::timeout(Duration::from_millis(300), &mut stopping).await.is_err(), "the stop waits for the undos under way");
@@ -3896,8 +4039,8 @@ async fn a_delete_waits_off_the_actor_for_a_change_to_its_files_under_way() {
     // What it wants saved, which touches it again: it was already.
     let resumed = tokio::time::timeout(soon, engine.command(id, TorrentCommand::Resume)).await;
     assert!(matches!(resumed, Ok(Ok(()))), "its own Resume is answered: {resumed:?}");
-    let deleting = tokio::spawn(engine.command_later(id, TorrentCommand::Delete));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let deleting = tokio::spawn(engine.sent(id, TorrentCommand::Delete).await);
+    assert!(tokio::time::timeout(soon, engine.inspect(|_| ())).await.is_ok(), "the actor goes on past the Delete");
 
     assert!(tokio::time::timeout(soon, engine.listing()).await.is_ok(), "the list is answered");
     let paused = tokio::time::timeout(soon, engine.command(other, TorrentCommand::Pause)).await;
@@ -4274,7 +4417,7 @@ async fn a_restart_for_new_settings_runs_what_waits_on_a_lane() {
         let engine = engine.clone();
         async move { engine.stop_to_restart().await }
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    stop_begun(&engine).await;
     super::trash::hold(&gate, false);
     restarting.await.unwrap();
     moving.await.unwrap();
@@ -4297,8 +4440,11 @@ async fn a_move_to_trash_cut_short_by_a_crash_ends_with_what_it_moved_or_is_roll
             super::trash::hold(&gate, true);
             let trashing = tokio::spawn(engine.command_later(id, TorrentCommand::TrashFiles { files: vec![0, 1, 2] }));
             held_at_the_gate(&gate).await;
-            let undo = aborted.then(|| tokio::spawn(engine.undo_later()));
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let undo = match aborted {
+                true => Some(tokio::spawn(engine.undo_sent().await)),
+                false => None,
+            };
+            engine.inspect(|_| ()).await;
             engine.kill().await;
             super::trash::abandon(&gate);
             let _ = trashing.await;
@@ -4400,7 +4546,7 @@ async fn a_move_to_trash_queued_behind_an_undo_can_be_undone() {
                 engine.command(id, TorrentCommand::Delete).await.unwrap();
                 super::trash::hold(&gate, true);
                 let undo = engine.undo_sent().await;
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                engine.inspect(|_| ()).await;
                 (undo, None)
             }
         };
@@ -4596,7 +4742,7 @@ async fn a_move_to_trash_during_a_check_can_be_undone() {
         gate.hold(false);
         // librqbit's check ends, and sets each file's length.
         until(&engine, id, |s| !matches!(s, Status::Checking)).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        polls(&engine, 1).await;
         // What the move recorded is in the undo log: a crash doesn't lose it.
         if case.ends_with("a crash") {
             engine.kill().await;
@@ -4991,7 +5137,7 @@ mod restore {
         TrashFiles(Vec<usize>),
     }
 
-    proptest! {
+    cases::proptest! {
         #![proptest_config(ProptestConfig {
             cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).map_or(16, |c: u32| c / 4).max(4),
             ..Default::default()
@@ -5148,7 +5294,7 @@ async fn the_default_folder_going_away_and_coming_back_shows_in_the_snapshots() 
     assert_eq!(default_unavailable(&engine), None, "no default destination, nothing to reach");
 
     engine.set_default_destination(Some(path.clone())).await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    looks(&engine, 1).await;
     assert_eq!(default_unavailable(&engine), None, "it's there");
 
     std::fs::remove_dir(&folder).unwrap();
@@ -5191,16 +5337,18 @@ async fn a_default_folder_that_doesnt_answer_is_unreachable_without_holding_up_t
     engine.set_default_destination(Some(folder.clone())).await;
     let started = std::time::Instant::now();
     let cant_open = Some(proto::Unavailable::CantOpen { path: folder });
-    // Not before the look has taken `STALLED_AFTER` (a slow disk isn't a stalled one), give or take a poll.
-    tokio::time::sleep(super::space::STALLED_AFTER - Duration::from_millis(500)).await;
-    assert_eq!(default_unavailable(&engine), None, "a look that's only taken {:?} isn't stalled", started.elapsed());
     while default_unavailable(&engine) != cant_open {
+        assert_eq!(default_unavailable(&engine), None, "a look that's only taken {:?} isn't stalled", started.elapsed());
         assert!(started.elapsed() < super::space::STALLED_AFTER + Duration::from_secs(5), "never said it can't be opened");
         let answer = tokio::time::timeout(Duration::from_secs(1), engine.listing()).await;
         assert!(answer.is_ok(), "the engine answers while the disk is stalled");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    // Not before the look has taken `STALLED_AFTER` (a slow disk isn't a stalled one), give or take a poll.
+    let said = started.elapsed();
+    assert!(said >= super::space::STALLED_AFTER - Duration::from_millis(500), "a look that's only taken {said:?} isn't stalled");
+    // Each tick while it's stuck reports it, and starts no other look.
+    self::looks(&engine, 3).await;
     assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 1, "one look at a time, however long it's stuck");
 
     *held.0.lock().unwrap() = false;
@@ -5220,7 +5368,7 @@ async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said
     // once; its later looks (a tick each) are stuck too, so none comes to correct a wrong answer.
     let held = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
     let held_b = Arc::new((Mutex::new(true), std::sync::Condvar::new()));
-    let b_looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (a_looks, b_looks) = (Arc::new(std::sync::atomic::AtomicUsize::new(0)), Arc::new(std::sync::atomic::AtomicUsize::new(0)));
     let wait = |gate: &Arc<(Mutex<bool>, std::sync::Condvar)>| {
         let (on, changed) = &**gate;
         let mut on = on.lock().unwrap();
@@ -5229,9 +5377,10 @@ async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said
         }
     };
     let look: super::default_folder::Look = {
-        let (held, held_b, a, b_looks) = (held.clone(), held_b.clone(), a.clone(), b_looks.clone());
+        let (held, held_b, a, a_looks, b_looks) = (held.clone(), held_b.clone(), a.clone(), a_looks.clone(), b_looks.clone());
         Arc::new(move |folder| {
             if *folder == a {
+                a_looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 wait(&held);
                 return Some(proto::Unavailable::FolderMissing { path: folder.clone() });
             }
@@ -5242,16 +5391,20 @@ async fn what_a_look_finds_of_a_folder_that_is_no_longer_the_default_is_not_said
         })
     };
     let engine = engine_looking_at_the_default_folder(dir.path(), look).await;
+    let seen = |looks: &Arc<std::sync::atomic::AtomicUsize>| looks.load(std::sync::atomic::Ordering::SeqCst) > 0;
     engine.set_default_destination(Some(a)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(eventually(10, || seen(&a_looks)).await, "A is looked at");
+    let before = engine.inspect(|a| a.looks_reported).await;
     engine.set_default_destination(Some(b)).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // B's answer, the one report until A's look ends.
+    looks_since(&engine, before, 1).await;
+    assert!(seen(&b_looks));
+    let before = engine.inspect(|a| a.looks_reported).await;
     *held.0.lock().unwrap() = false;
     held.1.notify_all();
-    for poll in 0..40 {
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        assert_eq!(default_unavailable(&engine), None, "what A's look found isn't B's, at {poll}");
-    }
+    // A's look's end, reported.
+    looks_since(&engine, before, 1).await;
+    assert_eq!(default_unavailable(&engine), None, "what A's look found isn't B's");
     *held_b.0.lock().unwrap() = false;
     held_b.1.notify_all();
     engine.stop().await;
@@ -5433,17 +5586,18 @@ async fn a_pause_during_the_start_sampling_shows_at_once_and_runs_after_it() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(gate.waiting(), "librqbit's sampling is held");
-    let paused = tokio::spawn(engine.sent(id, TorrentCommand::Pause).await);
+    let mut paused = Box::pin(engine.sent(id, TorrentCommand::Pause).await);
     // Shown done while the sampling is still held: as soon as the engine has it.
     until(&engine, id, |s| *s == Status::Done { reached: None }).await;
     assert!(gate.waiting(), "still sampling");
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(!paused.is_finished(), "it waits for the sampling");
+    // Not carried out at the polls of librqbit meanwhile either.
+    polls(&engine, 2).await;
+    assert!(unanswered(&mut paused).await, "it waits for the sampling");
     let wants = engine.inspect(move |a| a.torrents[&id].lifecycle.wants).await;
     assert_eq!(wants, super::machine::Wants::Run, "not carried out yet");
     assert_eq!(find(&engine, id).await.status, Status::Done { reached: None }, "still shown done");
     gate.hold(false);
-    tokio::time::timeout(Duration::from_secs(10), paused).await.expect("runs once the sampling is over").unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), paused).await.expect("runs once the sampling is over").unwrap();
     assert_eq!(find(&engine, id).await.status, Status::Done { reached: None });
     assert!(!librqbit_live(&engine, id).await, "librqbit has it paused");
     engine.stop().await;
@@ -5500,7 +5654,7 @@ async fn a_file_deleted_by_hand_is_closed_at_once_off_the_actor() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(open(), 0, "closed: its space is freed");
-    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    size_checks(&engine, 3).await;
     assert!(open_moved() > 0, "one moved elsewhere stays open");
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
     let kept = engine.inspect(move |a| matches!(a.torrents[&id].lib, super::machine::lib::Lib::In(_))).await;
@@ -5546,7 +5700,7 @@ async fn an_undo_of_a_delete_held_during_the_sampling_moves_nothing() {
     assert!(gate.waiting(), "still sampling");
     gate.hold(false);
     sampled(&engine, id).await;
-    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    size_checks(&engine, 3).await;
     assert_eq!(find(&engine, id).await.status, Status::Seeding, "as it was");
     for name in ["a.bin", "b.bin", "c.bin"] {
         assert!(file(dir.path(), name).exists(), "{name} where it was");
@@ -5576,12 +5730,12 @@ async fn a_step_held_during_the_sampling_runs_once_its_destination_goes() {
     let engine = engine_gated(dir.path(), &gate).await;
     let resuming = engine.inspect(move |a| matches!(a.torrents[&id].lib, super::machine::lib::Lib::Resuming(_))).await;
     assert!(resuming, "librqbit samples what it saved");
-    let pausing = tokio::spawn(engine.sent(id, TorrentCommand::Pause).await);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(!pausing.is_finished(), "held");
+    let mut pausing = Box::pin(engine.sent(id, TorrentCommand::Pause).await);
+    polls(&engine, 1).await;
+    assert!(unanswered(&mut pausing).await, "held");
     take_away(&destination);
     let paused = tokio::time::timeout(Duration::from_secs(10), pausing).await.expect("runs once it's out of librqbit");
-    paused.unwrap().unwrap();
+    paused.unwrap();
     assert!(gate.is_held(), "the sampling never ended");
     until(&engine, id, |s| matches!(s, Status::DestinationUnavailable { .. })).await;
     engine.stop().await;
@@ -5603,10 +5757,7 @@ async fn a_check_clears_the_let_go_of_a_missing_file_set_off_and_put_back() {
     std::fs::remove_file(&path).unwrap();
     wait_for(&engine, id, Status::MissingFiles).await;
     // Right after a size check, so the next look comes only after the check below starts.
-    let checks = engine.inspect(|a| a.size_checks).await;
-    while engine.inspect(|a| a.size_checks).await == checks {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    size_checks(&engine, 1).await;
     engine.command(id, TorrentCommand::SetPriority { files: vec![b], priority: Priority::Off }).await.unwrap();
     let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
     assert!(matches!(letting, super::machine::letgo::State::Gone { .. }), "to be let go of: {letting:?}");
@@ -5616,7 +5767,7 @@ async fn a_check_clears_the_let_go_of_a_missing_file_set_off_and_put_back() {
     let letting = engine.inspect(move |a| a.torrents[&id].record.letting_go.clone()).await;
     assert_eq!(letting, super::machine::letgo::State::Holding, "the check found what's on disk");
     let added = librqbit_torrent(&engine, id).await;
-    tokio::time::sleep(every * 3).await;
+    size_checks(&engine, 3).await;
     assert_eq!(engine.details(id).await.unwrap().files[b].progress_bytes, 2 * PIECE as u64, "it keeps its pieces");
     assert_eq!(librqbit_torrent(&engine, id).await, added, "not taken out and added back");
     engine.stop().await;
@@ -5758,7 +5909,7 @@ async fn a_stub_replaced_by_the_persons_file_refuses_the_undo() {
     let trashed: Vec<Vec<u8>> =
         std::fs::read_dir(dir.path().join("trash")).unwrap().flatten().map(|e| std::fs::read(e.path()).unwrap()).collect();
     assert_eq!(trashed, [before], "only the old copy is in the Trash");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    settled(&engine).await;
     assert_eq!(std::fs::read(&first).unwrap(), mine, "nothing writes into the person's file");
     engine.stop().await;
 }

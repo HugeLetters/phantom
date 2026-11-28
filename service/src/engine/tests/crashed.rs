@@ -115,7 +115,7 @@ async fn interrupted(at: At, gone: &[&str], put: Put, when: When, off: bool, cra
         true => {
             let killed = engine.kill();
             let open = async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                stop_begun(&engine).await;
                 gate.hold(false);
             };
             tokio::join!(killed, open);
@@ -165,10 +165,8 @@ async fn interrupted(at: At, gone: &[&str], put: Put, when: When, off: bool, cra
             }
         }
         Put::Other => {
-            // Long enough for a size check to see the files and a check to end.
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            // A check a loaded machine is late with is let end: it's what's left of it that's judged.
-            until(&engine, id, |s| *s != Status::Checking).await;
+            // A size check sees the files, and a check ends: it's what's left of it that's judged.
+            judged(&engine, id).await;
             assert_eq!(find(&engine, id).await.status, Status::MissingFiles, "{case}");
             for name in gone {
                 assert_eq!(std::fs::read(file(dir, name)).unwrap(), other(), "{case}: {name} as it was put there");
@@ -262,7 +260,7 @@ async fn a_save_that_failed_as_a_file_went_missing_is_made_up_for_before_its_pie
     let engine = engine(dir).await;
     let id = add(&engine, &here, complete_torrent(dir).await, false).await.unwrap().id;
     wait_for(&engine, id, Status::Seeding).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    settled(&engine).await;
     let path = file(dir, "b.bin");
     engine
         .inspect(move |a| {
@@ -273,13 +271,13 @@ async fn a_save_that_failed_as_a_file_went_missing_is_made_up_for_before_its_pie
     wait_for(&engine, id, Status::MissingFiles).await;
     std::fs::rename(&here, &away).unwrap();
     until(&engine, id, |s| matches!(s, Status::DestinationUnavailable { .. })).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    settled(&engine).await;
     engine.kill().await;
     drop(engine);
     std::fs::rename(&away, &here).unwrap();
     std::fs::write(file(dir, "b.bin"), other()).unwrap();
     let engine = super::engine(dir).await;
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    judged(&engine, id).await;
     assert_eq!(find(&engine, id).await.status, Status::MissingFiles);
     engine.stop().await;
 }
@@ -391,8 +389,7 @@ async fn a_clean_stop_forgets_what_was_seen_at_a_missing_path() {
     let dir = dir.path();
     let engine = engine(dir).await;
     let (_, b) = missing_b(&engine, dir).await;
-    // A size check has looked at the path by now.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    size_checks(&engine, 2).await;
     engine
         .inspect(move |a| assert_ne!(a.torrents.values().next().unwrap().record.missing[&b].seen, super::super::files::Seen::NotYet))
         .await;
@@ -451,7 +448,7 @@ async fn moved_missing(then: MovedThen) {
     wait_for(&engine, id, Status::MissingFiles).await;
     std::fs::write(&b, other()).unwrap();
     // Looked at, and told not to be the one that went.
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    size_checks(&engine, 2).await;
     wait_for(&engine, id, Status::MissingFiles).await;
     let elsewhere = dir.join("elsewhere/pack");
     std::fs::create_dir_all(&elsewhere).unwrap();
@@ -470,7 +467,7 @@ async fn moved_missing(then: MovedThen) {
         move_using(&engine, dir, id, proto::Clash::UseExisting).await.unwrap();
     }
     super::moving::moved(&engine, id).await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    judged(&engine, id).await;
     wait_for(&engine, id, Status::MissingFiles).await;
     let mut now = elsewhere.join("b.bin");
     if then != MovedThen::Copied {
@@ -507,14 +504,14 @@ async fn moved_missing(then: MovedThen) {
             let index = index_of(&engine, id, "b.bin").await;
             engine.command(id, TorrentCommand::SetPriority { files: vec![index], priority: Priority::Off }).await.unwrap();
             until(&engine, id, |s| !matches!(s, Status::MissingFiles | Status::Checking)).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            judged(&engine, id).await;
             until(&engine, id, |s| !matches!(s, Status::MissingFiles | Status::Checking)).await;
             assert_eq!(shown_had(&engine, id).await["a.bin"], 0, "checked, nothing of it matched");
             assert_eq!(std::fs::read(&now).unwrap(), other());
             return engine.stop().await;
         }
     }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    judged(&engine, id).await;
     wait_for(&engine, id, Status::MissingFiles).await;
     assert_eq!(shown_had(&engine, id).await["a.bin"], 0, "{then:?}");
     assert_eq!(std::fs::read(&now).unwrap(), other(), "{then:?}");
@@ -526,7 +523,7 @@ async fn moved_missing(then: MovedThen) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_that_uses_a_file_there_is_still_missing_another() {
-    for then in [
+    let thens = [
         MovedThen::Copied,
         MovedThen::Restart,
         MovedThen::Crash,
@@ -534,8 +531,6 @@ async fn a_move_that_uses_a_file_there_is_still_missing_another() {
         MovedThen::MovedAgain,
         MovedThen::OwnBack,
         MovedThen::SetOff,
-    ] {
-        println!("{then:?}");
-        moved_missing(then).await;
-    }
+    ];
+    side_by_side(WIDTH, thens, moved_missing).await;
 }

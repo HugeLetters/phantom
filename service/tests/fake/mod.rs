@@ -25,14 +25,16 @@ pub fn isolate(dir: &Path) {
 
 /// What the fake does with a request.
 pub enum Answer {
-    /// Closes the connection unanswered: a service exiting.
-    Close,
+    /// Closes the connection unanswered, as a service exiting does, `times` times: then it's gone.
+    /// More than once, so a client that meets it tries again rather than starting one.
+    Close { times: usize },
     /// Answers `Hello` as a service of another build; `Shutdown` removes the socket at once and
     /// keeps the lock for `stopping`, as a build that takes that long to stop.
     OtherBuild { stopping: Duration },
 }
 
-/// Serves `answer` until it's done, then removes the socket and lets the lock go after `stopping`.
+/// Serves `answer` until it's done (or for `serving` at most), then removes the socket and lets the
+/// lock go after `stopping`.
 pub fn service(answer: Answer, serving: Duration) {
     let lock = File::create(proto::lock_path()).unwrap();
     lock.try_lock().unwrap();
@@ -40,8 +42,8 @@ pub fn service(answer: Answer, serving: Duration) {
     listener.set_nonblocking(true).unwrap();
     thread::spawn(move || {
         let until = std::time::Instant::now() + serving;
-        let mut stopping = None;
-        while std::time::Instant::now() < until && stopping.is_none() {
+        let (mut stopping, mut closed) = (None, 0);
+        while std::time::Instant::now() < until && stopping.is_none() && !matches!(answer, Answer::Close { times } if closed == times) {
             let Ok((stream, _)) = listener.accept() else {
                 thread::sleep(Duration::from_millis(10));
                 continue;
@@ -51,7 +53,10 @@ pub fn service(answer: Answer, serving: Duration) {
             for line in BufReader::new(stream).lines() {
                 let Ok(line) = line else { break };
                 match (&answer, serde_json::from_str::<Request>(&line).unwrap()) {
-                    (Answer::Close, _) => break,
+                    (Answer::Close { .. }, _) => {
+                        closed += 1;
+                        break;
+                    }
                     (Answer::OtherBuild { .. }, Request::Hello) => {
                         let hello = Response::Hello { build_id: "another-build".into(), service_version: "old".into() };
                         writeln!(writer, "{}", serde_json::to_string(&hello).unwrap()).unwrap();
@@ -66,6 +71,7 @@ pub fn service(answer: Answer, serving: Duration) {
         }
         drop(listener);
         std::fs::remove_file(socket_path()).unwrap();
+        // The scenario's own time: longer than a new service waits for the lock.
         thread::sleep(stopping.unwrap_or_default());
         drop(lock);
     });

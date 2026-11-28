@@ -399,7 +399,19 @@ async fn a_file_put_back_under_a_rename_is_counted_whichever_order_they_are_undo
         match rename_first {
             false => {
                 engine.command(id, TorrentCommand::TrashFiles { files: vec![file] }).await.unwrap();
-                tokio::time::sleep(Duration::from_millis(2500)).await;
+                // The trashed file let go of first: librqbit has the torrent back without its pieces.
+                let let_go = move |a: &mut super::super::actor::Actor| {
+                    let t = &a.torrents[&id];
+                    t.record.letting_go == super::super::machine::letgo::State::Holding
+                        && t.lib.torrent().is_some_and(|h| h.stats().file_progress[file] == 0)
+                };
+                for _ in 0..1000 {
+                    if engine.inspect(let_go).await {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(engine.inspect(let_go).await, "the trashed file is let go of");
                 engine.command(id, rename("New")).await.unwrap();
                 moved(&engine, id).await;
             }

@@ -1,8 +1,39 @@
-# Run with: cargo nextest run --workspace -E 'not binary(appkit)'
-# (gui's `appkit` test has its own harness, which nextest can't list; run it with
-# `cargo test -p gui --test appkit`.) nextest doesn't run doc-tests: `cargo test --doc` does.
+# Run with: cargo nextest run --workspace
+# gui's `appkit` test has its own harness, which nextest can't list: `default-filter` leaves it out,
+# for `cargo test -p gui --test appkit`. nextest doesn't run doc-tests: `cargo test --doc` does.
+#
+# The budget: a test is flagged SLOW past 20 s on an idle machine. `--profile budget` fails it there,
+# unless the budget profile lists it below, with why. The default profile only kills one at 300 s:
+# agents' runs share a loaded machine, where a 20 s test can take minutes.
 [profile.default]
+default-filter = 'not binary(appkit)'
 retries = 1
-slow-timeout = { period = "60s", terminate-after = 5 }
+# Most tests wait more than they compute (every engine's stop alone waits librqbit's 1 s): more
+# run at once than there are cores. The GUI's compute, so `cpu` holds them to the cores.
+test-threads = 24
+slow-timeout = { period = "20s", terminate-after = 15 }
 status-level = "slow"
 final-status-level = "slow"
+
+[test-groups]
+cpu = { max-threads = "num-cpus" }
+
+[[profile.default.overrides]]
+filter = 'package(gui)'
+test-group = 'cpu'
+
+[profile.budget]
+slow-timeout = { period = "20s", terminate-after = 1 }
+retries = 0
+
+# 48 s idle: six cases one after another, each a real service with restarts (8 s). They can't run
+# side by side while a client finds its service by the process's PHANTOM_DATA_DIR.
+[[profile.budget.overrides]]
+filter = 'binary(settings)'
+slow-timeout = { period = "60s", terminate-after = 1 }
+
+# The long property runs (`PROPTEST_CASES=256` and up): a test is flagged every 60 s and never
+# killed. A test killed in another profile counts as failed (TIMEOUT), never as passed.
+[profile.long]
+slow-timeout = { period = "60s" }
+retries = 0

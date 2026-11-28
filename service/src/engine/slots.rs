@@ -44,6 +44,9 @@ struct Opening {
     files: Vec<RwLock<Opened>>,
     /// Which handle has them ([`Handle::number`]).
     holder: AtomicU64,
+    /// The threads waiting for a file's lock now, for tests to wait on.
+    #[cfg(test)]
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 /// Each file's path, by index; `None`: padding, never opened.
@@ -73,7 +76,13 @@ impl Slots {
     pub fn open(self: &Arc<Self>, files: Vec<(Option<PathBuf>, Opened)>) -> Handle {
         let (paths, files): (Vec<_>, Vec<_>) = files.into_iter().map(|(path, file)| (path, RwLock::new(file))).unzip();
         let paths = Arc::new(paths);
-        let opening = Arc::new(Opening { paths: paths.clone(), files, holder: AtomicU64::new(0) });
+        let opening = Arc::new(Opening {
+            paths: paths.clone(),
+            files,
+            holder: AtomicU64::new(0),
+            #[cfg(test)]
+            waiting: Default::default(),
+        });
         let handle = Handle { slots: self.clone(), paths, opening: Arc::downgrade(&opening), number: 0 };
         let before = self.lock().replace(opening);
         // Closed with `now` free.
@@ -282,7 +291,7 @@ impl Handle {
     pub fn read<T>(&self, index: usize, f: impl FnOnce(Option<&Path>, &Opened) -> Result<T>) -> Result<T> {
         let path = self.path(index)?;
         if let Some(opening) = self.opening() {
-            let file = opening.files[index].read().unwrap();
+            let file = opening.waits(|| opening.files[index].read().unwrap());
             // Asked again with the file locked: a hand-on since waits for this one, or is seen here.
             if opening.is_held_by(self) {
                 return f(path, &file);
@@ -295,7 +304,7 @@ impl Handle {
     pub fn change<T>(&self, index: usize, f: impl FnOnce(Option<&Path>, &mut Opened) -> Result<T>) -> Result<T> {
         let path = self.path(index)?;
         if let Some(opening) = self.opening() {
-            let mut file = opening.files[index].write().unwrap();
+            let mut file = opening.waits(|| opening.files[index].write().unwrap());
             if opening.is_held_by(self) {
                 return f(path, &mut file);
             }
@@ -315,7 +324,7 @@ impl Handle {
         let next = next(Arc::downgrade(&opening), number);
         // Each read and write that found this handle having the files holds its file's lock.
         for file in &opening.files {
-            drop(file.write().unwrap());
+            drop(opening.waits(|| file.write().unwrap()));
         }
         next
     }
@@ -333,6 +342,16 @@ impl Handle {
 impl Opening {
     fn is_held_by(&self, handle: &Handle) -> bool {
         self.holder.load(Ordering::SeqCst) == handle.number
+    }
+
+    /// `lock()`, a file's lock: counted in [`Opening::waiting`] while it waits, in tests.
+    fn waits<G>(&self, lock: impl FnOnce() -> G) -> G {
+        #[cfg(test)]
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+        let guard = lock();
+        #[cfg(test)]
+        self.waiting.fetch_sub(1, Ordering::SeqCst);
+        guard
     }
 }
 
@@ -358,6 +377,20 @@ mod tests {
     use super::*;
 
     struct Dir(tempfile::TempDir);
+
+    /// Waits up to 10 seconds until `n` threads wait for a lock of the files `handle` had: whether
+    /// they did. It doesn't panic, so the threads waiting are let go before the test fails.
+    fn waiting_for_locks(handle: &Handle, n: usize) -> bool {
+        let opening = handle.opening.upgrade().expect("it has the files");
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while opening.waiting.load(Ordering::SeqCst) < n {
+            if std::time::Instant::now() > until {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
+    }
 
     impl Dir {
         fn new() -> Self {
@@ -416,7 +449,9 @@ mod tests {
                 });
                 begun.recv().unwrap();
                 s.spawn(move || next_tx.send(old.hand_on()).unwrap());
-                let early = next.recv_timeout(Duration::from_millis(100));
+                waiting_for_locks(old, 1);
+                // Waiting for the write, or (the bug) handed on already.
+                let early = next.try_recv();
                 // A look waits for neither.
                 let (looked_tx, looked) = mpsc::channel();
                 s.spawn(move || {
@@ -455,11 +490,12 @@ mod tests {
             begun.recv().unwrap();
             let reading = s.spawn(|| old.read(0, |_, opened| Ok(matches!(opened, Opened::HandedOn))).unwrap());
             let changing = s.spawn(|| old.change(0, |_, _| Ok(())).is_err());
-            // Both wait for the file.
-            std::thread::sleep(Duration::from_millis(200));
+            // Both wait for the file, then the hand-on too.
+            let both = waiting_for_locks(old, 2);
             let next = s.spawn(|| old.hand_on());
-            std::thread::sleep(Duration::from_millis(100));
+            let all = both && waiting_for_locks(old, 3);
             go.send(()).unwrap();
+            assert!(all, "the read and the change wait for the file, then the hand-on");
             assert!(reading.join().unwrap() && changing.join().unwrap(), "late");
             assert!(write(&next.join().unwrap(), 0, 1));
         });

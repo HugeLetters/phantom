@@ -333,7 +333,11 @@ impl Guard {
         let flag = self.untouched_of(info_hash);
         flag.on.store(untouched, std::sync::atomic::Ordering::SeqCst);
         if untouched {
+            #[cfg(test)]
+            flag.keeping.store(true, std::sync::atomic::Ordering::SeqCst);
             drop(flag.touches.write().unwrap_or_else(std::sync::PoisonError::into_inner));
+            #[cfg(test)]
+            flag.keeping.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -392,6 +396,9 @@ struct UntouchedFlag {
     /// Held to read by each change to a file while it's made, to write once `on` is set: so that
     /// waits for the change under way.
     touches: RwLock<()>,
+    /// A [`Guard::keep_untouched`] waits for the change under way, for tests to wait on.
+    #[cfg(test)]
+    keeping: std::sync::atomic::AtomicBool,
 }
 
 impl UntouchedFlag {
@@ -689,10 +696,15 @@ mod tests {
         let mut recreated = gone.clone();
         recreated.seen = Seen::NotYet;
         assert!(!recreated.is_back(stamp(&path)), "not judged yet");
-        recreated.seen = Seen::Was(stamp(&path));
+        let judged = stamp(&path);
+        recreated.seen = Seen::Was(judged);
         assert!(!recreated.is_back(stamp(&path)), "the file that was there when judged");
-        std::thread::sleep(Duration::from_millis(10));
-        std::fs::write(&path, [1; 100]).unwrap();
+        // Written again until its modification time moves on: the clock's tick can be coarse.
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        while stamp(&path) == judged {
+            assert!(std::time::Instant::now() < until, "its modification time never moved on");
+            std::fs::write(&path, [1; 100]).unwrap();
+        }
         assert!(recreated.is_back(stamp(&path)), "another one since");
     }
 
@@ -919,7 +931,14 @@ mod tests {
                         returned.store(true, std::sync::atomic::Ordering::SeqCst);
                     }
                 });
-                std::thread::sleep(Duration::from_millis(30));
+                // At the touch's lock: it waits there, or (the bug) is past it.
+                let until = std::time::Instant::now() + Duration::from_secs(10);
+                while !guard.untouched_of("hash").keeping.load(std::sync::atomic::Ordering::SeqCst)
+                    && !returned.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    proptest::prop_assert!(std::time::Instant::now() < until, "never at the touch's lock");
+                    std::thread::yield_now();
+                }
                 proptest::prop_assert!(!returned.load(std::sync::atomic::Ordering::SeqCst), "it waits for the touch under way");
                 hold.open();
                 proptest::prop_assert!(touching.join().unwrap().is_ok(), "the touch under way ends as it would have");

@@ -58,7 +58,7 @@ async fn run(case: Case) {
         engine.command(id, TorrentCommand::SetPriority { files: files.clone(), priority: Priority::Off }).await.unwrap();
         std::fs::create_dir_all(dir.join("theirs")).unwrap();
         std::fs::rename(&path, dir.join("theirs/b.bin")).unwrap();
-        tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+        size_checks(&engine, 3).await;
     } else {
         engine.command(id, TorrentCommand::TrashFiles { files: files.clone() }).await.unwrap();
     }
@@ -88,8 +88,8 @@ async fn run(case: Case) {
         engine.command(id, normal).await.unwrap();
     }
     if !case.running {
-        // Long enough for what's let go of to be.
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // What's let go of is, at the size checks.
+        settled(&engine).await;
         let whole = if case.shared { 3 * PIECE as u64 } else { 0 };
         let has = engine.inspect(move |t| t.torrents[&id].lib.torrent().map(|h| h.stats().file_progress).unwrap()).await;
         assert_eq!((has[first], has[file]), (whole, 0), "the neighbour's pieces stay had, the file's aren't");
@@ -161,7 +161,7 @@ async fn set(engine: &Engine, id: u64, file: usize, priority: Priority) {
 /// Set Normal, Off and Normal again, before and after the let-go of the first is looked at.
 #[tokio::test(flavor = "multi_thread")]
 async fn in_the_trash_set_normal_off_and_normal_again() {
-    for pause in [Duration::ZERO, SIZE_CHECK_EVERY * 5] {
+    for checks in [0, 5] {
         let dir = temp();
         let dir = dir.path();
         let (_seeder, engine, id, file, b) = stopped_pack(dir).await;
@@ -171,12 +171,12 @@ async fn in_the_trash_set_normal_off_and_normal_again() {
         set(&engine, id, file, Priority::Normal).await;
         set(&engine, id, file, Priority::Off).await;
         engine.inspect(|a| a.letting_go_held = false).await;
-        tokio::time::sleep(pause).await;
+        size_checks(&engine, checks).await;
         set(&engine, id, file, Priority::Normal).await;
         engine.command(id, TorrentCommand::Resume).await.unwrap();
         until(&engine, id, |s| *s == Status::Seeding).await;
         let now = std::fs::read(dir.join("downloads/pack/b.bin")).unwrap();
-        assert!(now == b, "{pause:?}: Seeding, its file isn't the torrent's, zeros: {}", now.iter().all(|byte| *byte == 0));
+        assert!(now == b, "{checks} size checks: Seeding, its file isn't the torrent's, zeros: {}", now.iter().all(|byte| *byte == 0));
         engine.stop().await;
     }
 }
@@ -206,7 +206,8 @@ async fn moved_by_hand_in_use_as_its_set_normal_while_running() {
     });
     held.recv().unwrap();
     set(&engine, id, file, Priority::Normal).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // What the engine does meanwhile by itself: nothing gets the file while it's in use.
+    settled(&engine).await;
     release.send(()).unwrap();
     using.join().unwrap();
     assert!(std::fs::read(&theirs).unwrap() == before, "downloaded into the file that was moved away");
@@ -237,7 +238,7 @@ async fn gone_before_a_start_set_normal_isnt_taken_out() {
     until(&engine, id, |s| matches!(s, Status::Paused | Status::Done { .. })).await;
     let added = engine.inspect(move |a| a.torrents[&id].added).await;
     set(&engine, id, file, Priority::Normal).await;
-    tokio::time::sleep(SIZE_CHECK_EVERY * 3).await;
+    size_checks(&engine, 3).await;
     engine.command(id, TorrentCommand::Resume).await.unwrap();
     for _ in 0..1000 {
         if std::fs::read(&path).ok().as_ref() == Some(&b) {
