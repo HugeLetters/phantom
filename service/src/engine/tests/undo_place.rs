@@ -15,6 +15,7 @@ enum Other {
     /// A single file torrent named `x.bin` whose folder is `A`'s: one of `A`'s paths.
     InsideItsFolder,
     /// The same paths, with the folder spelled `a`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     InAnotherCase,
 }
 
@@ -66,7 +67,12 @@ fn the_magnet_of(hash: &str, name: &str) -> String {
 /// kept for it, the other torrent exactly as it was, and what the Delete moved still in the Trash.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_undo_is_refused_and_dropped_while_another_torrent_has_the_files() {
-    for other in [Other::Running, Other::Stopped, Other::InsideItsFolder, Other::InAnotherCase] {
+    // In another case only on macOS, whose drive (APFS) ignores case: elsewhere it's another place.
+    #[cfg(target_os = "macos")]
+    let others = [Other::Running, Other::Stopped, Other::InsideItsFolder, Other::InAnotherCase];
+    #[cfg(not(target_os = "macos"))]
+    let others = [Other::Running, Other::Stopped, Other::InsideItsFolder];
+    for other in others {
         for delete in [false, true] {
             let case = format!("{other:?}, delete: {delete}");
             let dir = temp();
@@ -347,9 +353,13 @@ async fn an_add_inside_the_folder_sharing_no_file_waits_and_both_are_listed() {
     let _opens = OpensTrash(gate.clone());
     let engine = engine_with(dir.path(), SIZE_CHECK_EVERY, Default::default(), gate.clone()).await;
     let (a, ours, undoing) = held_putting_back(dir.path(), &engine, &gate).await;
-    // However it's spelled.
+    // However it's spelled: on macOS, whose drive (APFS) ignores case; elsewhere it's spelled so.
     let place = dir.path().join("downloads/pack");
-    let b = add_now(&engine, torrent_file("own.bin"), &dir.path().join("downloads/PACK")).await;
+    #[cfg(target_os = "macos")]
+    let spelled = "downloads/PACK";
+    #[cfg(not(target_os = "macos"))]
+    let spelled = "downloads/pack";
+    let b = add_now(&engine, torrent_file("own.bin"), &dir.path().join(spelled)).await;
     waits_for_its_place(&engine, b).await;
     assert_eq!(bytes_in(&place), ours, "the add touched nothing yet");
 

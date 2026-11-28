@@ -8,7 +8,9 @@ use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 static LOCK: RwLock<()> = RwLock::new(());
 
-/// Held around spawning a child: any number of spawns at once, none while a port is let go.
+/// Held around spawning a child: any number of spawns at once, none while a port is let go. Only
+/// macOS's tests spawn one.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn spawning() -> RwLockReadGuard<'static, ()> {
     LOCK.read().unwrap_or_else(|e| e.into_inner())
 }

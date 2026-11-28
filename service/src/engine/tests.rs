@@ -219,6 +219,7 @@ async fn settled(engine: &Engine) {
 
 /// Waits until the engine's file watcher reports a change under `folder`: FSEvents starts
 /// watching a moment after it's asked to. A file is made and removed there until a report comes.
+#[cfg(target_os = "macos")]
 async fn watching(engine: &Engine, folder: &Path) {
     let probe = folder.join(".watched");
     for _ in 0..100 {
@@ -226,6 +227,28 @@ async fn watching(engine: &Engine, folder: &Path) {
         std::fs::write(&probe, b"").unwrap();
         std::fs::remove_file(&probe).unwrap();
         // The watcher gathers events for `files::DEBOUNCE` before it reports them.
+        for _ in 0..100 {
+            if engine.inspect(move |a| a.changes_seen > seen).await {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+    panic!("the watcher never reported a change under {}", folder.display());
+}
+
+/// Waits until the engine's file watcher reports a change under `folder`. Elsewhere than macOS
+/// (inotify) a file made and removed at once is no change the watcher reports (its folder's own
+/// isn't one): the file is made, and removed once the watcher has gathered that.
+#[cfg(not(target_os = "macos"))]
+async fn watching(engine: &Engine, folder: &Path) {
+    let probe = folder.join(".watched");
+    for _ in 0..20 {
+        let seen = engine.inspect(|a| a.changes_seen).await;
+        std::fs::write(&probe, b"").unwrap();
+        // Past the watcher's `files::DEBOUNCE` (250 ms): the file made is gathered alone.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::fs::remove_file(&probe).unwrap();
         for _ in 0..100 {
             if engine.inspect(move |a| a.changes_seen > seen).await {
                 return;
@@ -2394,11 +2417,14 @@ mod add_source_is_accepted {
     }
 }
 
-/// A disk image, mounted in `dir` out of Finder's sight, and detached when dropped.
+/// A disk image, mounted in `dir` out of Finder's sight, and detached when dropped. macOS only:
+/// `hdiutil` makes it.
+#[cfg(target_os = "macos")]
 struct SmallDisk {
     mount: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl SmallDisk {
     /// 4 MB of HFS+.
     fn new(dir: &Path) -> Self {
@@ -2427,6 +2453,7 @@ impl SmallDisk {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for SmallDisk {
     fn drop(&mut self) {
         let _spawning = crate::spawn_lock::spawning();
@@ -2438,6 +2465,8 @@ impl Drop for SmallDisk {
 /// snapshot warns of both the disk and the torrent (it alone needs more than is free); the add
 /// isn't refused; and once the disk is full, the torrent is an Error saying so, the path a full
 /// disk takes (#127).
+// macOS only: the disk is an image `hdiutil` makes.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_torrent_bigger_than_its_disk_is_warned_of_then_fails_when_the_disk_is_full() {
     let dir = temp();
@@ -2469,7 +2498,9 @@ async fn a_torrent_bigger_than_its_disk_is_warned_of_then_fails_when_the_disk_is
     engine.stop().await;
 }
 
-/// A .torrent file of one file, `name`, of `len` bytes in 1 MiB pieces, that no one seeds.
+/// A .torrent file of one file, `name`, of `len` bytes in 1 MiB pieces, that no one seeds. For the
+/// disk images' tests, macOS only.
+#[cfg(target_os = "macos")]
 fn torrent_file_of(name: &str, len: u64) -> AddSource {
     let pieces = len.div_ceil(1 << 20) as usize;
     let mut info = format!("d6:lengthi{len}e4:name{}:{name}12:piece lengthi1048576e6:pieces{}:", name.len(), 20 * pieces).into_bytes();
@@ -2506,6 +2537,8 @@ async fn eventually(secs: u64, mut done: impl FnMut() -> bool) -> bool {
 /// initialises a torrent, which takes the whole of it there (on APFS, nothing). Once it has, the
 /// torrent needs nothing more and the disk's free space is down by the file: what's free after it
 /// downloads (free less needs) is what it was less the file once, not twice (#127).
+// macOS only: the disk is an image `hdiutil` makes.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_preallocated_file_is_counted_once_on_hfs_and_exfat() {
     const SIZE: u64 = 16 << 20;
@@ -2643,6 +2676,8 @@ async fn a_stalled_disk_shows_its_free_space_unknown_and_never_holds_up_the_engi
 /// Free space follows the disk (#127): generated writes and deletes on a real disk (APFS, so the
 /// torrent's file is sparse and it needs space there all along), and after each the snapshot's
 /// free space for that disk comes to what statfs says.
+// macOS only: the disk is an image `hdiutil` makes.
+#[cfg(target_os = "macos")]
 #[test]
 fn the_free_space_shown_follows_writes_and_deletes_on_the_disk() {
     use proptest::prelude::*;

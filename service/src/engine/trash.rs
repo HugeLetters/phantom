@@ -71,8 +71,8 @@ pub fn identity(path: &Path) -> Option<Identity> {
     Some(Identity { dev: m.dev(), ino: m.ino(), file })
 }
 
-/// The Trash in Finder, through `NSFileManager trashItemAtURL`, in an autorelease pool of its own:
-/// it runs on a blocking thread, which has none.
+/// The system's Trash ([`crate::platform::trash`]: Finder's on macOS, through `NSFileManager
+/// trashItemAtURL`).
 pub fn system() -> Trash {
     Arc::new(System)
 }
@@ -81,38 +81,23 @@ struct System;
 
 impl Bin for System {
     fn take(&self, path: &Path) -> Result<Option<PathBuf>, KeptWhy> {
-        objc2::rc::autoreleasepool(|_| to_trash(path))
+        crate::platform::trash(path)
     }
 
     fn give_back(&self, from: &Path, to: &Path) -> Result<(), String> {
-        rename_free(from, to)
+        rename_free(from, to)?;
+        crate::platform::untrashed(from);
+        Ok(())
     }
 }
 
-/// Renames `from` to `to` only if nothing is at `to` (`renamex_np` with `RENAME_EXCL`): the check
+/// Renames `from` to `to` only if nothing is at `to` ([`crate::platform::rename_excl`]): the check
 /// and the move are one step, so nothing put there meanwhile is replaced.
 pub fn rename_free(from: &Path, to: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|e| e.to_string());
     let (from, to) = (c(from)?, c(to)?);
-    // SAFETY: two NUL-terminated paths that live through the call.
-    match unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } {
-        0 => Ok(()),
-        _ => Err(std::io::Error::last_os_error().to_string()),
-    }
-}
-
-/// Moves `path` to the Trash in Finder; where it went. A volume with no Trash says so
-/// (`NSFeatureUnsupportedError`).
-fn to_trash(path: &Path) -> Result<Option<PathBuf>, KeptWhy> {
-    use objc2_foundation::{NSFeatureUnsupportedError, NSFileManager, NSURL};
-    let failed = |detail: String| KeptWhy::Failed { detail };
-    let url = NSURL::from_file_path(path).ok_or_else(|| failed(format!("not a file path: {}", path.display())))?;
-    let mut moved = None;
-    NSFileManager::defaultManager()
-        .trashItemAtURL_resultingItemURL_error(&url, Some(&mut moved))
-        .map_err(|e| if e.code() == NSFeatureUnsupportedError { KeptWhy::NoTrash } else { failed(e.localizedDescription().to_string()) })?;
-    Ok(moved.and_then(|u| u.to_file_path()))
+    crate::platform::rename_excl(&from, &to).map_err(|e| e.to_string())
 }
 
 /// Files Finder leaves in folders it shows: a folder of only these counts as empty.
@@ -1196,8 +1181,7 @@ mod tests {
         assert!(plan(&path, std::slice::from_ref(&path), true).items.is_empty());
     }
 
-    /// An example, not generated: the real Trash, which only macOS has. It touches the user's
-    /// Trash, so it runs on request: `cargo test -p service -- --ignored system_trash`.
+    /// An example, not generated: the real Trash. It touches the user's Trash, so it runs on request: `cargo test -p service -- --ignored system_trash`.
     #[test]
     #[ignore = "uses the user's Trash; run by hand"]
     fn the_system_trash_takes_a_file_away() {
@@ -1233,7 +1217,12 @@ mod tests {
             let folder = root.path().join("A");
             let files = vec![folder.join("x"), folder.join("sub/y")];
             files.iter().for_each(|f| write(f));
-            let own = Own { kept: if kept { vec![root.path().join("a/sub")] } else { Vec::new() }, ..own(&files) };
+            // In another case on macOS, whose drive (APFS) ignores case; elsewhere spelled so.
+            #[cfg(target_os = "macos")]
+            let sub = "a/sub";
+            #[cfg(not(target_os = "macos"))]
+            let sub = "A/sub";
+            let own = Own { kept: if kept { vec![root.path().join(sub)] } else { Vec::new() }, ..own(&files) };
             let trash = into(root.path().join("trash"), Arc::default(), Arc::default());
             let moved = carry_out(&plan(&folder, &files, false), &trash, |_| {}).moved;
             let in_trash = contents(&root.path().join("trash"));

@@ -743,6 +743,8 @@ mod tests {
         let name = "Phantom test drive that isn't there".to_owned();
         assert_eq!(unavailable(drive), Some(Unavailable::DriveNotConnected { name }));
         assert!(!drive.parent().unwrap().exists(), "and nothing was made");
+        // macOS only: its internal disk is linked at `/Volumes/Macintosh HD`.
+        #[cfg(target_os = "macos")]
         assert_eq!(unavailable(&abs(Path::new("/Volumes/Macintosh HD/tmp"))), None, "the internal disk, by its link");
         assert_eq!(disconnected_drive(Path::new("/Users/x/Volumes/y")), None);
     }

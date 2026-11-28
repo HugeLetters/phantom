@@ -8,12 +8,14 @@ pub mod machine;
 
 use std::sync::Mutex;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use machine::{Assertion, Command, Do, Event, Observed, State};
+
+use crate::platform;
 
 /// The handle: every call is a message to the actor's task.
 pub struct KeepAwake {
@@ -99,78 +101,44 @@ impl<P: Power> Core<P> {
     }
 }
 
-/// Where the assertion is held: macOS ([`MacOs`]), or a pretend one in tests.
+/// Where the assertion is held: the system's ([`System`]), or a pretend one in tests.
 pub trait Power {
     fn hold(&mut self) -> Result<()>;
     fn release(&mut self);
 }
 
-/// macOS's power assertion, through IOKit; released when dropped, and by macOS when the process
-/// ends.
+/// The system's power assertion ([`crate::platform::prevent_idle_sleep`]: IOKit's on macOS);
+/// released when dropped, and by the system when the process ends.
 #[derive(Default)]
-pub struct MacOs {
-    /// The assertion's id, while held.
-    held: Option<u32>,
+pub struct System {
+    /// The assertion, while held.
+    held: Option<platform::Assertion>,
 }
 
 /// What `pmset -g assertions` and Activity Monitor show as the reason.
 const NAME: &str = "Phantom is downloading";
 
-impl Power for MacOs {
+impl Power for System {
     fn hold(&mut self) -> Result<()> {
         if self.held.is_some() {
             return Ok(());
         }
-        let id = iokit::prevent_idle_sleep(NAME)?;
-        self.held = Some(id);
+        self.held = Some(platform::prevent_idle_sleep(NAME)?);
         Ok(())
     }
 
     fn release(&mut self) {
-        if let Some(id) = self.held.take()
-            && let Err(e) = iokit::release(id)
+        if let Some(held) = self.held.take()
+            && let Err(e) = platform::release(held)
         {
             warn!(error = %e, "can't release the power assertion");
         }
     }
 }
 
-impl Drop for MacOs {
+impl Drop for System {
     fn drop(&mut self) {
         self.release();
-    }
-}
-
-/// The two IOKit calls, from `objc2-io-kit`: `IOPMAssertionCreateWithName` and
-/// `IOPMAssertionRelease` (`IOKit/pwr_mgt/IOPMLib.h`).
-mod iokit {
-    use objc2_core_foundation::CFString;
-    use objc2_io_kit::{IOPMAssertionCreateWithName, IOPMAssertionID, IOPMAssertionRelease, kIOPMAssertionLevelOn};
-
-    use super::{Result, bail};
-
-    /// `kIOReturnSuccess`.
-    const SUCCESS: i32 = 0;
-
-    /// Holds `kIOPMAssertionTypePreventUserIdleSystemSleep` under `name`: its id.
-    pub fn prevent_idle_sleep(name: &str) -> Result<u32> {
-        let kind = CFString::from_static_str("PreventUserIdleSystemSleep");
-        let name = CFString::from_str(name);
-        let mut id: IOPMAssertionID = 0;
-        // SAFETY: both strings live through the call, and `id` is a valid place for the id.
-        let returned = unsafe { IOPMAssertionCreateWithName(Some(&kind), kIOPMAssertionLevelOn, Some(&name), &mut id) };
-        if returned != SUCCESS {
-            bail!("IOPMAssertionCreateWithName returned {returned:#x}");
-        }
-        Ok(id)
-    }
-
-    pub fn release(id: u32) -> Result<()> {
-        let returned = IOPMAssertionRelease(id);
-        if returned != SUCCESS {
-            bail!("IOPMAssertionRelease returned {returned:#x}");
-        }
-        Ok(())
     }
 }
 
@@ -178,6 +146,7 @@ mod iokit {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use anyhow::bail;
     use proptest::prelude::*;
 
     use super::*;
@@ -281,7 +250,8 @@ mod tests {
     }
 
     /// macOS itself, which can't be generated: the assertion is listed under this process while
-    /// held, and gone once released.
+    /// held, and gone once released. macOS only: `pmset` lists IOKit's assertions.
+    #[cfg(target_os = "macos")]
     #[test]
     fn macos_lists_the_assertion_while_held() {
         let listed = || {
@@ -292,7 +262,7 @@ mod tests {
                 .lines()
                 .any(|l| l.contains(&pid) && l.contains("PreventUserIdleSystemSleep") && l.contains(NAME))
         };
-        let mut power = MacOs::default();
+        let mut power = System::default();
         power.hold().unwrap();
         assert!(listed(), "held");
         power.release();

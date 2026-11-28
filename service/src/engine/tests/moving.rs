@@ -638,6 +638,17 @@ pub(super) async fn album(dir: &Path, name: &str, seed: usize) -> AddSource {
     let bytes: Vec<u8> = (0..2 * PIECE).map(|n| (n * 7 + seed * 31 + n / PIECE) as u8).collect();
     std::fs::write(folder.join("x.bin"), bytes.clone()).unwrap();
     std::fs::write(folder.join("y.bin"), bytes.iter().rev().copied().collect::<Vec<u8>>()).unwrap();
+    // The torrent lists its files as the folder does, which tests take to be `x.bin` first: APFS
+    // lists by name; elsewhere, written again the other way round if the folder lists `y.bin` first
+    // (tmpfs lists the newest first).
+    #[cfg(not(target_os = "macos"))]
+    if std::fs::read_dir(&folder).unwrap().next().unwrap().unwrap().file_name() == "y.bin" {
+        let (x, y) = (std::fs::read(folder.join("x.bin")).unwrap(), std::fs::read(folder.join("y.bin")).unwrap());
+        std::fs::remove_file(folder.join("x.bin")).unwrap();
+        std::fs::remove_file(folder.join("y.bin")).unwrap();
+        std::fs::write(folder.join("y.bin"), y).unwrap();
+        std::fs::write(folder.join("x.bin"), x).unwrap();
+    }
     let options = librqbit::CreateTorrentOptions {
         name: None,
         trackers: vec!["http://127.0.0.1:1/announce".into()],
@@ -1540,6 +1551,8 @@ async fn a_free_name_gives_up_past_the_cap() {
 
 /// The fifth review's probe (#270): a torrent whose folder is gone, spelled decomposed (`Cafe` and
 /// U+0301), still holds its place against one spelled composed (`café`).
+// macOS only: APFS keeps one name for both Unicode forms; Linux's drives tell them apart.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_gone_folder_is_the_same_place_in_another_unicode_form() {
     let dir = temp();

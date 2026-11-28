@@ -474,6 +474,8 @@ async fn a_folder_made_at_the_new_name_while_it_renames_is_not_merged_into() {
 /// #335 review: names are told apart as the drive does, by their letters and not how they're
 /// encoded: another torrent's place in the other Unicode form is taken too (nothing on disk), and
 /// a rename to its own name in the other form is refused as that, not as a case.
+// macOS only: APFS keeps one name for both Unicode forms; Linux's drives tell them apart.
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_name_differing_only_in_unicode_form_is_the_same_name() {
     let (nfc, nfd) = ("Caf\u{e9}", "Cafe\u{301}");
