@@ -736,12 +736,12 @@ pub fn decide(s: &State, event: &Event) -> Result<State, Refusal> {
         ) => stays(),
         // Its files can be size-checked again: the destination is back. Those known missing as it
         // went are judged as missing files are: a check would take what's at their paths for its own
-        // (#464). Else checked, but librqbit would write into a file of a size it can't have: that's
-        // Missing files (#374). One not there is made again by the check.
+        // (#464). Else checked, but a file it had or noted that isn't there, or one of a size it can't
+        // have, is Missing files, as with the destination there (#374, #385). One never had nor
+        // noted is made as it starts.
         (P::DestinationUnavailable { gone, .. }, Observed(O::Files(disk))) if !gone.is_empty() => phase(missing_files(gone, disk)),
         (P::DestinationUnavailable { .. }, Observed(O::Files(disk))) => {
-            let gone = found_missing(disk).filter(|_| disk.any_impossible());
-            phase(gone.map_or_else(check_due, |gone| P::MissingFiles { gone }))
+            phase(found_missing(disk).map_or_else(check_due, |gone| P::MissingFiles { gone }))
         }
         (P::DestinationUnavailable { gone, .. }, Observed(O::DestinationGone { reason })) => phase(away(reason, gone)),
 
@@ -1272,22 +1272,18 @@ mod tests {
             Row {
                 says: "a size check: files gone make it Missing files, set Off or not judged yet are dropped or judged, all back is checked; \
                        a check catches them itself, and Unchecked stays so; the destination back judges the files known missing \
-                       as it went as Missing files does (#464), else it's checked, unless a file there is of a size it can't have: \
-                       Missing files",
+                       as it went as Missing files does (#464), else it's checked, unless a file it had or noted isn't there, \
+                       or one there is of a size it can't have: Missing files (#385)",
                 when: |s, e| active(&s.phase) && !partly(&s.phase) && matches!(observed(e), Some(Observation::Files(_))),
                 then: |s, e, r| {
                     let Some(Observation::Files(disk)) = observed(e) else { unreachable!() };
                     match &s.phase {
                         Phase::CheckDue { .. } | Phase::Checking { .. } | Phase::Unchecked { .. } => stays(s, r),
                         Phase::DestinationUnavailable { gone, .. } if !gone.is_empty() => becomes(s, r, after_size_check(gone, disk)),
-                        Phase::DestinationUnavailable { .. } => {
-                            let wrong =
-                                |f: &disk::Found| f.at.is_some_and(|at| at.len > f.file.size_bytes || at.len < f.file.progress_bytes);
-                            match disk.files.values().any(wrong) {
-                                true => becomes(s, r, after_size_check(&BTreeMap::new(), disk)),
-                                false => becomes(s, r, check_due()),
-                            }
-                        }
+                        Phase::DestinationUnavailable { .. } => match after_size_check(&BTreeMap::new(), disk) {
+                            Phase::Ready => becomes(s, r, check_due()),
+                            phase => becomes(s, r, phase),
+                        },
                         Phase::MissingFiles { gone } => becomes(s, r, after_size_check(gone, disk)),
                         // A file found missing now is what's there now: it isn't back.
                         _ => match after_size_check(&BTreeMap::new(), disk) {

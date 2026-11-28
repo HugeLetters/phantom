@@ -15,6 +15,7 @@ use proto::{AbsolutePath, CantUndo, Priority, TorrentId, UndoAction, Undoable};
 use tracing::warn;
 
 use super::super::machine::letgo;
+use super::super::notes::{Identity, Why};
 use super::super::store::{Info, Record, Saved};
 use super::super::undo::machine::{Phase as StepPhase, What};
 use super::super::undo::{self, Back, Entry, Source, Stash};
@@ -229,6 +230,9 @@ impl Actor {
         }
         // Kept for it from before it's checked till it's over, whatever comes meanwhile (#371).
         self.reserve(&entry);
+        // A file its storage made since it last asked (a stub a write made of a trashed file) is
+        // noted first: else it's taken for a person's, and the undo refused (PathTaken).
+        self.note_made(id);
         let refused = match self.can_undo(&entry) {
             Err(why) => Some(refused(entry.undoable(of), why, Vec::new())),
             Ok(()) => self.take_out_for_undo(seq, &entry).await.err(),
@@ -399,12 +403,13 @@ impl Actor {
         let Back::Files { previous, .. } = &entry.back else { return trash::Copies::default() };
         let Some(t) = self.by_hash(&entry.info_hash).filter(|t| t.id == entry.id) else { return trash::Copies::default() };
         let Some(location) = t.record.location() else { return trash::Copies::default() };
-        let trashed = self.guard.trashed();
-        let (made, replaced) = (trashed.writable(&entry.info_hash), trashed.replaced(&entry.info_hash));
-        let own = |i: usize| made.contains(&i) && !replaced.contains(&i);
+        // Its note says Phantom made the file at the path (#374): after a restart too.
+        let own = |i: usize, path: &std::path::Path| {
+            t.record.notes.get(&i).is_some_and(|n| n.why == Why::Made && Identity::at(path).is_some_and(|at| n.file.is(&at)))
+        };
         let files = previous
             .iter()
-            .filter(|(i, _, path)| own(*i) && left.iter().any(|item| path.starts_with(&item.from)))
+            .filter(|(i, _, path)| own(*i, path) && left.iter().any(|item| path.starts_with(&item.from)))
             .filter(|(_, _, path)| files::stamp(path).is_some())
             .map(|(_, _, path)| path.clone())
             .collect::<Vec<PathBuf>>();
@@ -469,6 +474,8 @@ impl Actor {
         // The torrent's own new copies (#276). Written into the step before anything moves, so a
         // crash finds the fact and which copies; resumed, only those whose old copy is still in the
         // Trash count, so one put back before the crash is never taken for a copy.
+        // What its storage made since is noted first.
+        self.note_made(id);
         let copies = match (&entry.back, resumed) {
             (Back::Files { replacing, .. }, true) => self.copies_named(&entry, replacing, &trash::still_in_trash(&items)),
             (Back::Files { .. }, false) => self.new_copies(&entry, &items),

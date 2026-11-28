@@ -39,8 +39,8 @@ through DHT, just more slowly. A magnet link can name trackers (`tr=`).
 **Status**:
 What a torrent is doing right now; exactly one of **Fetching info**, **Checking** (verifying
 files already on disk), **Unchecked** (a check was cancelled), **Downloading**, **Seeding**, **Paused** (incomplete), **Done**
-(complete and paused, or stopped at a seeding limit), **Missing files** (files it had downloaded are gone from disk; resuming
-downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
+(complete and paused, or stopped at a seeding limit), **Missing files** (files it had downloaded, or that Phantom made
+or checked, are gone from disk, also when its destination comes back without them; resuming downloads them again), **Destination unavailable** (its destination can't be reached, e.g. the
 drive isn't connected), **Moving** (its files are being moved to a new destination) or **Error**.
 A torrent whose Delete is under way isn't listed: it has no status.
 _Avoid_: state, resolving, initializing, live

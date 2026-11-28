@@ -208,7 +208,12 @@ impl Actor {
     /// `event` for torrent `id`'s let-go, kept in its record before anything follows from it.
     fn letting_go(&mut self, id: TorrentId, event: &letgo::Event) -> letgo::State {
         let Some(torrent) = self.torrents.get_mut(&id) else { return letgo::State::Holding };
-        torrent.record.letting_go = letgo::decide(&torrent.record.letting_go, event);
+        match event {
+            letgo::Event::Found(pieces) => torrent.record.let_go(pieces.clone()),
+            letgo::Event::Stashed(_) | letgo::Event::Cleared | letgo::Event::Failed => {
+                torrent.record.letting_go = letgo::decide(&torrent.record.letting_go, event);
+            }
+        }
         let now = torrent.record.letting_go.clone();
         self.save();
         now
@@ -296,7 +301,7 @@ fn off_gone_at_start(record: &mut Record, saved: &Path) {
         .map(|(i, f)| (i, (f.pieces.start, f.pieces.end)))
         .collect();
     if !pieces.is_empty() {
-        record.letting_go = letgo::decide(&record.letting_go, &letgo::Event::Found(pieces));
+        record.let_go(pieces);
     }
 }
 

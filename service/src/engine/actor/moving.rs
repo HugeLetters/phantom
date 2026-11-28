@@ -46,6 +46,7 @@ use tracing::warn;
 
 use super::super::files::Destination;
 use super::super::moving::{self, Refused, Restored, Stop};
+use super::super::notes::Identity;
 use super::super::store::{Moving, Names};
 use super::super::undo::{Back, Entry};
 use super::super::{Failure, bitv};
@@ -739,6 +740,19 @@ impl Actor {
             Stage::RemovingOld { adopted } => adopted.clone(),
             Stage::TakingOut | Stage::Copying { .. } | Stage::Restoring { .. } => BTreeSet::new(),
         };
+        // Its notes follow its files to where they are now (#374): a copy is another file, the
+        // torrent's as the one it was made from. Not one replaced by hand, nor one taken as it was
+        // there: it's checked in full, which notes what it reads. One not there keeps its note: it's
+        // missing there.
+        // After a restart only the record says any was replaced, not which: none is the torrent's then.
+        let all = torrent.record.moving.as_ref().is_some_and(|m| m.replaced) && mover.replaced.is_empty();
+        let paths = torrent.record.paths();
+        torrent.record.notes.retain(|i, _| !all && !adopted.contains(i) && !mover.replaced.contains(i));
+        for (i, note) in torrent.record.notes.iter_mut() {
+            if let Some(at) = paths.get(*i).and_then(|p| Identity::at(p)) {
+                note.file = at;
+            }
+        }
         let before = torrent.lifecycle.phase.clone();
         torrent.lifecycle = super::decide(&torrent.lifecycle, &moved(stages::Event::Ended)).expect("never refused");
         super::track_uncounted(&mut torrent.polled.uncounted, &before, &torrent.lifecycle.phase);

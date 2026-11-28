@@ -260,7 +260,8 @@ struct Message {
 struct Torrent {
     state: State,
     librqbit: Pretend,
-    /// What's at each file's path, by index: `None`, nothing.
+    /// What's at each file's path, by index: `None`, nothing. A file named here was made or given
+    /// at its path, which the engine's note of it says (#374).
     on_disk: BTreeMap<usize, Option<Stamp>>,
     /// Why its destination can't be reached, while it can't.
     unavailable: Option<Unavailable>,
@@ -975,7 +976,14 @@ impl MemoryService {
             let file = Expected { index: f.index, path: f.path.clone(), size_bytes: f.size_bytes, progress_bytes: f.progress_bytes };
             // One the pretend disk had is the torrent's, open for writing as the engine's are.
             let found = lifecycle::disk::Found::of(file, m.on_disk.get(&f.index).copied().flatten());
-            (f.index, lifecycle::disk::Found { open: m.on_disk.contains_key(&f.index), ..found })
+            // A file it made or was given at its path is noted, as the engine's (#374): one noted and
+            // gone is missing, whatever was had of it (#385).
+            let noted = match m.on_disk.get(&f.index) {
+                None => lifecycle::disk::Noted::None,
+                Some(Some(_)) => lifecycle::disk::Noted::Same,
+                Some(None) => lifecycle::disk::Noted::Differs,
+            };
+            (f.index, lifecycle::disk::Found { noted, ..found })
         });
         Some(Observation::Files(Found { files: found.collect() }))
     }

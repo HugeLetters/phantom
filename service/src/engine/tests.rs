@@ -4822,6 +4822,41 @@ async fn the_undo_of_a_move_to_trash_sends_phantoms_own_stub_to_the_trash_then_c
     }
 }
 
+/// #374: the stub above, made by a write since the last size check, is noted Made before the undo
+/// asks whether its path is taken: never refused as a person's file (PathTaken). No size check
+/// runs meanwhile here, as none may under load.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_undo_of_a_move_to_trash_takes_a_stub_made_since_the_last_size_check_for_phantoms_own() {
+    let dir = temp();
+    let seeded = dir.path().join("seed/pack");
+    std::fs::create_dir_all(&seeded).unwrap();
+    for (name, byte) in [("a.bin", 3u8), ("b.bin", 5)] {
+        std::fs::write(seeded.join(name), (0..24576usize).map(|n| (n % 241) as u8 ^ byte).collect::<Vec<u8>>()).unwrap();
+    }
+    let (_seeder, torrent, _, _) = seed(dir.path(), &seeded, 16384).await;
+    let mut engine = engine(dir.path()).await;
+    let id = add(&engine, &dir.path().join("downloads"), AddSource::TorrentFile(torrent), false).await.unwrap().id;
+    wait_for(&engine, id, Status::Seeding).await;
+    let files = engine.details(id).await.unwrap().files;
+    let pack = dir.path().join("downloads/pack");
+    let (first, second) = (pack.join(files[0].path.file_name().unwrap()), pack.join(files[1].path.file_name().unwrap()));
+    engine.command(id, TorrentCommand::Pause).await.unwrap();
+    std::fs::remove_file(&second).unwrap();
+    engine.command(id, TorrentCommand::Check).await.unwrap();
+    until(&engine, id, |s| !matches!(s, Status::Checking | Status::Seeding | Status::Done { .. })).await;
+    engine.command(id, TorrentCommand::TrashFiles { files: vec![0] }).await.unwrap();
+    engine.stop().await;
+    engine = engine_size_checking_every(dir.path(), Duration::from_secs(3600)).await;
+    engine.command(id, TorrentCommand::Resume).await.unwrap();
+    wait_for(&engine, id, Status::Seeding).await;
+    assert!(first.exists(), "a stub of the piece it shares");
+    let undone = engine.undo().await;
+    assert!(undone.is_ok(), "{undone:?}");
+    let trashed: Vec<PathBuf> = std::fs::read_dir(dir.path().join("trash")).unwrap().flatten().map(|e| e.path()).collect();
+    assert_eq!(trashed.len(), 1, "the stub is in the Trash: {trashed:?}");
+    engine.stop().await;
+}
+
 /// #374: a shared piece got for a file set Off (at its path, so read only) that can't be kept in the
 /// data dir (here a folder it can't write into; a full disk alike) fails librqbit's write: the
 /// torrent stops with Error, as for any failed write, and nothing is counted that wasn't kept.
@@ -5509,6 +5544,7 @@ async fn send_end(engine: &Engine, id: u64, task: tokio::task::Id, added: anyhow
     engine.inspect(|_| ()).await;
 }
 
+mod absent_file;
 mod checks;
 mod counted;
 mod crashed;
@@ -5516,6 +5552,7 @@ mod letgo;
 mod links;
 mod moving;
 mod never_cut;
+mod notes;
 mod off_gone;
 mod open_files;
 mod oracle;

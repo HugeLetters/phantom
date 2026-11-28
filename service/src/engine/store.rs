@@ -33,6 +33,7 @@ use tracing::warn;
 
 use super::files::{Gone, Seen, Stamp};
 use super::machine::{Wants, letgo};
+use super::notes::Note;
 use super::trash::Trashed;
 use super::undo::Stash;
 
@@ -159,6 +160,10 @@ pub struct Saved {
     /// one past the point where `destination` names the new one, and restores one before it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moving: Option<Moving>,
+    /// Which file at each path is the torrent's, by index, and why (#374, [`Note`]): saved with the
+    /// rest of the record, so it outlasts a restart, and kept with it for Undo.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub notes: BTreeMap<usize, Note>,
 }
 
 /// A missing file, as the record keeps it.
@@ -248,6 +253,7 @@ pub struct Record {
     pub stash: Option<Stash>,
     pub letting_go: letgo::State,
     pub moving: Option<Moving>,
+    pub notes: BTreeMap<usize, Note>,
 }
 
 /// The files a torrent gets (those Normal).
@@ -374,6 +380,7 @@ impl Record {
             stash,
             letting_go,
             moving,
+            notes,
         } = saved;
         let gets = match normal {
             Some(only) => Gets::Only(only),
@@ -399,6 +406,7 @@ impl Record {
             stash,
             letting_go,
             moving,
+            notes,
         }
     }
 
@@ -431,6 +439,7 @@ impl Record {
             stash: None,
             letting_go: letgo::State::Holding,
             moving: None,
+            notes: BTreeMap::new(),
         }
     }
 
@@ -457,7 +466,15 @@ impl Record {
             stash: self.stash.clone(),
             letting_go: self.letting_go.clone(),
             moving: self.moving.clone(),
+            notes: self.notes.clone(),
         }
+    }
+
+    /// Lets go of its files `pieces` (`letgo`), written ahead: their notes go, so each is got from
+    /// nothing, not missing, once it's Normal again (#374).
+    pub fn let_go(&mut self, pieces: letgo::Pieces) {
+        self.notes.retain(|i, _| !pieces.contains_key(i));
+        self.letting_go = letgo::decide(&self.letting_go, &letgo::Event::Found(pieces));
     }
 
     /// The files it gets (those Normal), by index; none known before its info.

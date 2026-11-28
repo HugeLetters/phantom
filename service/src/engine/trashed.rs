@@ -11,7 +11,7 @@
 //!
 //! [ADR 0014]: ../../../docs/adr/0014-surprises-stop-check-decides.md
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
@@ -21,6 +21,7 @@ use librqbit::storage::TorrentStorage;
 use librqbit::{ManagedTorrentShared, TorrentMetadata};
 use tracing::warn;
 
+use super::notes::Identity;
 use super::parts::Parts;
 use super::slots::{Granting, Handle, Opened, Refused, Slots};
 use super::trash::{self, Carried, Plan, Trash};
@@ -232,17 +233,18 @@ impl Trashed {
         closed
     }
 
-    /// The files of torrent `info_hash` open for writing, by index: those granted, or made since. Only
-    /// what's in memory, so the actor may ask; one being read or written now counts as it was.
-    pub fn writable(&self, info_hash: &str) -> BTreeSet<usize> {
-        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeSet::new() };
-        let mut open = BTreeSet::new();
-        torrent.slots.each(|index, _, file| {
-            if file.try_read().map_or(true, |opened| matches!(&*opened, Opened::Open(_))) {
-                open.insert(index);
-            }
-        });
-        open
+    /// The files Phantom made of torrent `info_hash` since this was last asked, by index: to be noted
+    /// Made ([`super::notes`]).
+    pub fn take_made(&self, info_hash: &str) -> BTreeMap<usize, Identity> {
+        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeMap::new() };
+        torrent.slots.take_made()
+    }
+
+    /// Which file each of torrent `info_hash`'s storage has open is, by index ([`Slots::identities`]):
+    /// those a check just read, as it ends. Only `fstat`s of what's open, so the actor may ask.
+    pub fn identities(&self, info_hash: &str) -> BTreeMap<usize, Option<Identity>> {
+        let Some(torrent) = self.torrents.lock().unwrap().get(info_hash).cloned() else { return BTreeMap::new() };
+        torrent.slots.identities()
     }
 
     /// Runs `f` while every file of torrent `info_hash` is in use, as by a read or a write of librqbit's.
@@ -476,6 +478,7 @@ impl Files {
                 Err(e) if matches!(e.raw_os_error(), Some(libc::EEXIST | libc::ELOOP)) => return Ok(false),
                 Err(e) => return Err(e).with_context(|| format!("making {path:?}")),
             };
+            self.torrent.slots.was_made(index, &file);
             // What was kept of it, from before it went: in it before anything else.
             self.torrent.slots.parts().write_into(index, &file)?;
             *opened = Opened::Open(file);
@@ -781,7 +784,9 @@ mod tests {
         files.pwrite_all(0, 20, &[2; 10]).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), [[0u8; 20].as_slice(), &[2; 10]].concat(), "made anew at its path");
         assert_eq!(std::fs::read(&away).unwrap(), [1; 100], "the one in the Trash as it went");
-        assert_eq!(trashed.writable("t"), BTreeSet::from([0]), "Phantom's own, open for writing");
+        let made = trashed.take_made("t");
+        assert_eq!(made.keys().copied().collect::<Vec<_>>(), [0], "Phantom's own, to be noted Made");
+        assert!(made[&0].is(&Identity::at(&path).unwrap()), "the one at its path");
     }
 
     /// a granted file (open for writing) a Move to Trash takes is closed too: a late
