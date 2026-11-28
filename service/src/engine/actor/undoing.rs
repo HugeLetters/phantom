@@ -230,6 +230,9 @@ impl Actor {
         }
         // Kept for it from before it's checked till it's over, whatever comes meanwhile (#371).
         self.reserve(&entry);
+        // A file its storage made since it last asked (a stub a write made of a trashed file) is
+        // noted first: else it's taken for a person's, and the undo refused (PathTaken).
+        self.note_made(id);
         let refused = match self.can_undo(&entry) {
             Err(why) => Some(refused(entry.undoable(of), why, Vec::new())),
             Ok(()) => self.take_out_for_undo(seq, &entry).await.err(),

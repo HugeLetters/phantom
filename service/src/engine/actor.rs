@@ -1241,7 +1241,9 @@ impl Actor {
         // leaves it as one that went on would, not missing (#374). One known missing isn't added.
         let gone: Vec<usize> =
             record.normal().into_iter().filter(|i| paths.get(*i).is_some_and(|p| std::fs::symlink_metadata(p).is_err())).collect();
-        if gone.iter().any(|i| record.notes.contains_key(i)) {
+        // Not with its destination gone meanwhile: every file seems gone then, and is missing once
+        // it's back (#385).
+        if gone.iter().any(|i| record.notes.contains_key(i)) && files::unavailable(&record.destination).is_none() {
             let torrent = self.torrents.get_mut(&id).expect("just found");
             torrent.record.notes.retain(|i, _| !gone.contains(i));
             self.save();
