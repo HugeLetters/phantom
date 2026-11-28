@@ -33,6 +33,17 @@
 4. **Checks:** `cargo fmt --check` clean, `cargo build` without warnings and the default suite
    green: `cargo nextest run --workspace`, then `cargo test -p gui --test appkit` (its own
    harness, which nextest can't list; seconds).
+   **How the tests run.** nextest runs every test binary from its own folder,
+   `target/debug/run/<binary>/` (a hard link, relinked after each rebuild: `scripts/own-folder.sh`,
+   set up as a nextest wrapper in `.config/nextest.toml`). A process reads the directory its
+   executable sits in at start (CoreText in the GUI, Foundation in the service), and
+   `target/debug/deps` holds tens of thousands of files: 0.3 s of CPU per GUI test process there,
+   0.04 s from its own folder. Plain `cargo test` still works, from `deps`, without the speedup.
+   Dependencies are built at `opt-level = 2` (`[profile.dev.package."*"]`; our crates stay at 0):
+   about a quarter less CPU for the suite, and the same incremental rebuild time. The price is the
+   first build after a lockfile change (or a clean one), which compiles every dependency optimized:
+   about three times longer, 5 minutes on a loaded machine instead of 2.
+
    Run them in the foreground with a long timeout: a background job can't wake you, so a turn
    that ends while one runs leaves the work unfinished. Wrap long runs in
    `scripts/with-timeout.sh <seconds> <command>` (macOS has no `timeout`): it kills the whole

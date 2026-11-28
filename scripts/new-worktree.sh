@@ -4,8 +4,9 @@
 # Creates ../phantom-<slug> on branch <issue>-<slug> (from origin/master; an existing branch is
 # checked out as it is), then seeds its target/ from the main checkout's with an APFS clone
 # (`cp -cR`: instant, shares blocks until written), so the first build doesn't compile every
-# dependency from scratch. Safe to rerun: an existing worktree is kept, an existing target/ is
-# never overwritten.
+# dependency from scratch (an optimized dependency build, `opt-level = 2`, takes minutes: the clone
+# only helps while Cargo.lock and the profiles match master's). Safe to rerun: an existing worktree
+# is kept, an existing target/ is never overwritten.
 #
 # `target` is a link to `target.noindex`: Spotlight skips a folder whose name ends in `.noindex`,
 # and indexing every build's files loaded the machine (`.metadata_never_index` no longer works

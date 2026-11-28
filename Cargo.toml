@@ -31,8 +31,12 @@ accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "2f1
 # No debug info for dependencies: it was most of `target/`, and we don't step into them. Our own
 # crates keep it. To debug into a dependency, build with
 # `--config 'profile.dev.package."*".debug=true'`.
+#
+# Dependencies are built at opt-level 2 (our own crates stay at 0): tests and dev runs spend their
+# time in them (Rune, SQLite, librqbit), and it cut the suite's CPU by about a quarter.
 [profile.dev.package."*"]
 debug = false
+opt-level = 2
 
 # The GUI tests spend their time in Rune, 5× faster optimized (#194). Rune's crates alone aren't
 # enough: its generic runtime, `Runtime<Phantom>`, is compiled in `gui`. Tests only; debug
