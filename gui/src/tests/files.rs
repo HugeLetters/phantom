@@ -155,7 +155,7 @@ fn selection() -> impl Strategy<Value = (usize, usize)> {
     (0..3usize).prop_flat_map(|start| (Just(start), 1..=3 - start))
 }
 
-cases::proptest! {
+proptest! {
     #![proptest_config(config())]
 
     /// The menu offers exactly what its selection allows, each hint is its command's, and a

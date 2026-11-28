@@ -1945,7 +1945,6 @@ name = "gui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cases",
  "client",
  "lifecycle",
  "machine",

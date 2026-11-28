@@ -401,7 +401,7 @@ fn config() -> Config {
     Config { cases, ..Config::default() }
 }
 
-cases::proptest! {
+proptest! {
     #![proptest_config(config())]
 
     #[test]
@@ -442,7 +442,7 @@ fn inside(inner: [f32; 4], outer: [f32; 4]) -> bool {
         && inner[1] + inner[3] <= outer[1] + outer[3] + 0.5
 }
 
-cases::proptest! {
+proptest! {
     #![proptest_config(Config { cases: 16, ..config() })]
 
     /// However many notices and whatever the window, down to the smallest (640×320): each notice,
@@ -490,7 +490,7 @@ cases::proptest! {
     }
 }
 
-cases::proptest! {
+proptest! {
     #![proptest_config(Config { cases: 16, ..config() })]
 
     /// Whatever the newest notice's line (up to the longest Phantom writes) and however wide the window
@@ -531,7 +531,7 @@ cases::proptest! {
     }
 }
 
-cases::proptest! {
+proptest! {
     #![proptest_config(Config { cases: 16, ..config() })]
 
     /// However many errors, however long their lists and whatever the window (down to 640×320),

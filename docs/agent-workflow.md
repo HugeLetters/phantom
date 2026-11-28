@@ -76,8 +76,10 @@
    - A test's independent cases, each with its own temp dir and engine, run side by side
      (`side_by_side(width, cases, run)` in the engine tests), not in a loop: each engine's stop
      alone waits librqbit's 1 s.
-   - A property test whose cases start an engine or render the GUI uses `cases::proptest!` or
-     `cases::prop_state_machine!` (same form as proptest's): its cases run on several runners.
+   - A property test whose cases start an engine, and so mostly wait, uses `cases::proptest!` or
+     `cases::prop_state_machine!` (same form as proptest's): its cases run on several runners. One
+     whose cases compute (the GUI's, rendering) keeps proptest's own: nextest already runs as
+     many tests as there are cores, and more runners only cost CPU (the GUI's took a third more).
    - Use the existing small fixtures (`complete_torrent`, `multi_file_torrent`, 16 KiB pieces)
      rather than new large files.
 

@@ -175,7 +175,7 @@ fn config() -> Config {
     Config { cases, ..Config::default() }
 }
 
-cases::proptest! {
+proptest! {
     #![proptest_config(config())]
 
     #[test]

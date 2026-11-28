@@ -1,5 +1,5 @@
-//! Property tests whose cases are slow (each runs an engine that mostly waits, or renders the GUI):
-//! their cases run side by side, on several runners. [`proptest!`] and [`prop_state_machine!`] take
+//! Property tests whose cases are slow because they wait (each runs an engine): their cases run
+//! side by side, on several runners. Not for cases that compute: those gain no time, and cost CPU. [`proptest!`] and [`prop_state_machine!`] take
 //! the form of proptest's macros of those names; [`side_by_side`] is what they run.
 
 use proptest::strategy::Strategy;

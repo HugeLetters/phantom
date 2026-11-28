@@ -176,7 +176,7 @@ fn the_pane_is_as_tall_as_its_content_at_a_fractional_height() {
     pane_is_as_tall_as_its_content(640.0, 371.4992, 1).unwrap();
 }
 
-cases::proptest! {
+proptest! {
     #![proptest_config(ProptestConfig { cases: std::env::var("PROPTEST_CASES").ok().and_then(|c| c.parse().ok()).unwrap_or(12).min(64), ..ProptestConfig::default() })]
 
     /// At any width the window can have and in any order, the columns shown are the start of the

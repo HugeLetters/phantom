@@ -39,7 +39,6 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 [dev-dependencies]
 lifecycle = { workspace = true, features = ["harness"] }
 machine = { workspace = true, features = ["harness"] }
-cases.workspace = true
 proptest = "1.12"
 proptest-state-machine = "0.9"
 tempfile = "3"
