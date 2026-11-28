@@ -31,7 +31,7 @@ use parking_lot::RwLock;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 use tokio_stream::StreamExt;
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use tracing::debug;
 use tracing::debug_span;
 use tracing::trace;
@@ -190,6 +190,8 @@ pub struct ManagedTorrentShared {
     pub(crate) connector: Arc<StreamConnector>,
     pub(crate) storage_factory: BoxStorageFactory,
     pub(crate) session: Weak<Session>,
+    // The session's tasks (`Session::stop` waits for them).
+    pub(crate) tasks: TaskTracker,
 
     // "dn" from magnet link
     pub(crate) magnet_name: Option<String>,
@@ -364,12 +366,13 @@ impl ManagedTorrent {
                     let t = t.clone();
                     let span = t.shared().span.clone();
                     let token = token.clone();
+                    let tasks = t.shared().tasks.clone();
 
                     spawn_with_cancel(
                         debug_span!(parent: span.clone(), "initialize_and_start"),
                         "initialize_and_start",
                         token.clone(),
-                        async move {
+                        tasks.track_future(async move {
                             let concurrent_init_semaphore =
                                 session.concurrent_initialize_semaphore.clone();
                             let _permit = concurrent_init_semaphore
@@ -408,7 +411,7 @@ impl ManagedTorrent {
                                     Err(result)
                                 }
                             }
-                        },
+                        }),
                     );
                     Ok(())
                 }
@@ -657,12 +660,13 @@ fn spawn_fatal_errors_receiver(
     let span = state.shared.span.clone();
     let id = state.shared.id;
     let info_hash = state.shared.info_hash;
+    let tasks = state.shared.tasks.clone();
     let state = Arc::downgrade(state);
     spawn_with_cancel::<&'static str>(
         debug_span!(parent: span, "fatal_errors_receiver"),
         "fatal_errors_receiver",
         token,
-        async move {
+        tasks.track_future(async move {
             let e = match rx.await {
                 Ok(e) => e,
                 Err(_) => return Ok(()),
@@ -677,7 +681,7 @@ fn spawn_fatal_errors_receiver(
                 );
             }
             Ok(())
-        },
+        }),
     );
 }
 
