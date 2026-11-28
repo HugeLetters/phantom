@@ -10,7 +10,7 @@
 //! placeholder doesn't fit whole, a shorter one shows.
 
 use client::display;
-use rune::{El, FileDialogOptions, Tx, el, row};
+use rune::{El, FileDialogOptions, Tx, row};
 
 use crate::commands::InApp;
 use crate::model::{AddNote, Phantom, add_files, link_problem, submit_url};
@@ -87,10 +87,8 @@ pub fn toolbar(s: &Phantom, ui: &Ui, band: Band, overlays: &mut Vec<El>) -> El {
     let note = s.add_note.as_ref().filter(|n| n.text == s.magnet.text);
     let close = |s: &mut Phantom| s.add_note = None;
     let add = ui.note("add-note", add, note.map_or("", |n| &n.message), note.is_some(), close, overlays);
-    // While an add sent by Add is on its way, a marker beside it: when it goes, the field takes
-    // the focus if it's still on Add (or nowhere, Add being off), and from nobody else.
-    let marker = s.refocus_link.then(|| el().key("add-marker").w(0.0).h(0.0).focus_return("magnet-field"));
-    let add = row().key("add-focus").children([add]).children(marker);
+    // Where the focus a click on Add leaves is looked for once its add lands (`refocus_link`).
+    let add = row().key("add-focus").children([add]);
     let add_file = ui
         .button(InApp::AddFile.spec().id, InApp::AddFile.spec().name)
         .on_press_tx(add_torrent_file)
