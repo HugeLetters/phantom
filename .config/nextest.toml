@@ -10,7 +10,7 @@ experimental = ["wrapper-scripts"]
 [profile.default]
 default-filter = 'not binary(appkit)'
 retries = 1
-# Most tests wait more than they compute (every engine's stop alone waits librqbit's 1 s): more
+# Most tests wait more than they compute (an engine's start, checks and stop): more
 # run at once than there are cores. The GUI's compute, so `cpu` holds them to the cores.
 test-threads = 24
 slow-timeout = { period = "20s", terminate-after = 15 }
