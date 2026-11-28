@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["proto", "machine", "lifecycle", "client", "service", "cli", "gui", "cases"]
+# Patched copies of dependencies (see `[patch.crates-io]`): built as dependencies, not members, so
+# they keep the dependencies' profile and their tests and lints stay out of ours.
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.1.0"
@@ -27,6 +30,9 @@ naga = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c844
 accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
 accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
 accesskit_atspi_common = { git = "https://github.com/anomalyco/rune", rev = "2f15e4a906489e6d6c84498fd1c01d819132466e" }
+# librqbit 9.1.0 as published, plus one fix: `Session::stop` waits for the tasks it cancelled
+# instead of sleeping a fixed second (`vendor/librqbit/README.phantom.md`).
+librqbit = { path = "vendor/librqbit" }
 
 # No debug info for dependencies: it was most of `target/`, and we don't step into them. Our own
 # crates keep it. To debug into a dependency, build with
