@@ -89,10 +89,10 @@ pub fn details_pane(s: &Phantom, ui: &Ui, t: &TorrentInfo, shape: Shape) -> El {
 
     // The name, shortened in the middle to what the right side leaves; its hover is the whole of
     // it where it was cut, and after a Rename the original name under it, with no label (#331). rune's tooltip is one plain
-    // text, so it isn't muted.
+    // text, so it isn't muted. A renamed name shown whole says nothing the heading doesn't: its hover is the original alone.
     let name_hover = |shown: &str| {
         let mut lines = Vec::new();
-        if shown != name || t.original_name.is_some() {
+        if shown != name {
             lines.push(name.to_owned());
         }
         lines.extend(t.original_name.as_deref().map(str::to_owned));
