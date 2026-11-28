@@ -31,14 +31,19 @@ use std::ffi::CStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use proto::{AbsolutePath, Needs, TorrentId, Volume};
 use tokio::sync::watch as channel;
 
 /// How long a look at a destination may take before its disk is taken to be stalled.
 pub const STALLED_AFTER: Duration = Duration::from_secs(2);
+
+/// How long Finder's figures for a disk are kept before it's asked again: its query walks every
+/// volume through IOKit (about 9 ms of CPU a call), and a look is made every [`super::POLL_EVERY`].
+/// `statfs`, which is cheap, is read at every look.
+pub const FINDER_KEPT: Duration = Duration::from_secs(3);
 
 /// A folder's disk: where it's mounted, what Finder calls it and what's free there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +148,67 @@ pub fn name(finder: Option<String>, mount: &Path) -> String {
     finder.filter(|n| !n.is_empty()).unwrap_or_else(|| mount.file_name().unwrap_or(mount.as_os_str()).to_string_lossy().into_owned())
 }
 
+/// Which disk Finder's figures are of: `statfs`'s file system id and mount.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DiskKey {
+    fsid: [i32; 2],
+    mount: PathBuf,
+}
+
+/// Finder's figures per disk, each kept for [`FINDER_KEPT`]: destinations on one disk share an
+/// entry. [`Cache::refresh`] forgets them all, for the moments a figure must be fresh.
+pub struct Cache {
+    kept: Duration,
+    state: Mutex<CacheState>,
+}
+
+#[derive(Default)]
+struct CacheState {
+    entries: std::collections::HashMap<DiskKey, (Instant, Finder)>,
+    /// Counts refreshes: an answer that was being asked for across one is stale, and isn't kept.
+    generation: u64,
+}
+
+impl Cache {
+    pub fn new(kept: Duration) -> Self {
+        Self { kept, state: Mutex::default() }
+    }
+
+    /// Finder's figures for `key`'s disk at `now`: the kept ones, else `ask`'s, which is called
+    /// with no lock held (it may hang on a volume that stops answering).
+    fn get(&self, key: DiskKey, now: Instant, ask: impl FnOnce() -> Finder) -> Finder {
+        let generation = {
+            let state = self.state.lock().unwrap();
+            if let Some((at, finder)) = state.entries.get(&key)
+                && now.saturating_duration_since(*at) < self.kept
+            {
+                return finder.clone();
+            }
+            state.generation
+        };
+        let finder = ask();
+        let mut state = self.state.lock().unwrap();
+        if state.generation == generation {
+            state.entries.insert(key, (now, finder.clone()));
+        }
+        finder
+    }
+
+    /// Forgets every disk's figures: the next look asks again. For a full disk, a disk that went or
+    /// came back, and a check the user asked for.
+    pub fn refresh(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.entries.clear();
+        state.generation += 1;
+    }
+}
+
+/// The service's cache, shared by every look.
+pub fn cache() -> &'static Cache {
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    CACHE.get_or_init(|| Cache::new(FINDER_KEPT))
+}
+
 /// Finder's figures for the volume `folder` is on (a call into Foundation: it may block like
 /// `statfs` does, so it's only made from a look's own thread).
 pub fn finder(folder: &Path) -> Finder {
@@ -179,7 +245,9 @@ pub fn disk(folder: &Path) -> Option<Disk> {
     // SAFETY: statfs fills `f_mntonname` with a NUL-terminated path.
     let mount = unsafe { CStr::from_ptr(fs.f_mntonname.as_ptr()) };
     let mount = AbsolutePath::new(PathBuf::from(std::ffi::OsStr::from_bytes(mount.to_bytes()))).ok()?;
-    let finder = finder(folder);
+    // SAFETY: `fsid_t` is two `i32`s.
+    let key = DiskKey { fsid: unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(fs.f_fsid) }, mount: mount.as_ref().to_path_buf() };
+    let finder = cache().get(key, Instant::now(), || finder(folder));
     let name = name(finder.name, mount.as_ref());
     Some(Disk { mount, name, free_bytes: free_bytes(finder.free_bytes, fs.f_bavail * u64::from(fs.f_bsize)) })
 }
@@ -345,6 +413,53 @@ mod tests {
         assert!(found.name.is_some_and(|n| !n.is_empty()), "a volume name");
         let disk = disk(dir.path()).unwrap();
         assert!(disk.free_bytes > 0 && !disk.name.is_empty());
+    }
+
+    fn key(n: i32) -> DiskKey {
+        DiskKey { fsid: [n, 0], mount: PathBuf::from(format!("/m{n}")) }
+    }
+
+    fn figures(free: u64) -> Finder {
+        Finder { free_bytes: Some(free), name: None }
+    }
+
+    /// A disk is asked of once within the time it's kept, by any of its destinations, and again
+    /// after; another disk has its own entry.
+    #[test]
+    fn a_disk_is_asked_once_in_3_s_and_again_after() {
+        let cache = Cache::new(FINDER_KEPT);
+        let asked = std::cell::Cell::new(0u64);
+        let ask = |free| {
+            asked.set(asked.get() + 1);
+            figures(free)
+        };
+        let t0 = Instant::now();
+        assert_eq!(cache.get(key(1), t0, || ask(10)), figures(10));
+        assert_eq!(cache.get(key(1), t0 + Duration::from_millis(2999), || ask(20)), figures(10));
+        assert_eq!(asked.get(), 1);
+        assert_eq!(cache.get(key(2), t0, || ask(30)), figures(30), "another disk has its own entry");
+        assert_eq!(cache.get(key(1), t0 + FINDER_KEPT, || ask(40)), figures(40));
+        assert_eq!(asked.get(), 3);
+    }
+
+    /// A full disk, a disk that went or came back, and a user's check refresh: the next look asks
+    /// again, and an answer that was being asked for across one isn't kept.
+    #[test]
+    fn a_refresh_makes_the_next_look_ask_again() {
+        let cache = Cache::new(FINDER_KEPT);
+        let t0 = Instant::now();
+        cache.get(key(1), t0, || figures(10));
+        cache.refresh();
+        assert_eq!(cache.get(key(1), t0, || figures(20)), figures(20));
+        // Asked across a refresh: returned, not kept.
+        assert_eq!(
+            cache.get(key(1), t0 + FINDER_KEPT, || {
+                cache.refresh();
+                figures(30)
+            }),
+            figures(30)
+        );
+        assert_eq!(cache.get(key(1), t0 + FINDER_KEPT, || figures(40)), figures(40));
     }
 
     /// statfs itself, which can't be generated: a temp folder is on a disk whose mount is on that

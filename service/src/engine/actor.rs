@@ -229,6 +229,8 @@ pub(super) struct Actor {
     /// The bytes allocated to each file of a torrent that counts on its disk, as the last look
     /// found them; a file not looked at yet isn't here.
     allocated: BTreeMap<PathBuf, u64>,
+    /// The torrents librqbit last said had run out of space.
+    full: BTreeSet<TorrentId>,
     /// The destinations and files to look at, for `space::watch`.
     space: watch::Sender<space::Wanted>,
     /// The default destination, for `default_folder::watch`.
@@ -487,6 +489,7 @@ impl Actor {
             disks: BTreeMap::new(),
             allocated: BTreeMap::new(),
             space,
+            full: BTreeSet::new(),
             default_folder,
             gone_looks,
             default_unavailable: None,
@@ -779,11 +782,17 @@ impl Actor {
             space::Found::Read(reading) => {
                 match reading.disk {
                     Some(disk) => {
+                        if !self.disks.contains_key(&report.destination) {
+                            // Back (or new): a figure kept from before may be another drive's.
+                            space::cache().refresh();
+                        }
                         let known = space::Known { mount: disk.mount, name: disk.name, free_bytes: Some(disk.free_bytes) };
                         self.disks.insert(report.destination, known);
                     }
                     None => {
-                        self.disks.remove(&report.destination);
+                        if self.disks.remove(&report.destination).is_some() {
+                            space::cache().refresh();
+                        }
                     }
                 }
                 self.allocated.extend(reading.allocated);
@@ -1446,6 +1455,10 @@ impl Actor {
         self.poll_torrent(id).await;
         self.size_check(id).await;
         self.event(id, Event::Command(command.action())).await?;
+        if matches!(command, TorrentCommand::Check) {
+            // The user asked: what's free is read afresh at the next look.
+            space::cache().refresh();
+        }
         match command {
             TorrentCommand::Remove
             | TorrentCommand::Delete
@@ -1507,7 +1520,16 @@ impl Actor {
             true => Polled { file_progress: std::mem::take(&mut torrent.polled.file_progress), ..polled },
             false => polled,
         };
-        if let Err(e) = self.event(id, Event::Observed(librqbit_seen(&stats))).await {
+        let seen = librqbit_seen(&stats);
+        // A torrent that has just run out of space: its disk's free space is read afresh (once, not
+        // at every poll of a torrent that stays failed).
+        let full = matches!(seen, Observation::Failed(Broke::DiskFull));
+        if full && self.full.insert(id) {
+            space::cache().refresh();
+        } else if !full {
+            self.full.remove(&id);
+        }
+        if let Err(e) = self.event(id, Event::Observed(seen)).await {
             warn!(id, error = ?e, "failed to follow librqbit");
         }
         self.meter(id, &handle).await;

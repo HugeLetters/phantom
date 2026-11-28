@@ -2672,6 +2672,8 @@ fn the_free_space_shown_follows_writes_and_deletes_on_the_disk() {
                             }
                         }
                     }
+                    // Free space is kept per disk for 3 s: the write's effect is asked for at once.
+                    super::space::cache().refresh();
                     let close = |shown: Option<Option<u64>>| shown.flatten().is_some_and(|free| free.abs_diff(disk.free()) < 512 << 10);
                     let followed = eventually(5, || close(free_for(&engine, id))).await;
                     prop_assert!(followed, "after {:?}: shown {:?}, statfs {}", write, free_for(&engine, id), disk.free());

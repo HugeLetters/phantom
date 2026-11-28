@@ -406,7 +406,10 @@ fn not_moved(e: &std::io::Error, to: &Path, at: &Path) -> NotMoved {
         return NotMoved::Unavailable { reason };
     }
     match (e.raw_os_error(), e.kind()) {
-        (Some(libc::ENOSPC), _) => NotMoved::DiskFull,
+        (Some(libc::ENOSPC), _) => {
+            super::space::cache().refresh();
+            NotMoved::DiskFull
+        }
         (Some(libc::EACCES | libc::EPERM | libc::EROFS), _) => match AbsolutePath::new(to) {
             Ok(path) => NotMoved::Unavailable { reason: Unavailable::NoPermission { path } },
             Err(_) => NotMoved::Failed { detail: e.to_string() },
