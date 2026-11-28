@@ -250,6 +250,9 @@ pub(super) struct Actor {
     /// The steps held, by step and torrent, while librqbit reads the pieces it saved of their torrent
     /// ([`lib::Lib::Resuming`]): started once it's done (`steps.rs`).
     held: BTreeSet<(u64, TorrentId)>,
+    /// How many of the next grants find a file busy, as on a loaded machine, for tests.
+    #[cfg(test)]
+    pub(super) busy_grants: u32,
     /// A test's hook, run as a Move to Trash has polled its torrent, before it sets the files Off.
     #[cfg(test)]
     pub(super) before_off: Option<Box<dyn FnMut(&mut Actor) + Send + Sync>>,
@@ -492,6 +495,8 @@ impl Actor {
             putting_back: JoinSet::new(),
             resumed: BTreeSet::new(),
             held: BTreeSet::new(),
+            #[cfg(test)]
+            busy_grants: 0,
             #[cfg(test)]
             before_off: None,
             interrupted_deletes: ended,
@@ -1128,6 +1133,12 @@ impl Actor {
         let destination = torrent.record.destination.to_path_buf();
         let granting = Granting::of(info, handle.stats().file_progress, destination.clone());
         let (trashed, hash, files) = (self.guard.trashed().clone(), torrent.record.info_hash.clone(), files.clone());
+        // Refused as busy, without a look, as a file held past `slots::BUSY_FOR` is (#468).
+        #[cfg(test)]
+        if self.busy_grants > 0 {
+            self.busy_grants -= 1;
+            return Ok(false);
+        }
         let refused = tokio::task::spawn_blocking(move || trashed.grant(&hash, &granting, &files))
             .await
             .map_err(|e| anyhow!("granting its files: {e}"))?;
